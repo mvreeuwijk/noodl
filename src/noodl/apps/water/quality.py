@@ -6,7 +6,7 @@ directions are taken (`flowdirchanged`), a chain is reversed when its flow chang
 (`reversesegs`) and the nodes are sorted from upstream to downstream (`sortnodes`,
 `selectnonstacknode`); then every quality step walks the nodes in that order (`transport`),
 taking each link's inflow from its leading segments (`evalnodeinflow`), mixing it at the
-node (`findnodequal`, a tank by its mixing model `tankmix1`) and releasing the node's water
+node (`findnodequal`, a tank by its mixing model, `quality_tanks`) and releasing the node's water
 into its outflow links, merged into their last segment when within `Ctol` of it
 (`evalnodeoutflow`). `QualityRouter` is that procedure; `water_run(quality=True)` drives it
 after every solve with that solve's flows, link states and delivered demands (EPANET's
@@ -50,6 +50,7 @@ from noodl.apps.water.quality_react import (
     wall_coefficients,
     wall_rate,
 )
+from noodl.apps.water.quality_tanks import detached, initial_segments, mix_tank
 from noodl.apps.water.units import M_PER_FT, Q_STAGNANT_CFS, rounded_cfs_per_m3s
 
 Tensor = torch.Tensor
@@ -63,9 +64,7 @@ TRACE_QUALITY = 100.0
 _M3_PER_FT3 = 0.3048**3
 
 
-def _value(x) -> float:
-    """A decision's operand, detached: `x` as a Python float (Ruling Q5)."""
-    return float(x.detach()) if isinstance(x, Tensor) else float(x)
+_value = detached      # a decision's operand: `x` as a detached Python float (Ruling Q5)
 
 
 def flow_volume_scale(flow_units: str | None) -> float:
@@ -323,8 +322,8 @@ def _interp(points, x):
 
 
 def _refuse_later_features(net, quality: WaterQuality) -> None:
-    """The features of later tasks, refused by name until they are modelled, and the
-    reaction orders EPANET itself has no finite answer for (Ruling Q20)."""
+    """The reaction orders EPANET itself has no finite answer for, refused by name
+    (Ruling Q20)."""
     if quality.mode == "CHEMICAL":
         for which, order in (("BULK", quality.bulk_order), ("TANK", quality.tank_order)):
             if 0.0 < order < 1.0:
@@ -334,11 +333,6 @@ def _refuse_later_features(net, quality: WaterQuality) -> None:
                     f"concentration and returns NaN (inf with a limiting potential), so "
                     f"there is no finite answer to reproduce; use an order of 0, 1 or "
                     f"more, or a negative (Michaelis-Menten) order")
-    for tank in net.tanks:
-        model, _ = quality.mixing.get(tank.name, ("MIXED", 1.0))
-        if model != "MIXED":
-            raise ValueError(f"quality: [MIXING] {tank.name} {model}: tank mixing models "
-                             f"other than MIXED are not yet modelled")
 
 
 class QualityRouter:
@@ -445,9 +439,15 @@ class QualityRouter:
             levels = [tank.init_level for tank in net.tanks]
         else:
             levels = list(levels.unbind()) if attached else levels.detach().tolist()
+        self.tank_mix: list[tuple[str, float]] = []
         for i, tank in enumerate(net.tanks):
-            self.pool.add(n_links + i, _tank_volume(net, tank, levels[i]),
-                          c0[node_index[tank.name]])
+            model, fraction = quality.mixing.get(tank.name, ("MIXED", 1.0))
+            # `V1max = fraction x Vmax` (`input1.c`, `convertunits`), Vmax the volume at the
+            # maximum level (the curve there, or `Vmin + A (max - min)`)
+            vmz = fraction * _value(_tank_volume(net, tank, tank.max_level))
+            self.tank_mix.append((model, vmz))
+            initial_segments(self.pool, n_links + i, model, _tank_volume(net, tank, levels[i]),
+                             c0[node_index[tank.name]], vmz)
         self.pool.close()
 
         self._init_reactions(net, quality, inputs, attached)
@@ -803,7 +803,7 @@ class QualityRouter:
         its volume, the volume diluted by a negative demand (`volin -= MIN(0, demand)
         dt`); with no inflow it keeps its quality, or, for a reactive substance, takes its
         links' adjoining segments' mean (`noflowqual`). A tank mixes its inflow by its model
-        (`mixtank`; MIXED: `tankmix1`). A reservoir keeps its quality. In TRACE the trace
+        (`mixtank`: `quality_tanks`). A reservoir keeps its quality. In TRACE the trace
         node holds 100 (`SourceQual` 100 at a reservoir, else `max(100 - quality, 0)`).
         An external source adds its concentration (`findsourcequal`, CHEMICAL only): onto a
         junction's quality, onto a tank's outflow only, and in place of a reservoir's (which
@@ -852,20 +852,11 @@ class QualityRouter:
         return total / count if count else 0.0
 
     def _mix_tank(self, i: int, vin, win, vnet):
-        """`mixtank` and `tankmix1` (`qualreact.c`), a completely mixed tank: its segment's
-        quality `(c v + win) / (v + vin)` when `v + vin > 0`, its volume `max(0, v +
-        vnet)`; the tank's quality is its segment's (unchanged without one)."""
-        pool = self.pool
-        seg = pool.first[self.n_links + i]
-        if seg >= 0:
-            cs, vs = pool.cs, pool.vs
-            vnew = vs[seg] + vin
-            if _value(vnew) > 0.0:
-                cs[seg] = (cs[seg] * vs[seg] + win) / vnew
-            vs[seg] = vs[seg] + vnet
-            if _value(vs[seg]) < 0.0:          # MAX(0.0, seg->v)
-                vs[seg] = 0.0
-            self.tank_c[i] = cs[seg]
+        """`mixtank` (`qualreact.c`) for tank `i` by its `[MIXING]` model
+        (`quality_tanks.mix_tank`); the tank's quality is kept in `tank_c` (`Stank.C`)."""
+        model, vmz = self.tank_mix[i]
+        self.tank_c[i] = mix_tank(self.pool, self.n_links + i, model, vmz, self.ctol, vin,
+                                  win, vnet, self.tank_c[i])
         return self.tank_c[i]
 
     def _outflow(self, k: int, c, dt: int) -> None:

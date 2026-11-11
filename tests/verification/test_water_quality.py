@@ -863,3 +863,143 @@ def test_the_mass_balance_reader_takes_non_finite_terms():
     assert math.isnan(terms["ratio"])
     assert terms["inflow"] == math.inf and terms["outflow"] == -math.inf
     assert terms["final"] == 12.345
+
+
+# ---- tank mixing models (Task 6) --------------------------------------------------------------
+
+def _mixing(name: str, line: str, *, replace=(), add=None) -> Callable[[Path], Path]:
+    """The base with `T1`'s `[MIXING]` line replaced by `line`, `replace` and `add` too."""
+    def case(tmp_path: Path) -> Path:
+        return edited(BASE, tmp_path, f"mixing_{name}.inp",
+                      replace=[(" T1   MIXED", line), *replace], add=add)
+    return case
+
+
+#: A small `T1` (8 m wide, filling from 1 m: 50 m3 at 2 mg/L, a segment of its own) fed by a
+#: reservoir whose chemical alternates hourly between 0.2 and 1.0 mg/L (`R1`'s CONCEN source
+#: and its pattern `ALT`): the tank takes in one segment per quality step (FIFO, LIFO: the
+#: inflow differs by far more than `Ctol`) and gives back more than its initial volume from
+#: 8 h, through several of them.
+_SMALL_TANK = (" T1   80    5          0.5       10        12        0",
+               " T1   80    1          0.5       10        8         0")
+_ALTERNATING = {"SOURCES": [" R1 CONCEN 1.0 ALT"], "QUALITY": [" T1 2.0"],
+                "PATTERNS": [" ALT 0.2 1.0 0.2 1.0 0.2 1.0 0.2 1.0"] * 3}
+
+for _model, _line in (("mixed", " T1   MIXED"), ("2comp", " T1   2COMP 0.4"),
+                      ("fifo", " T1   FIFO"), ("lifo", " T1   LIFO")):
+    QUALITY_CASES[f"mixing_{_model}"] = _mixing(_model, _line)
+#: `V1max` = 0.65 x `Vmax` is a level of 6.5 m: `T1` (5 m at the start, 8.9 m at the end,
+#: down to 6.34 m between 8 h and 16 h) crosses it upwards, downwards and upwards again.
+QUALITY_CASES["mixing_2comp_crossing"] = _mixing("2comp_crossing", " T1   2COMP 0.65")
+QUALITY_CASES["mixing_fifo_segments"] = _mixing(
+    "fifo_segments", " T1   FIFO", replace=[_SMALL_TANK], add=_ALTERNATING)
+QUALITY_CASES["mixing_lifo_segments"] = _mixing(
+    "lifo_segments", " T1   LIFO", replace=[_SMALL_TANK], add=_ALTERNATING)
+#: `P6` closed from 3 h to 5 h (flow 0, `vnet == 0`) while the 2COMP stagnant zone holds
+#: 1 m of water (fraction 0.4: `V1max` is 4 m, the tank is at 6 m).
+QUALITY_CASES["mixing_2comp_no_flow"] = _mixing(
+    "2comp_no_flow", " T1   2COMP 0.4",
+    add={"CONTROLS": [" LINK P6 CLOSED AT TIME 3", " LINK P6 OPEN AT TIME 5"]})
+
+
+@pytest.mark.parametrize("model", ["mixed", "2comp", "fifo", "lifo"])
+def test_mixing_model_matches_epanet(tmp_path, model):
+    """`T1` under each `[MIXING]` model (2COMP with fraction 0.4) in the base network, the
+    reservoir's 1 mg/L filling a tank that starts at 0: node and link qualities match EPANET's
+    by the spec's bounds (`_matches`; `P7`'s residual admitted, `_residual_admitted`). The
+    models give different tanks (each differs from MIXED's by more than 1e-3 mg/L)."""
+    results, *_ = _matches(tmp_path, f"mixing_{model}")
+    mixed, *_ = _compare(tmp_path, "mixing_mixed")
+    if model != "mixed":
+        assert float((_quality(results, "T1") - _quality(mixed, "T1")).abs().max()) > 1e-3
+
+
+def test_a_2comp_tank_crossing_v1max_matches_epanet(tmp_path):
+    """`V1max` at 6.5 m of `T1` (fraction 0.65): noodl's own `T1` level crosses it upwards,
+    downwards and upwards again (the mixing zone fills and spills into the stagnant one, the
+    stagnant one is drawn on as the tank empties); qualities match EPANET's."""
+    results, *_ = _matches(tmp_path, "mixing_2comp_crossing")
+    side = torch.sign(results.tank_level[:, 0] - 6.5)
+    assert bool((side != 0).all())
+    assert int((side[1:] > side[:-1]).sum()) >= 2 and int((side[1:] < side[:-1]).sum()) >= 1
+
+
+def _drain_points(tmp_path: Path, model: str):
+    """`mixing_{model}_segments` run by noodl and EPANET and compared; the points beyond 1e-5
+    of the scale admitted at `T1` and `P6` only, each within its measured cause.
+
+    CAUSE, a FRONT SHIFT. The edge of a segment reaches `P6` in one quality step. noodl's
+    hydraulics and EPANET's differ by up to 2e-8 m3/s in `P6` (the base's measured 1.2e-8 and
+    the float32 read-back), so by `dV = sum |dq| dt` over the drain so far (up to 4e-4 m3), and
+    the edge falls that much earlier or later: that step's quality moves by at most the whole
+    jump (`scale`) times `dV` over the volume of the step's outflow, `|q| Qstep` (1.5 m3).
+    Not a flipped merge: noodl at `Tolerance` 0.01001 and 0.00999 (the other sides of every
+    `fabs(seg->c - cin) < Ctol` near 0.01; checked by hand) leaves these points as they are."""
+    path = QUALITY_CASES[f"mixing_{model}_segments"](tmp_path)
+    results, diagnostics = run_quality(path)
+    reference = epanet_quality(path)
+    ours = diagnostics["quality"][0]
+    names = list(diagnostics["node_names"]) + list(diagnostics["link_names"])
+    rows = [round(t) for t in ours["times"]]
+    scale = max(float(reference.node.abs().max()), float(reference.link.abs().max()))
+    hydraulics = epanet_hydraulics(path)
+    p6 = hydraulics["link_names"].index("P6")
+    qstep = read_epanet_inp(path).quality.quality_timestep
+    hours = [int(t) for t in results.time.tolist()]       # noodl's solves, EPANET's rows
+    theirs_q = hydraulics["flow"][[hydraulics["times"].index(h) for h in hours], p6]
+    ours_q = results.flow[:, results.link_names.index("P6")]
+    dq = (ours_q - theirs_q).abs() * torch.tensor(
+        [b - a for a, b in zip(hours, hours[1:] + [hours[-1]], strict=True)], dtype=F64)
+    beyond = []
+    for t in reference.times:
+        mine = torch.tensor(ours["node_quality"][rows.index(t)]
+                            + ours["link_quality"][rows.index(t)], dtype=F64)
+        row = reference.times.index(t)
+        theirs = torch.cat([
+            reference.node[row][[reference.node_names.index(n)
+                                 for n in diagnostics["node_names"]]],
+            reference.link[row][[reference.link_names.index(n)
+                                 for n in diagnostics["link_names"]]]])
+        error = (mine - theirs).abs()
+        for column in error.gt(1e-5 * scale).nonzero().flatten().tolist():
+            beyond.append((t, names[column]))
+            assert names[column] in ("T1", "P6"), (t, names[column], float(error[column]))
+            moved = float(dq[:sum(1 for h in hours if h < t)].sum())
+            flow = abs(float(theirs_q[max(i for i, h in enumerate(hours) if h <= t)]))
+            assert float(error[column]) <= scale * moved / (flow * qstep), (
+                t, names[column], float(error[column]))
+    assert_matches_epanet(diagnostics, reference, ctol=0.01, admitted=beyond)
+    return diagnostics, beyond
+
+
+@pytest.mark.parametrize("model", ["fifo", "lifo"])
+def test_fifo_and_lifo_tanks_emptying_through_several_segments_match_epanet(tmp_path, model):
+    """A small `T1` (`_SMALL_TANK`) fed alternating 0.2 and 1.0 mg/L: its chain
+    (`diagnostics["quality"][0]["segments"]`, the count after every quality step, the tanks'
+    after the links') holds at least three segments and gives most of them up while the tank
+    drains (FIFO from the front, LIFO from the back: at least five fewer between 8 h and 16 h),
+    and the qualities match EPANET's by the spec's bounds; every point beyond 1e-5 of the scale
+    has its measured cause (`_drain_points`: the sharp edge of a segment). MEASURED beyond
+    1e-5 of the scale (2e-5): FIFO 4.4e-5 mg/L (P6, 11 h); LIFO 4.2e-5 (P6, 15 h), 3.4e-5
+    (T1, 16 h)."""
+    diagnostics, beyond = _drain_points(tmp_path, model)
+    chain = len(diagnostics["link_names"])
+    counts = [c[chain] for c in diagnostics["quality"][0]["segments"]]
+    assert max(counts) >= 3
+    drain = counts[8 * 12:16 * 12]                  # 8 h to 16 h: `P6` carries T1's water out
+    assert drain[0] - min(drain) >= 5
+
+
+def test_a_2comp_tank_without_net_flow_matches_epanet(tmp_path):
+    """Time controls close `P6` from 3 h to 5 h: EPANET's `P6` flow is 0 there, `vnet == 0`,
+    so `tankmix2` sets the stagnant volume to 0 (`vt == 0`) and the stagnant zone's water is
+    lost to the mixing zone's accounting; noodl does the same (qualities match EPANET's) and
+    the run differs from the same tank left open."""
+    path = QUALITY_CASES["mixing_2comp_no_flow"](tmp_path)
+    hydraulics = epanet_hydraulics(path)
+    p6 = hydraulics["flow"][:, hydraulics["link_names"].index("P6")]
+    closed = [i for i, t in enumerate(hydraulics["times"]) if 3 * 3600 <= t < 5 * 3600]
+    assert closed and bool((p6[closed] == 0.0).all())
+    results, *_ = _matches(tmp_path, "mixing_2comp_no_flow")
+    open_, *_ = _compare(tmp_path, "mixing_2comp")
+    assert float((_quality(results, "T1") - _quality(open_, "T1")).abs().max()) > 1e-4

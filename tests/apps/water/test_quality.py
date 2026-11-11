@@ -192,13 +192,27 @@ def test_an_attached_run_equals_a_detached_run():
     assert leaf.grad is not None and float(leaf.grad.abs().sum()) > 0
 
 
-@pytest.mark.parametrize("change, match", [
-    (dict(mixing={"T1": ("FIFO", 1.0)}), "MIXING"),
-])
-def test_features_of_later_tasks_are_refused_by_name(change, match):
-    model, _, _ = build_model(_base(**change))
-    with pytest.raises(ValueError, match=match):
-        water_run(model, duration=3600, quality=True)
+@pytest.mark.parametrize("model_name", ["MIXED", "2COMP", "FIFO", "LIFO"])
+def test_every_mixing_model_runs_and_carries_a_gradient(model_name):
+    """`[MIXING]` is no longer refused: each model runs a detached and an attached run to
+    the same qualities, bit for bit, and the attached run's `T1` quality at 3 h has a
+    gradient back to the initial qualities (volumes and concentrations keep their graph,
+    Ruling Q5)."""
+    net = _base(mixing={"T1": (model_name, 0.4)})
+    model, _, _ = build_model(net)
+    initial = torch.zeros(len(model.node_names), dtype=F64)
+    initial[model.node_names.index("R1")] = 1.0
+    initial[model.node_names.index("T1")] = 0.3
+    runs = []
+    for grad in (False, True):
+        state = initial_state(model)
+        state["quality.initial"] = initial.clone().requires_grad_(grad)
+        runs.append((water_run(model, state, duration=3 * 3600, quality=True),
+                     state["quality.initial"]))
+    (detached, _), (attached, leaf) = runs
+    assert torch.equal(detached.node_quality, attached.node_quality.detach())
+    attached.node_quality[-1, model.node_names.index("T1")].backward()
+    assert leaf.grad is not None and float(leaf.grad.abs().sum()) > 0
 
 
 # ---- sources (`findsourcequal`, `sourcequal`; `quality.c`) ------------------------------------
