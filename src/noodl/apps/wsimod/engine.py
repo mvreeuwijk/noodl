@@ -42,7 +42,21 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``"leakage_not_going_to_gw"``); a ``River``'s ``node:N/pull_check_river/{mrf,clip}``
   (the ``max(.., 0)`` against the minimum residual flow and the clip to the request); a
   ``QueueGroundwater``'s frozen push-check tank (``storage.py:71``) is
-  ``node:N/check_tank/get_excess/{headroom,clip}``. Later classes extend the same pattern.
+  ``node:N/check_tank/get_excess/{headroom,clip}``. A ``Sewer`` adds
+  ``node:N/push_check_sewer/clip`` and ``node:N/make_discharge/ponded`` (``sewer.py:160``,
+  ``:235``; its tank is ``sewer_tank``). The treatment works add
+  ``node:N/get_excess_throughput/headroom``,
+  ``node:N/treat_current_input/liquor_zero_denominator`` (``wtw.py:155-161``, ``:174-182``);
+  a ``WWTW``'s ``node:N/calculate_discharge/{stormwater,spare,clip}``,
+  ``node:N/make_discharge/rejected``, ``node:N/push_check_sewer/clip``,
+  ``node:N/push_set_sewer/{direct,all_direct,below_fa}`` and ``node:N/pull_set_reuse/clip``
+  (``:331-334``, ``:347``, ``:370``, ``:388-403``, ``:421``; its tank is ``stormwater_tank``);
+  an ``FWTW``'s ``node:N/treat_water/{target,deficit}`` (``:578-588``; its tank is
+  ``service_reservoir_tank``). Their events are ``"miscalculated_tank_storage"`` and
+  ``"ponded_water_cant_reenter"`` (``sewer.py:230-239``), ``"more_treated_than_input"``,
+  ``"wwtw_couldnt_push"``, ``"service_reservoirs_not_filled"``, ``"sludge_nowhere"``,
+  ``"excess_treated_water"`` (``wtw.py:213``, ``:349``, ``:598``, ``:610``, ``:616``) and noodl's
+  ``"wtw_liquor_zero_denominator"``. Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every
@@ -233,7 +247,9 @@ def _register_all() -> None:
     """Import every module that registers node classes."""
     import noodl.apps.wsimod.catchment  # noqa: F401
     import noodl.apps.wsimod.demand  # noqa: F401
+    import noodl.apps.wsimod.sewer  # noqa: F401
     import noodl.apps.wsimod.storage  # noqa: F401
+    import noodl.apps.wsimod.wtw  # noqa: F401
 
 
 class Engine:

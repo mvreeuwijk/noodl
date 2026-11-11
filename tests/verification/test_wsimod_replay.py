@@ -273,3 +273,87 @@ def test_reservoir_spill_days_are_the_days_wsimod_printed_spill_at_reservoir():
         assert ours_end[day] > capacity and float(theirs_end[day]) > capacity
         assert ours_end[day] == float(theirs_end[day])
 
+
+def _printed_count(case: str, line: str) -> int:
+    spec = CASES[case]
+    return wsimod_reference(spec.build(), days=spec.days).printed.count(line)
+
+
+def test_the_sewer_and_works_cases_reach_the_branches_they_are_built_for():
+    # sewer_timearea: the sewer is reached through the Demand tag and the default tag, and its
+    # push check limits a sender on some days
+    sewer = captured("sewer_timearea")["sewer"]
+    tags = {c.tag for c in sewer if c.method == "push_set"}
+    assert tags == {"Demand", "default"}
+    checks = [c for c in sewer if c.method == "push_check" and c.vqip is not None]
+    assert any(c.reply["volume"] < c.vqip["volume"] for c in checks)
+    # foul_sewers: foul_main runs in the "Foul" slot, the trunk in the "Sewer" slot, and the
+    # trunk's queue holds water at its pipe time of 2
+    foul = captured("foul_sewers")
+    assert sum(c.method == "make_discharge" for c in foul["foul_main"]) == CASES["foul_sewers"].days
+    assert {c.tag for c in foul["trunk"] if c.method == "push_set"} == {"default"}
+    assert any(
+        c.post["sewer_tank.internal_arc.register"].get(2, {}).get("volume", 0) > 0
+        for c in foul["trunk"]
+    )
+    # groundwater_infiltrate: infiltration above and below the threshold, part sent back
+    gw = [c for c in captured("groundwater_infiltrate")["gw"] if c.method == "infiltrate"]
+    for_sewer = []
+    for c in gw:
+        infiltration = (max(c.pre["tank.storage"]["volume"] - 50.0, 0) * 0.05) ** 0.5
+        sent = sum(
+            a.vqip["volume"] - a.reply["volume"]
+            for a in c.arc_calls
+            if a.arc == "gw_to_sewer" and a.method == "send_push_request"
+        )
+        for_sewer.append((infiltration, sent))
+    assert any(0 < sent < infiltration for infiltration, sent in for_sewer)
+    assert any(infiltration == 0 for infiltration, _ in for_sewer)
+    # wwtw_storm_tank: the tank fills, drains into the spare throughput, and takes the forced
+    # rejection; the reuse demand pulls from the treated water
+    works = captured("wwtw_storm_tank")["works"]
+    storm = [c.post["stormwater_tank.storage"]["volume"] for c in works]
+    assert max(storm) > 30.0 and min(storm) == 0.0
+    drains = [
+        c
+        for c in works
+        if c.method == "calculate_discharge"
+        and c.post["stormwater_tank.storage"]["volume"] < c.pre["stormwater_tank.storage"]["volume"]
+    ]
+    assert drains
+    assert any(c.method == "pull_set" and c.reply["volume"] > 0 for c in works)
+    couldnt = _printed_count("wwtw_storm_tank", "WWTW couldnt push")
+    assert 0 < couldnt < CASES["wwtw_storm_tank"].days
+    # fwtw_deficit_sludge: deficits once the supply is dry, unpushed sludge once the sewer fills
+    plant = [c for c in captured("fwtw_deficit_sludge")["plant"] if c.method == "treat_water"]
+    deficits = [c.post["total_deficit"]["volume"] > 0 for c in plant]
+    assert any(deficits) and not all(deficits)
+    assert any(c.post["unpushed_sludge"]["volume"] > 0 for c in plant)
+
+
+def test_service_reservoir_shortfalls_and_unpushed_sludge_fall_on_the_days_wsimod_printed():
+    """D13: ``Service reservoirs not filled at <node> on <date>`` day by day against noodl's
+    ``"service_reservoirs_not_filled"``; the undated "nowhere for sludge to go" and "WWTW
+    couldnt push" by count."""
+    case = "fwtw_deficit_sludge"
+    ours = _noodl_event_days(case, "service_reservoirs_not_filled", "plant")
+    theirs = _printed_days(case, r"Service reservoirs not filled at plant on (.*)")
+    assert ours == theirs and 0 < len(theirs) < CASES[case].days
+    sludge = _noodl_event_days(case, "sludge_nowhere", "plant")
+    assert len(sludge) == _printed_count(case, "nowhere for sludge to go") > 0
+    couldnt = _noodl_event_days("wwtw_storm_tank", "wwtw_couldnt_push", "works")
+    assert len(couldnt) == _printed_count("wwtw_storm_tank", "WWTW couldnt push")
+
+
+def test_pipe_time_zero_water_leaves_the_sewer_the_day_it_arrives():
+    """Spec, Flushing a ``QueueTank`` on push: with ``pipe_time = 0`` each day's inflow is
+    discharged by the same day's ``make_discharge``, in WSIMOD and in noodl."""
+    spec = CASES["queue_tank_time_zero"]
+    reference = record_wsimod_run(wsimod_model(spec.build()), days=spec.days)
+    inflow = reference.arc_flow[:, reference.arc_names.index("basin_to_sewer")]
+    outflow = reference.arc_flow[:, reference.arc_names.index("sewer_to_sea")]
+    assert bool((inflow > 0).all()) and torch.equal(inflow, outflow)
+    network = read_wsimod_config(spec.build())
+    for day, _, engine in step_days(network, network.pollutants, spec.days):
+        ours_in = engine.arcs["basin_to_sewer"].flow_in
+        assert float(engine.arcs["sewer_to_sea"].flow_in) == float(ours_in) == float(inflow[day])

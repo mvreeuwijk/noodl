@@ -235,18 +235,28 @@ def _is_present(path: str) -> bool:
     return path.endswith("internal_arc.present")
 
 
+def _internal_arc(node: Node, path: str):
+    """The internal arc a ``<tank>.internal_arc.<store>`` path names (``tank``,
+    ``sewer_tank``, ...)."""
+    owner = node
+    for part in path.split(".")[:-1]:
+        owner = getattr(owner, part)
+    return owner
+
+
 def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
     """A captured store as the noodl tensor ``Node.load_stores`` takes. A ``QueueTank``'s queue
     is WSIMOD's ``{time: vqip}`` dict, captured under the ``register`` path, and its key list
     under the ``present`` path; a store that is a number is a scalar."""
+    if _is_register(path) or _is_present(path):
+        length = _internal_arc(node, path).length
     if _is_register(path):
-        length = node.tank.internal_arc.length
         rows = torch.zeros(length + 1, 1 + p.K, dtype=torch.float64)
         for time, vqip in value.items():
             rows[time] = to_vqip(p, vqip)
         return rows
     if _is_present(path):
-        mask = torch.zeros(node.tank.internal_arc.length + 1, dtype=torch.bool)
+        mask = torch.zeros(length + 1, dtype=torch.bool)
         mask[list(value)] = True
         return mask
     if isinstance(value, Mapping):

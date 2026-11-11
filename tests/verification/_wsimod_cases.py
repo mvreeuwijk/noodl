@@ -675,6 +675,276 @@ def _reservoir_spill() -> dict:
     )
 
 
+# --- sewers and treatment works (Task 11) ---------------------------------------------------
+def _neutral_wtw(*, percent_solids: float = 0.0002, liquor: float = 0.03, **values) -> dict:
+    """A treatment works' neutral process (spec, Pollutants in 3a): every additive pollutant
+    treated by ``c_v = 1 - percent_solids - liquor`` with exponent 1 and liquored at ``liquor``."""
+    c_v = 1 - percent_solids - liquor
+    additive = _POLLUTANTS["additive_pollutants"]
+    return {
+        "percent_solids": percent_solids,
+        "process_parameters": {p: {"constant": c_v, "exponent": 1} for p in additive},
+        "liquor_multiplier": {**{p: liquor for p in additive}, "volume": liquor},
+        **values,
+    }
+
+
+def _homes(name: str, days: int, seed: int) -> dict:
+    """A ``ResidentialDemand`` of 40 people at 0.15 a day (6 a day of foul water)."""
+    return _store(
+        name,
+        "ResidentialDemand",
+        population=40.0,
+        per_capita=0.15,
+        pollutant_load={"phosphate": 0.01, "ammonia": 0.05},
+        constant_temp=14.0,
+        constant_weighting=0.2,
+        data_input_dict=_temperatures(days, seed),
+    )
+
+
+def _sewer_timearea() -> dict:
+    """A sewer reached through the ``"Demand"`` tag (a ``ResidentialDemand``'s foul water, spread
+    over ``pipe_timearea``, ``sewer.py:178-199``) and the default tag (a catchment's water through
+    a node and a reservoir, entering at ``pipe_time``, ``:163-176``). Its outlet is narrower
+    than the inflow on wet days, so the sewer fills and its push check limits both senders."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(800.0)),
+            _homes("homes", days, 31),
+            _catchment("inflow", days, 32),
+            {"name": "junction", "type_": "Node"},
+            _store("basin", "Reservoir", capacity=30.0),
+            _store(
+                "sewer",
+                "Sewer",
+                capacity=25.0,
+                pipe_time=1,
+                pipe_timearea={0: 0.5, 1: 0.3, 2: 0.2},
+            ),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("supply_to_homes", "supply", "homes"),
+            _arc("homes_to_sewer", "homes", "sewer"),
+            _arc("inflow_to_junction", "inflow", "junction"),
+            _arc("junction_to_basin", "junction", "basin"),
+            _arc("basin_to_sewer", "basin", "sewer", capacity=20.0),
+            _arc("sewer_to_sea", "sewer", "sea", capacity=15.0),
+        ],
+        [
+            {"ResidentialDemand": "create_demand"},
+            {"Catchment": "route"},
+            {"Reservoir": "distribute"},
+            {"Sewer": "make_discharge"},
+        ],
+    )
+
+
+def _foul_sewers() -> dict:
+    """``foul_main`` (a name with "foul", so the ``"Foul"`` slot, ``model.py:658-660``) takes a
+    demand's foul water over its time-area diagram and passes it to ``trunk`` (the ``"Sewer"``
+    slot) through the default tag at ``trunk``'s pipe time of 2 days. The trunk's outlet takes
+    3 a day of the 6, so the trunk fills, then ``foul_main``, then the demand backs up."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(800.0)),
+            _homes("homes", days, 33),
+            _store("foul_main", "Sewer", capacity=10.0, pipe_timearea={0: 0.6, 1: 0.4}),
+            _store("trunk", "Sewer", capacity=8.0, pipe_time=2),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("supply_to_homes", "supply", "homes"),
+            _arc("homes_to_foul", "homes", "foul_main"),
+            _arc("foul_to_trunk", "foul_main", "trunk"),
+            _arc("trunk_to_sea", "trunk", "sea", capacity=3.0),
+        ],
+        [
+            {"ResidentialDemand": "create_demand"},
+            {"Foul": "make_discharge"},
+            {"Sewer": "make_discharge"},
+        ],
+    )
+
+
+def _groundwater_infiltrate() -> dict:
+    """A groundwater above its threshold infiltrates ``(excess x pct) ** 0.5`` into a sewer
+    (``storage.py:231-245``); the sewer's outlet is narrow, so it fills and its push check
+    sends part of the infiltration back."""
+    return _storage_case(
+        [
+            _store(
+                "gw",
+                "Groundwater",
+                capacity=100.0,
+                initial_storage=_stocked(90.0),
+                infiltration_threshold=0.5,
+                infiltration_pct=0.05,
+                residence_time=20.0,
+            ),
+            _store("sewer", "Sewer", capacity=1.5, pipe_time=1),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("gw_to_sewer", "gw", "sewer"),
+            _arc("gw_to_sea", "gw", "sea"),
+            _arc("sewer_to_sea", "sewer", "sea", capacity=1.0),
+        ],
+        [
+            {"Groundwater": "infiltrate"},
+            {"Sewer": "make_discharge"},
+            {"Groundwater": "distribute"},
+        ],
+    )
+
+
+def _wwtw_storm_tank() -> dict:
+    """A catchment's water reaches a ``WWTW`` through a reservoir and a sewer. The works treat
+    30 a day; the rest fills the stormwater tank on wet days and drains from it into the spare
+    throughput on dry ones (``wtw.py:323-341``, ``:374-407``). The works' outlet takes 26 a
+    day, so on full days the rejection is forced into the tank (``"wwtw_couldnt_push"``,
+    ``:343-349``), and a reuse demand pulls from the treated water between the two steps
+    (``:409-428``)."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _catchment("inflow", days, 34),
+            {"name": "junction", "type_": "Node"},
+            _store("basin", "Reservoir", capacity=40.0),
+            _store("combined", "Sewer", capacity=60.0),
+            _store(
+                "works",
+                "WWTW",
+                **_neutral_wtw(
+                    # 1 - 0.0007 - 0.035 is not 1 - (0.0007 + 0.035): the order shows
+                    percent_solids=0.0007,
+                    liquor=0.035,
+                    treatment_throughput_capacity=30.0,
+                    stormwater_storage_capacity=30.0,
+                ),
+            ),
+            _store("reuse", "Demand", constant_demand=2.0),
+            _store("river", "Waste"),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("inflow_to_junction", "inflow", "junction"),
+            _arc("junction_to_basin", "junction", "basin"),
+            _arc("basin_to_combined", "basin", "combined"),
+            _arc("combined_to_works", "combined", "works"),
+            _arc("works_to_river", "works", "river", capacity=26.0),
+            _arc("works_to_reuse", "works", "reuse"),
+            _arc("reuse_to_sea", "reuse", "sea"),
+        ],
+        [
+            {"Catchment": "route"},
+            {"Reservoir": "distribute"},
+            {"Sewer": "make_discharge"},
+            {"WWTW": "calculate_discharge"},
+            {"Demand": "create_demand"},
+            {"WWTW": "make_discharge"},
+        ],
+    )
+
+
+def _fwtw_deficit_sludge() -> dict:
+    """An ``FWTW`` fills its service reservoir from a supply that runs dry after about two
+    weeks; then the shortfall is created at the previous day's pulled quality
+    (``wtw.py:588-596``). A town draws from the reservoir. Liquor and solids go to a small sewer
+    whose outlet takes 0.1 a day, so it fills and the rest is unpushed sludge (``:606-611``)."""
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(150.0)),
+            _store(
+                "plant",
+                "FWTW",
+                **_neutral_wtw(
+                    treatment_throughput_capacity=10.0,
+                    service_reservoir_storage_capacity=30.0,
+                    service_reservoir_initial_storage=10.0,
+                ),
+            ),
+            _store(
+                "town",
+                "Demand",
+                constant_demand=6.0,
+                pollutant_load={"phosphate": 0.02, "ammonia": 0.1, "temperature": 15.0},
+            ),
+            _store("sludge_sewer", "Sewer", capacity=0.5),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("supply_to_plant", "supply", "plant"),
+            _arc("plant_to_town", "plant", "town"),
+            _arc("plant_to_sewer", "plant", "sludge_sewer"),
+            _arc("town_to_sea", "town", "sea"),
+            _arc("sewer_to_sea", "sludge_sewer", "sea", capacity=0.1),
+        ],
+        [{"FWTW": "treat_water"}, {"Demand": "create_demand"}, {"Sewer": "make_discharge"}],
+    )
+
+
+def _queue_tank_time_zero() -> dict:
+    """A sewer with ``pipe_time = 0``: its push enters the queue at time 0 and the same push's
+    ``update_queue`` makes it active at once (spec, Flushing a ``QueueTank`` on push), so the
+    same day's ``make_discharge`` sends it on."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _catchment("inflow", days, 35),
+            {"name": "junction", "type_": "Node"},
+            _store("basin", "Reservoir", capacity=1e3),
+            _store("sewer", "Sewer", capacity=100.0, pipe_time=0),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("inflow_to_junction", "inflow", "junction"),
+            _arc("junction_to_basin", "junction", "basin"),
+            _arc("basin_to_sewer", "basin", "sewer"),
+            _arc("sewer_to_sea", "sewer", "sea"),
+        ],
+        [{"Catchment": "route"}, {"Reservoir": "distribute"}, {"Sewer": "make_discharge"}],
+    )
+
+
+def _wtw_zero_input() -> dict:
+    """noodl only: WSIMOD raises ``ZeroDivisionError`` in the liquor blend (``wtw.py:176-182``).
+    ``plant`` starts with a full service reservoir, so it treats nothing on day 1 and has no
+    liquor yet; ``works`` has ``liquor_multiplier["volume"] = 0`` and no input, so its
+    denominator is 0 every day (spec, defect table)."""
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=100.0),
+            _store(
+                "plant",
+                "FWTW",
+                **_neutral_wtw(
+                    service_reservoir_storage_capacity=30.0,
+                    service_reservoir_initial_storage=30.0,
+                ),
+            ),
+            _store("town", "Demand", constant_demand=5.0),
+            _store("works", "WWTW", **_neutral_wtw(liquor=0.0)),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("supply_to_plant", "supply", "plant"),
+            _arc("plant_to_town", "plant", "town"),
+            _arc("town_to_sea", "town", "sea"),
+            _arc("works_to_sea", "works", "sea"),
+        ],
+        [
+            {"FWTW": "treat_water"},
+            {"Demand": "create_demand"},
+            {"WWTW": "calculate_discharge"},
+            {"WWTW": "make_discharge"},
+        ],
+    )
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -783,5 +1053,47 @@ CASES: dict[str, Case] = {
         days=_STORAGE_DAYS,
         scale=60.0,
         replay=("dist", "res", "town"),
+    ),
+    "sewer_timearea": Case(
+        build=_sewer_timearea,
+        days=_STORAGE_DAYS,
+        scale=800.0,
+        replay=("sewer",),
+    ),
+    "foul_sewers": Case(
+        build=_foul_sewers,
+        days=_STORAGE_DAYS,
+        scale=800.0,
+        replay=("foul_main", "trunk"),
+    ),
+    "groundwater_infiltrate": Case(
+        build=_groundwater_infiltrate,
+        days=_STORAGE_DAYS,
+        scale=100.0,
+        replay=("gw", "sewer"),
+    ),
+    "wwtw_storm_tank": Case(
+        build=_wwtw_storm_tank,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_wwtw_storm_tank()),
+        replay=("works", "combined"),
+    ),
+    "fwtw_deficit_sludge": Case(
+        build=_fwtw_deficit_sludge,
+        days=_STORAGE_DAYS,
+        scale=150.0,
+        replay=("plant", "sludge_sewer"),
+    ),
+    "queue_tank_time_zero": Case(
+        build=_queue_tank_time_zero,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_queue_tank_time_zero()),
+        replay=("sewer",),
+    ),
+    "wtw_zero_input": Case(
+        build=_wtw_zero_input,
+        days=_STORAGE_DAYS,
+        scale=30.0,
+        wsimod=False,
     ),
 }

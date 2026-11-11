@@ -628,7 +628,10 @@ shape:
   push" and "ponded water cant reenter". This turns each print into a recorded fact. noodl adds
   conditions of its own where WSIMOD would raise instead: `"zero_priority"` (a distribute
   round with `priority = 0` while `avail > FLOAT_ACCURACY`, defect table),
-  `"wtw_liquor_zero_denominator"` and `"inaccurate_evaporation"`.
+  `"wtw_liquor_zero_denominator"` and `"inaccurate_evaporation"`. The keys are snake case:
+  `"wwtw_couldnt_push"`, `"service_reservoirs_not_filled"`, `"sludge_nowhere"`,
+  `"ponded_water_cant_reenter"` and so on (D13). `"ponded_water_cant_reenter"` never fires:
+  the forced push before WSIMOD's print returns empty (`sewer.py:237-239`).
 - `"decisions"` (only when `diagnostics["decisions"] = True` on entry): every branch site's
   per-instance outcome per day, in call order. The gradient tests and the parity admission rule
   use it. Each record is `Decision(site, call, round, active, outcome, margin)`:
@@ -656,7 +659,14 @@ shape:
     frozen push-check tank is `node:N/check_tank/get_excess/{headroom,clip}`; a `Demand`'s
     `node:N/create_demand/deficit` and `node:N/create_demand/not_able_to_push:<garden|house|default>`
     (`demand.py:90`, `:114`); a leaking `Distribution`'s `node:N/pull_set_leakage/unsuccessful`
-    (`distribution.py:46`). Later classes extend the pattern.
+    (`distribution.py:46`); a `Sewer`'s `node:N/push_check_sewer/clip` and
+    `node:N/make_discharge/ponded` (`sewer.py:160`, `:235`); the treatment works'
+    `node:N/get_excess_throughput/headroom` and
+    `node:N/treat_current_input/liquor_zero_denominator` (`wtw.py:155-161`, `:174-182`), a
+    `WWTW`'s `node:N/calculate_discharge/{stormwater,spare,clip}`,
+    `node:N/make_discharge/rejected`, `node:N/push_check_sewer/clip`,
+    `node:N/push_set_sewer/{direct,all_direct,below_fa}` and `node:N/pull_set_reuse/clip`, and
+    an `FWTW`'s `node:N/treat_water/{target,deficit}`. Later classes extend the pattern.
   - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
     the calls noodl's structure makes, masked ones included, so it is the same every day; it is
     not WSIMOD's dynamic count.
@@ -798,20 +808,29 @@ marked W4.
     1. `update_queue`.
     2. `push_distributed(active_storage)` over all types.
     3. `pull_storage_exact` of what was sent.
-    4. Push the ponded water to `Land` with tag `"Sewer"`, forcing back the rest at time 0.
+    4. Push the ponded water above `FLOAT_ACCURACY` to `Land` with tag `"Sewer"`, forcing back
+       the rest at time 0. The forced push returns empty, so the "ponded water cant reenter"
+       print (`:238-239`) is unreachable.
   - A `pipe_timearea` that does not sum to 1 warns (`warnings.warn`) and runs, as WSIMOD prints
     and runs (`:135-141`).
 - **WTW** (`wtw.py:14-220`).
   - Volume constant `1 − percent_solids − liquor_multiplier["volume"]` (`:92`, `:104-110`).
   - `treat_current_input` (`:163-214`):
     - treated `= V·c_v`, liquor `= V·m_v`, solids `= V·percent_solids`;
-    - pollutants by the neutral split;
+    - pollutants by the neutral split, with `c_v` and `m_v` from the day's parameters (so a
+      batched `percent_solids` or `liquor_multiplier` keeps the process neutral); the
+      temperature factor `1 ** x` is exactly 1, and `x·c·1.0` is exactly `x·c`, so the split is
+      bitwise WSIMOD's;
     - the non-additive liquor blend with the old liquor (`:174-182`), keeping the previous
       value where the denominator is 0 (Representation › neutral WTW);
     - `treated` accumulates (`:211`);
     - with pollutants on, each additive pollutant reads the influent's temperature
       (`:191-193`), so `temperature` must be a pollutant.
   - `get_excess_throughput = max(cap − current_input.V, 0)` (`:155-161`).
+  - A configured `process_parameters["volume"]` constant other than the derived `c_v` is
+    refused by name: WSIMOD overwrites one given to the constructor (`:92`) but keeps one
+    given as an override (`:146-148`), and the merged parameters (D5) cannot tell them apart.
+    `liquor_multiplier` without `volume` is refused too (`:110` raises `KeyError`).
   - A bare `WTW` node denies pushes and is never orchestrated, so it is accepted and inert.
 - **WWTW** (`:223-453`).
   - `push_set_sewer` (`:374-407`): direct to `current_input` up to the spare throughput, with

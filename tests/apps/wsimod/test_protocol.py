@@ -419,8 +419,8 @@ def test_the_engine_connects_arcs_in_configuration_order():
 
 
 def test_an_unported_class_is_refused_by_name():
-    with pytest.raises(ValueError, match="'Sewer' is not ported"):
-        make_node(NodeSpec("s", "Sewer", "Sewer", {}), None, QUANTITY_ONLY)
+    with pytest.raises(ValueError, match="'Land' is not ported"):
+        make_node(NodeSpec("l", "Land", "Land", {}), None, QUANTITY_ONLY)
 
 
 def test_gradients_flow_through_the_masked_rounds():
