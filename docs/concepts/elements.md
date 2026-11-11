@@ -187,6 +187,10 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   other built-in law's `dflow` is exact, which `tests/elements/test_dflow_exact.py` checks.
   The same attribute exists on `NodeWithdrawal`, and on `NodeStorage` for its `rate_slope`
   (audited by the same test).
+- **A law is its module call.** A layer calls each law as a module, so an overridden
+  `forward` or a forward hook is part of the law. On a layer without flow unknowns, which
+  otherwise calls `flow` and `dflow` directly, such a law is evaluated by its module call
+  and its slope is taken from that call by autograd, with or without `differentiable`.
 
 ## Implicit, coupled and dynamic constitutive laws
 

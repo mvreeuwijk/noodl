@@ -35,7 +35,7 @@ from noodl.layers._flow_unknowns import (
     to_real,
 )
 from noodl.layers._functional import FunctionalLaws, _analytic, step_start
-from noodl.layers._guards import _detached, _GuardsMixin, _same_objects
+from noodl.layers._guards import _detached, _GuardsMixin, _same_objects, plain_call
 from noodl.layers._held import _HeldMixin
 from noodl.layers._solve_policy import resolve
 from noodl.layers._step import _Step, _StepMixin, _StorageStep, check_scheme
@@ -817,16 +817,19 @@ class KirchhoffLayer(
 
         `adjoint`: the operator also builds the adjoint (the differentiable solve). An owner
         that declares `exact_slope = False` then gives the derivative of its `call` by
-        autograd instead, and every slope is taken without a graph."""
+        autograd instead, and every slope is taken without a graph. With `call`, an owner
+        whose module call is not its own method (`plain_call`) gives the derivative of its
+        `call` by autograd on either path: its `rate_slope` or `dflow` is not that call's."""
         n_el = len(self._laws)
         if adjoint and call is None:
             call = self._owner_call
 
         def withdrawal(j, ns):
             phi_n = phi[..., ns.nodes]
-            if not adjoint:
+            own = call is None or plain_call(ns)
+            if not adjoint and own:
                 return ns.dflow(phi_n, drivers)
-            if ns.exact_slope:
+            if ns.exact_slope and own:
                 with torch.no_grad():
                     return ns.dflow(phi_n, drivers).expand(phi_n.shape)
             return _autograd_slope(lambda v: call(n_el + j, (v, drivers)), phi_n)
@@ -840,9 +843,10 @@ class KirchhoffLayer(
 
         def storage(j, st):
             phi_n, phi_start, previous = self._storage_args(j, st, phi, store)
-            if not adjoint:
+            own = call is None or plain_call(st)
+            if not adjoint and own:
                 return st.rate_slope(phi_n, phi_start, previous, ctx, drivers)
-            if st.exact_slope:
+            if st.exact_slope and own:
                 with torch.no_grad():
                     return st.rate_slope(phi_n, phi_start, previous, ctx, drivers).expand(
                         phi_n.shape)
@@ -1026,10 +1030,12 @@ class KirchhoffLayer(
                 adjoint: bool = False) -> torch.Tensor:
         """`dflows` in the context `ctx`, law by law (`_law_slopes`; a law that does not
         read the context gives its own `dflow` there, outside the operator of a
-        differentiable solve). `call` and `adjoint` are `_operator`'s."""
+        differentiable solve; nor one whose module call `call` is not its own `flow`,
+        `plain_call`). `call` and `adjoint` are `_operator`'s."""
         d = self.dp(phi, drivers)
         return torch.cat([
-            el.dflow(d[..., s:e], drivers) if not (adjoint or el._takes_ctx)
+            el.dflow(d[..., s:e], drivers)
+            if not (adjoint or el._takes_ctx or (call is not None and not plain_call(el)))
             else self._law_slopes(i, el, d[..., s:e], drivers, ctx, adjoint, call)
             for i, (el, (s, e)) in enumerate(zip(self._laws, self._law_slices, strict=True))
         ], dim=-1)
@@ -1047,22 +1053,28 @@ class KirchhoffLayer(
         the context and declares `exact_slope = False` gives autograd of its `forward`, and
         a law whose `dflow` is not its own exact one gives autograd of `call(i, (dp,
         drivers))`, the law with the threaded parameters. `dflow` itself is called on the
-        law: the threaded tensors ARE its own parameters, so the values are equal."""
-        if adjoint and el.dp_independent:
+        law: the threaded tensors ARE its own parameters, so the values are equal.
+
+        With `call`, a law whose module call is not its own `flow` (`forward` overridden or
+        hooked: `plain_call`) gives the slope of that call on either path, by autograd (of
+        its `forward` and hooks, `_coloured_jacobian`, for a law that reads the context):
+        its `dflow` and `jacobian` are not the call's slopes."""
+        own = (call is None and not adjoint) or plain_call(el)
+        if el.dp_independent and (adjoint or not own):
             return _dp_independent_slope(i, el, dp, drivers)
         if el._takes_ctx:
-            if not adjoint:
+            if not adjoint and own:
                 lctx = self._law_ctx(ctx, *self._law_slices[i])
                 return el.jacobian(dp, None, drivers, lctx)[0][..., 0, 0, 0, 0]
             with torch.no_grad():
                 lctx = self._law_ctx(ctx, *self._law_slices[i])
                 dp = dp.detach()
-                block = (el.jacobian(dp, None, drivers, lctx) if el.exact_slope
+                block = (el.jacobian(dp, None, drivers, lctx) if el.exact_slope and own
                          else el._coloured_jacobian(dp, None, drivers, lctx))[0]
                 return block[..., 0, 0, 0, 0].expand(dp.shape)
-        if not adjoint:
+        if not adjoint and own:
             return el.dflow(dp, drivers)
-        if el.exact_slope and _analytic(el, ConstitutiveLaw):
+        if el.exact_slope and own and _analytic(el, ConstitutiveLaw):
             with torch.no_grad():
                 return el.dflow(dp.detach(), drivers).expand(dp.shape)
         return _autograd_law_slope(i, el, dp, drivers, call or self._owner_call)
@@ -1823,22 +1835,28 @@ class KirchhoffLayer(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             starts,
         )
+        # On the fast path an owner whose module call is not its own method (`forward`
+        # overridden or hooked, `_plain_calls`) is evaluated by that call on every path, its
+        # slopes included (`_law_slopes`): `module_call`, `None` where calling each owner's
+        # own method is the same thing.
+        module_call = (self._owner_call if u is None and not self._plain_calls()
+                       else None)
         ramp_from = "linear"
         if _start is None or _start == "ramp_warm":
             x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
-                                             q0=q0)
+                                             q0=q0, call=module_call)
             ramp_from = "warm"
         else:
             try:
                 x0, start = self._starting_point(None, phi_boundary, drivers, sources, step,
-                                                 linear=True)
+                                                 linear=True, call=module_call)
             except RuntimeError:
                 if _start != "ramp":
                     raise
                 # no linear guess to settle from (singular, or not grounded there): the
                 # storage ramp starts where the failed solve did
                 x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
-                                                 q0=q0)
+                                                 q0=q0, call=module_call)
                 ramp_from = "warm"
         if _report is not None:
             _report["held"] = step.layout is not None
@@ -1858,13 +1876,10 @@ class KirchhoffLayer(
         # captured one: there the residual is checked at the starting guess and at the root
         # only, with the threaded tensors detached as the differentiated solve detaches
         # them (`checker`, built for those two evaluations alone).
-        # Its residual evaluates each owner as the differentiated solve would, by its module
-        # call: the primal solve with flow unknowns always does, and the fast path's calls
-        # the owner's own method, the same thing unless `forward` is overridden or hooked
-        # (`_plain_calls`), where it calls the module instead (`primal_call`).
+        # Its residual and operator evaluate each owner as the differentiated solve does, by
+        # its module call (`module_call`), as `differentiable=False` does too.
         fn = checker = None
         primal_checked = False
-        primal_call = None
         if policy.differentiable:
             self._check_no_unreachable_differentiable_tensors()
             if policy.forward_only:
@@ -1873,8 +1888,6 @@ class KirchhoffLayer(
                 if not primal_checked:
                     checker = FunctionalLaws(self, drivers, sources, phi_boundary, step,
                                              history)
-                if u is None and not self._plain_calls():
-                    primal_call = self._owner_call
             else:
                 fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
 
@@ -1926,7 +1939,7 @@ class KirchhoffLayer(
 
             def evaluate(x):
                 r, phi, q = self._residual(x, phi_boundary, drivers, sources, step,
-                                           primal_call)
+                                           module_call)
                 point.update(x=x, phi=phi, q=q)
                 if last is not None:
                     remember(r)
@@ -1945,7 +1958,7 @@ class KirchhoffLayer(
                 # first operator's.
                 if start is not None and x is x0:
                     return self._operator_at(*start)
-                op = self._operator(x, phi_boundary, drivers, step)
+                op = self._operator(x, phi_boundary, drivers, step, module_call)
                 if last is not None:
                     last["op"] = op
                 return op
@@ -1959,9 +1972,9 @@ class KirchhoffLayer(
                 if checker is not None:
                     self._require_threaded(lambda *p: checker.residual_fn(result.x, *p),
                                            checker.all_params)
-                if ((primal_checked or primal_call is not None)
+                if ((primal_checked or module_call is not None)
                         and point.get("x") is not result.x):
-                    # the root is checked too, and its flows are those of `primal_call`
+                    # the root is checked too, and its flows are those of `module_call`
                     residual_fn(result.x)
                 if point.get("x") is result.x:
                     return point["phi"], point["q"]
@@ -2055,7 +2068,7 @@ class KirchhoffLayer(
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
 
     def _starting_point(self, phi0, phi_boundary, drivers, sources, step, *, q0=None,
-                        linear: bool = False):
+                        linear: bool = False, call=None):
         """The Newton starting guess `x0` and, on the fast path, the slopes there `start`.
 
         The fast path starts from `linear_init` (or `phi0`), certified grounded; `start` is
@@ -2065,7 +2078,8 @@ class KirchhoffLayer(
         `step` is the solve's `_Step`. (Its linear guess, `linear_init`, is not used here:
         starting the general path from it moved the pinned roots by up to Newton's
         tolerance, so a cold solve keeps the zero start.) `linear=True` (the fallback
-        ladder's) starts a layer with flow unknowns from it instead.
+        ladder's) starts a layer with flow unknowns from it instead. `call` is the fast
+        path's `_operator`'s, for the slopes at the start.
         """
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
@@ -2124,8 +2138,8 @@ class KirchhoffLayer(
             # too (`dflows` here is each ConstitutiveLaw's own analytic `dflow`, not the autograd
             # path the differentiable branch builds below).
             phi0_full = self.assemble(phi0, phi_boundary)
-            dq0 = self._dflows(phi0_full, drivers, step.ctx)
-            node_slopes0 = self._node_slopes(phi0_full, drivers, step)
+            dq0 = self._dflows(phi0_full, drivers, step.ctx, call)
+            node_slopes0 = self._node_slopes(phi0_full, drivers, step, call)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
         return phi0, (dq0, node_slopes0)
 
