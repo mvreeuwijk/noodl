@@ -12,7 +12,7 @@ The forcing is a subset of WSIMOD's `timeseries_data.csv` (the WSIMOD demo
 data, `docs/demo/data/processed/` in the WSIMOD repository), covering only the
 sites the two demos use. WSIMOD is distributed under the BSD-3-Clause licence,
 Copyright (c) 2022, barneydobson; the data is redistributed here under that
-licence for the parity tests. The files are not edited beyond WSIMOD's own save format.
+licence for the parity tests. The files are not edited apart from the two corrections below and the site subset. The licence text is in `LICENSE-WSIMOD`.
 
 The forcing totals about 0.5 MB gzipped (the YAML files add about 170 kB uncompressed).
 
@@ -28,6 +28,9 @@ The forcing totals about 0.5 MB gzipped (the YAML files add about 170 kB uncompr
 
 The script then reloads `config.yml` and checks that its run equals the original model's
 (arc flows and qualities, tanks, surfaces: bitwise), and exits non-zero otherwise.
+
+The `*.csv.gz` files are re-gzipped with a zero header mtime so that regenerating reproduces
+them byte for byte.
 
 ## Regenerating
 

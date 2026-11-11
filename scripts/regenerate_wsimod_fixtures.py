@@ -36,6 +36,7 @@ the per-timestep total is `min(sum of requests, capacity)` whatever the order (s
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sys
@@ -186,7 +187,7 @@ def _build_and_capture_quickstart(
             f"{prefix}: some arcs saw more than one same-direction event in a "
             "timestep; their rows are sums (harness docstring)"
         )
-    aggregated.to_csv(ALLOCATION_DIR / f"{prefix}_events.csv", index=False)
+    aggregated.to_csv(ALLOCATION_DIR / f"{prefix}_events.csv", index=False, lineterminator="\n")
 
 
 def _build_and_capture_oxford(data_folder: str) -> None:
@@ -219,7 +220,7 @@ def _build_and_capture_oxford(data_folder: str) -> None:
             "oxford: some arcs saw more than one same-direction event in a "
             "timestep; their rows are sums (harness docstring)"
         )
-    oxford_aggregated.to_csv(ALLOCATION_DIR / "oxford_events.csv", index=False)
+    oxford_aggregated.to_csv(ALLOCATION_DIR / "oxford_events.csv", index=False, lineterminator="\n")
 
 
 def _first_difference(original, reloaded) -> str | None:
@@ -289,11 +290,7 @@ def _corrected_config(model, config_path: Path) -> dict:
     the key `depth` for each `PerviousSurface` (`model.py:419-420`), so a reload shrinks the
     depth by the porosity again (0.5 -> 0.2 written -> 0.08 reloaded). The YAML is read back
     and corrected to `surface.depth / surface.total_porosity` (spec W12).
-
-    `Model.save` writes `surface.depth`, the simulated depth (`depth * total_porosity`), under
-    the key `depth` (`model.py:419-420`), so a reload shrinks the depth by the porosity again
-    (0.5 -> 0.2 written -> 0.08 reloaded). The YAML is read back and corrected to
-    `surface.depth / surface.total_porosity` (spec W12)."""
+    """
     import yaml
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -302,7 +299,25 @@ def _corrected_config(model, config_path: Path) -> dict:
             if hasattr(surface, "total_porosity"):
                 saved = config["nodes"][name]["surfaces"][surface.surface]
                 saved["depth"] = surface.depth / surface.total_porosity
-    config["arcs"] = {name: config["arcs"][name] for name in _registration_order(model)}
+    # `save` takes each entry's keys from a `set`, and `create_oxford_model` builds its additive
+    # pollutant list from one, so their order changes from run to run (string hashing): sort
+    # every mapping inside an entry and that list, keeping the order of nodes, arcs and surfaces
+    # (the list follows `pollutants`).
+    def ordered(value):
+        if isinstance(value, dict):
+            return {k: ordered(v) for k, v in sorted(value.items())}
+        return value
+
+    for node in config["nodes"].values():
+        if "surfaces" in node:
+            node["surfaces"] = {n: ordered(v) for n, v in node["surfaces"].items()}
+    config["nodes"] = {
+        n: {k: v if k == "surfaces" else ordered(v) for k, v in sorted(node.items())}
+        for n, node in config["nodes"].items()
+    }
+    config["arcs"] = {name: ordered(config["arcs"][name]) for name in _registration_order(model)}
+    additive = set(config["additive_pollutants"])
+    config["additive_pollutants"] = [p for p in config["pollutants"] if p in additive]
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
     return config
 
@@ -368,6 +383,8 @@ def write_demo_configs(data_folder) -> None:
             else create_oxford_model(data_folder)
         )
         model.save(str(folder), "config.yml", compress=True)
+        for path in folder.glob("*.csv.gz"):  # reproducible bytes: no mtime in the header
+            path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=0))
         config = _corrected_config(model, folder / "config.yml")
         neutral = dict(config, overrides=_neutral_overrides(model))
         (folder / "config_neutral.yml").write_text(

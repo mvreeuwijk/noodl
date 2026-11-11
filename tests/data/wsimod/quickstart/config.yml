@@ -1,115 +1,115 @@
 nodes:
   my_sewer:
+    capacity: 0.04
     chamber_area: 1
-    name: my_sewer
     chamber_floor: 10
+    name: my_sewer
+    node_type_override: Sewer
     pipe_time: 0
     pipe_timearea:
       0: 1
-    capacity: 0.04
     type_: Sewer
-    node_type_override: Sewer
   my_land:
-    surface_residence_time: 1
-    percolation_residence_time: 50
+    filename: my_land-inputs.csv.gz
     name: my_land
-    subsurface_residence_time: 5
-    type_: Land
     node_type_override: Land
+    percolation_residence_time: 50
+    subsurface_residence_time: 5
+    surface_residence_time: 1
     surfaces:
       urban:
+        area: 10
+        datum: 10
+        decays: {}
         et0_to_e: 1
         initial_storage: 0
-        datum: 10
-        decays: &id001 {}
         pollutant_load:
           phosphate: 1.0e-07
-        surface: urban
         pore_depth: 0
-        area: 10
+        surface: urban
         type_: ImperviousSurface
       rural:
-        wilting_point: 0.12
+        area: 100
+        datum: 10
+        decays: {}
+        depth: 0.5
+        et0_coefficient: 0.5
+        field_capacity: 0.3
+        ihacres_p: 10
+        infiltration_capacity: 0.5
+        initial_storage: 0
+        percolation_coefficient: 0.75
         pollutant_load:
           phosphate: 1.0e-07
         surface: rural
-        ihacres_p: 10
-        et0_coefficient: 0.5
-        depth: 0.5
         surface_coefficient: 0.05
-        initial_storage: 0
-        datum: 10
         total_porosity: 0.4
-        decays: *id001
-        infiltration_capacity: 0.5
-        percolation_coefficient: 0.75
-        area: 100
-        field_capacity: 0.3
         type_: PerviousSurface
-    filename: my_land-inputs.csv.gz
+        wilting_point: 0.12
+    type_: Land
   my_groundwater:
-    residence_time: 200
-    name: my_groundwater
-    initial_storage: 0
+    area: 100
+    capacity: 100
     datum: 0
     decays: null
     infiltration_pct: 0
-    area: 100
     infiltration_threshold: 1
-    capacity: 100
-    type_: Groundwater
+    initial_storage: 0
+    name: my_groundwater
     node_type_override: Groundwater
+    residence_time: 200
+    type_: Groundwater
   my_river:
     name: my_river
-    type_: Node
     node_type_override: Node
+    type_: Node
   my_outlet:
     name: my_outlet
-    type_: Waste
     node_type_override: Waste
+    type_: Waste
 arcs:
   urban_drainage:
     capacity: 1000000000000000.0
+    in_port: my_land
     name: urban_drainage
+    out_port: my_sewer
     preference: 1
     type_: Arc
-    in_port: my_land
-    out_port: my_sewer
   percolation:
     capacity: 1000000000000000.0
+    in_port: my_land
     name: percolation
+    out_port: my_groundwater
     preference: 1
     type_: Arc
-    in_port: my_land
-    out_port: my_groundwater
   runoff:
     capacity: 1000000000000000.0
+    in_port: my_land
     name: runoff
+    out_port: my_river
     preference: 1
     type_: Arc
-    in_port: my_land
-    out_port: my_river
   storm_outflow:
     capacity: 1000000000000000.0
+    in_port: my_sewer
     name: storm_outflow
+    out_port: my_river
     preference: 1
     type_: Arc
-    in_port: my_sewer
-    out_port: my_river
   baseflow:
     capacity: 1000000000000000.0
+    in_port: my_groundwater
     name: baseflow
+    out_port: my_river
     preference: 1
     type_: Arc
-    in_port: my_groundwater
-    out_port: my_river
   catchment_outflow:
     capacity: 1000000000000000.0
+    in_port: my_river
     name: catchment_outflow
+    out_port: my_outlet
     preference: 1
     type_: Arc
-    in_port: my_river
-    out_port: my_outlet
 orchestration:
 - FWTW: treat_water
 - Demand: create_demand

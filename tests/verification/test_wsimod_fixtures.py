@@ -74,3 +74,15 @@ def test_the_reference_records_wsimods_run():
     impervious = ref.surface_names.index(("my_land", "urban"))
     assert all(math.isnan(x) for x in ref.surface["tank_recharge"][:, impervious].tolist())
     assert not any("mass balance error" in line for line in ref.printed)
+
+
+@pytest.mark.parametrize("case", ["quickstart", "oxford"])
+def test_the_saved_arc_order_gives_every_node_its_arcs_in_file_order(case):
+    """A node's arc lists fill in the file's arc order (`arcs.py:70-71`): a hand edit of the
+    arc order would change WSIMOD's summation order (README, "Two corrections")."""
+    config = yaml.safe_load((DATA / case / "config.yml").read_text(encoding="utf-8"))
+    position = {name: i for i, name in enumerate(config["arcs"])}
+    model = wsimod_model(DATA / case)
+    for node in model.nodes.values():
+        for arcs in (list(node.in_arcs), list(node.out_arcs)):
+            assert [position[a] for a in arcs] == sorted(position[a] for a in arcs)
