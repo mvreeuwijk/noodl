@@ -80,8 +80,9 @@ class _FallbackMixin:
           the exact root. When the ramp from the linear guess does not converge and the
           failed solve had a warm start (`phi0` or `q0`), the ramp runs once more from that
           start: a linear guess may be formed and still settle nowhere (a water network in
-          its resistance form at zero flow carries the head difference between its reservoir
-          and its tank over the `RQtol` slope floor, a flow of 1e7 m3/s).
+          its resistance form, its laws taken at zero flow, carries the head difference
+          between its reservoir and its tank over the `RQtol` slope floor, a flow of 1e7
+          m3/s; the water laws' own start flows, `ImplicitLaw.start_flow`, avoid that).
 
         `diagnostics`, when given, then also receives `"fallback"`, the rung that converged
         (`None` if the first solve did, or no rung did), and `"fallback_iterations"`, the

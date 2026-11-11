@@ -1028,19 +1028,20 @@ def build_model(
 
     def valve_terms(valves) -> dict:
         """The open-valve minor loss of `valves` (EPANET's `Km`, the layer's potential per
-        (m3/s)^2) and their kappa: that loss's slope at 1 ft/s, at least 1 m per m3/s (a
-        valve with no minor loss has no head-loss slope of its own)."""
+        (m3/s)^2), their kappa: that loss's slope at 1 ft/s, at least 1 m per m3/s (a
+        valve with no minor loss has no head-loss slope of its own), and their diameter,
+        which gives each its start flow, 1 ft/s (`_Valve.start_flow`)."""
         diameter = torch.tensor([v.diameter for v in valves], dtype=F64)
         minor = scale * epanet_minor_coefficient(
             torch.tensor([v.minor_loss for v in valves], dtype=F64), diameter, rounded_cfs)
         q_ft = torch.pi * diameter**2 / 4.0 * M_PER_FT
         return {"minor": minor, "kappa": torch.clamp(2.0 * minor * q_ft, min=scale),
-                "gradient_floor": rqtol}
+                "gradient_floor": rqtol, "diameter": diameter}
 
     if tcv:
         laws.append(ThrottleValve(
-            torch.tensor([v.diameter for v in tcv], dtype=F64), cfs_per_m3s=rounded_cfs,
-            scale=scale, links=link_slice["valve"], kind="valve", **valve_terms(tcv)))
+            cfs_per_m3s=rounded_cfs, scale=scale, links=link_slice["valve"], kind="valve",
+            **valve_terms(tcv)))
     if fcv:
         laws.append(FlowControlValve(links=link_slice["fcv"], kind="fcv", **valve_terms(fcv)))
     if pbv:
@@ -1413,10 +1414,13 @@ def _pump_law(net: WaterNetwork, links: slice, scale: float, epanet_cfs: float):
         speed = torch.tensor([p.speed for p in pumps], dtype=F64)
         if kind == "curve":
             fits = [power_curve(net.curves[p.curve]) for p in pumps]
+            # EPANET's Q0: the middle point of three, the point of one (`updatepumpparams`)
+            design = [net.curves[p.curve][len(net.curves[p.curve]) // 2][0] for p in pumps]
             curve = PumpCurve(torch.tensor([h0 * scale for h0, _, _ in fits], dtype=F64),
                               torch.tensor([r * scale for _, r, _ in fits], dtype=F64),
                               torch.tensor([n for _, _, n in fits], dtype=F64),
-                              speed=speed, links=own, kind="pump")
+                              speed=speed, design_flow=torch.tensor(design, dtype=F64),
+                              links=own, kind="pump")
         elif kind == "segments":
             points = [net.curves[p.curve] for p in pumps]
             width = max(len(c) for c in points)

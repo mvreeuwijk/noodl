@@ -148,12 +148,16 @@ extrapolated point off the end of the curve. (A segmented curve's last segment a
 constant-power pump are extended without a limit, as EPANET extends them.) A converged pump
 carrying flow backwards is refused by name too. The flows are seeded, as EPANET seeds them,
 rather than left to the layer's linear guess or its fallback ladder
-([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): at zero
-flow every resistance-form pipe sits on its `RQtol` slope floor, and the layer's linear guess,
-taken there, carries the head difference between a reservoir and a tank over that floor (on
-Net1 a flow of 1.9e7 m³/s, from which the storage ramp settles nowhere; the two-loop network,
-with one reservoir, has a sane guess). From the seeded flows Newton needs 5 iterations on
-both.
+([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)). From the
+seeded flows Newton needs 5 iterations on Net1 and the two-loop network. The linear guess
+(`linear_init`, and the ladder's rungs) starts from the same flows: every implicit water law
+gives EPANET's first iterate as its start flow (`start_flow`): a pipe or a valve 1 ft/s
+through its section, a pump its design flow times its speed (the middle point of a
+three-point curve, the point of a one-point curve, the mean of a custom curve's first and
+last flows, 1 cfs at constant power), a closed link or a stopped pump zero. On Net1 that
+guess is within a factor of two of the converged flows; taken at zero flow instead, where
+every resistance-form pipe sits on its `RQtol` slope floor, it carried the 52 m between the
+reservoir and the tank as 1.9e7 m³/s.
 
 ## Running over time
 
