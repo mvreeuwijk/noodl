@@ -39,6 +39,7 @@ class Catchment(Node):
     wsimod_type: ClassVar[str] = "Catchment"
     store_paths: ClassVar[tuple[str, ...]] = ("unrouted_water",)
     step_methods: ClassVar[tuple[str, ...]] = ("route",)
+    distributes: ClassVar[tuple[str, ...]] = ("out",)  # route's push_distributed
     # catchment.py:55-56
     mass_balance: ClassVar[dict[str, str]] = {
         "Catchment.flow": "in",
@@ -111,14 +112,28 @@ class Catchment(Node):
         given (``if vqip:``, ``:116``)."""
         avail = self.get_avail()
         if vqip is not None:
-            volume = dmin(self.ctx, f"{self.name}.pull_check", avail[..., 0], vqip[..., 0])
+            volume = dmin(
+                self.ctx,
+                f"node:{self.name}/pull_check_abstraction/clip",
+                avail[..., 0],
+                vqip[..., 0],
+                active=active,
+                call=self.ctx.call(f"node:{self.name}", "pull_check_abstraction"),
+            )
             avail = v_change_vqip(self.p, avail, volume)
         return avail
 
     def pull_set_abstraction(self, vqip: Tensor, *, active: Tensor) -> Tensor:
         """``catchment.py:121-134``: the request's volume, at most what is available."""
         avail = self.get_avail()
-        volume = dmin(self.ctx, f"{self.name}.pull_set", avail[..., 0], vqip[..., 0])
+        volume = dmin(
+            self.ctx,
+            f"node:{self.name}/pull_set_abstraction/clip",
+            avail[..., 0],
+            vqip[..., 0],
+            active=active,
+            call=self.ctx.call(f"node:{self.name}", "pull_set_abstraction"),
+        )
         return v_change_vqip(self.p, avail, volume)
 
     @classmethod

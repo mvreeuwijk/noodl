@@ -92,11 +92,19 @@ class Arc:
         excess can go negative afterwards; that is transcribed, not clamped.
         """
         p = self.p
+        call = self.ctx.call(f"arc:{self.name}", "send_push_request")
         if force:
             not_pushed = torch.zeros_like(vqip)
         else:
             excess_in = self.get_excess("push", vqip, active=active, tag=tag)
-            clip = dmax(self.ctx, f"{self.name}.push_clip", vqip[..., 0] - excess_in[..., 0], 0.0)
+            clip = dmax(
+                self.ctx,
+                f"arc:{self.name}/send_push_request/clip",
+                vqip[..., 0] - excess_in[..., 0],
+                0.0,
+                active=active,
+                call=call,
+            )
             not_pushed = v_change_vqip(p, vqip, clip)
         vqip = extract_vqip(p, vqip, not_pushed)
         reply = self.out_port.push_set(vqip, tag, active=active)
@@ -112,9 +120,17 @@ class Arc:
         them (spec, Protocol, Request mutation); the request passed on carries the clipped
         volume and the caller's other entries.
         """
+        call = self.ctx.call(f"arc:{self.name}", "send_pull_request")
         volume = vqip[..., 0]
         excess_in = self.get_excess("pull", vqip, active=active, tag=tag)[..., 0]
-        not_pulled = dmax(self.ctx, f"{self.name}.pull_clip", volume - excess_in, 0.0)
+        not_pulled = dmax(
+            self.ctx,
+            f"arc:{self.name}/send_pull_request/clip",
+            volume - excess_in,
+            0.0,
+            active=active,
+            call=call,
+        )
         volume = volume - not_pulled
         request = torch.cat(
             [volume[..., None], vqip[..., 1:].expand(volume.shape + (self.p.K,))], -1
@@ -140,14 +156,22 @@ class Arc:
     ) -> Tensor:
         """``arcs.py:230-257``: ``min(capacity - flow_in, node check volume)`` at the node
         check's concentration. ``vqip=None`` asks the node for its unclipped check."""
+        if direction not in ("push", "pull"):
+            raise ValueError(f"arc {self.name!r}: direction {direction!r} is not push or pull")
+        call = self.ctx.call(f"arc:{self.name}", f"get_excess/{direction}")
         pipe_excess = self.capacity - self.flow_in
         if direction == "push":
             node_excess = self.out_port.push_check(vqip, tag, active=active)
-        elif direction == "pull":
-            node_excess = self.in_port.pull_check(vqip, tag, active=active)
         else:
-            raise ValueError(f"arc {self.name!r}: direction {direction!r} is not push or pull")
-        excess = dmin(self.ctx, f"{self.name}.excess", pipe_excess, node_excess[..., 0])
+            node_excess = self.in_port.pull_check(vqip, tag, active=active)
+        excess = dmin(
+            self.ctx,
+            f"arc:{self.name}/get_excess/{direction}/min",
+            pipe_excess,
+            node_excess[..., 0],
+            active=active,
+            call=call,
+        )
         return v_change_vqip(self.p, node_excess, excess)
 
 

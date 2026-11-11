@@ -5,6 +5,10 @@ return WSIMOD's captured replies in order and assert that noodl made the same ca
 same order, with the same arguments to ``1e-12 * scale``. The replay loads the node's stores
 from each call's ``pre``, makes the call, and compares the reply and the ``post`` stores.
 
+The comparison is exact for a class whose ``replay_bound`` is 0 (``Node``, ``Waste``,
+``Catchment``): every value must be bitwise WSIMOD's. A class with ``pow``/``exp``/``sqrt`` may
+declare ``1e-12`` (relative to the case's scale) with its cause written next to it.
+
 :class:`StoreNode` is a test double for the unit tests: a VQIP store of a given capacity whose
 WSIMOD type is settable.
 """
@@ -32,9 +36,7 @@ from noodl.apps.wsimod.vqip import (
     write,
 )
 
-__all__ = ["BOUND", "ScriptedArc", "StoreNode", "replay"]
-
-BOUND = 1e-12  # relative to the case's scale (spec, Verification)
+__all__ = ["Mismatch", "ScriptedArc", "StoreNode", "replay"]
 
 
 def _keys(p: Pollutants) -> tuple[str, ...]:
@@ -52,15 +54,15 @@ class Mismatch(AssertionError):
 
 
 class _Comparer:
-    """Compares noodl tensors with WSIMOD values to ``BOUND * scale``; keeps the worst."""
+    """Compares noodl tensors with WSIMOD values to ``bound * scale``; keeps the worst."""
 
-    def __init__(self, p: Pollutants, scale: float) -> None:
-        self.p, self.scale, self.worst = p, scale, 0.0
+    def __init__(self, p: Pollutants, scale: float, bound: float) -> None:
+        self.p, self.scale, self.bound, self.worst = p, scale, bound, 0.0
 
     def value(self, label: str, ours, theirs: float) -> None:
         diff = abs(float(ours) - float(theirs))
         self.worst = max(self.worst, diff / self.scale)
-        if not diff <= BOUND * self.scale:
+        if not diff <= self.bound * self.scale:
             raise Mismatch(f"{label}: noodl {float(ours)!r}, WSIMOD {float(theirs)!r}")
 
     def vqip(self, label: str, ours: Tensor, theirs: Mapping, *, volume_only=False) -> None:
@@ -77,9 +79,12 @@ class ScriptedArc:
 
     ``calls`` is consumed in order by the active calls; several arcs may share one list, so
     the order across arcs is checked too. An inactive call is skipped and returns zeros. Each
-    call asserts the arc, method, tag and force equal, and the request within ``1e-12 * scale``:
-    a pull request by its volume (D4), a push request in full. The accumulators follow the
-    replies as a real arc's would.
+    call asserts the arc, method, tag and force equal, and the request within the node class's
+    bound: a pull request by its volume (D4), a push request in full. The accumulators are
+    WSIMOD's: after each call they are set to the capture's values at return, and at entry they
+    are compared with the capture where they are known (from the node call's ``pre`` or an
+    earlier call), and taken from it otherwise. ``flow_out``/``vqip_out`` alias them, as an
+    ``Arc``'s do.
     """
 
     def __init__(
@@ -101,9 +106,17 @@ class ScriptedArc:
         self.preference = torch.tensor(spec.preference, dtype=torch.float64)
         self.flow_in = torch.zeros((), dtype=torch.float64)
         self.vqip_in = empty(pollutants, ())
-        self.compare = _Comparer(pollutants, scale)
+        self.compare = _Comparer(pollutants, scale, 0.0)
         self.label = spec.name
-        self.check_entry = False  # compare the accumulators at each call's entry
+        self.known = False  # whether flow_in/vqip_in hold WSIMOD's values
+
+    @property
+    def flow_out(self) -> Tensor:
+        return self.flow_in
+
+    @property
+    def vqip_out(self) -> Tensor:
+        return self.vqip_in
 
     def assert_exhausted(self) -> None:
         if self.calls:
@@ -112,7 +125,7 @@ class ScriptedArc:
                 f"{self.calls[0].arc!r} ({len(self.calls)} left)"
             )
 
-    def _next(self, method: str, vqip: Tensor | None, tag, force: bool) -> Tensor:
+    def _next(self, method: str, vqip: Tensor | None, tag, force: bool):
         label = f"{self.label}: {method} on {self.name!r}"
         if not self.calls:
             raise Mismatch(f"{label}: WSIMOD made no such call")
@@ -127,28 +140,23 @@ class ScriptedArc:
         if vqip is not None:
             pull = method.startswith("send_pull")
             self.compare.vqip(f"{label} request", vqip, call.vqip, volume_only=pull)
-        if self.check_entry:
+        if self.known:
             self.compare.value(f"{label} flow_in at entry", self.flow_in, call.flow_in)
             self.compare.vqip(f"{label} vqip_in at entry", self.vqip_in, call.vqip_in)
+        self.flow_in = torch.tensor(float(call.flow_in_after), dtype=torch.float64)
+        self.vqip_in = to_vqip(self.p, call.vqip_in_after)
+        self.known = True
         return to_vqip(self.p, call.reply)
-
-    def _accumulate(self, moved: Tensor) -> None:
-        self.flow_in = self.flow_in + moved[..., 0]
-        self.vqip_in = sum_vqip(self.p, self.vqip_in, moved)
 
     def send_push_request(self, vqip, *, active, tag="default", force=False) -> Tensor:
         if not bool(active):
             return torch.zeros_like(vqip)
-        reply = self._next("send_push_request", vqip, tag, force)
-        self._accumulate(extract_vqip(self.p, vqip, reply))
-        return reply
+        return self._next("send_push_request", vqip, tag, force)
 
     def send_pull_request(self, vqip, *, active, tag="default") -> Tensor:
         if not bool(active):
             return torch.zeros_like(vqip)
-        reply = self._next("send_pull_request", vqip, tag, False)
-        self._accumulate(reply)
-        return reply
+        return self._next("send_pull_request", vqip, tag, False)
 
     def send_push_check(self, vqip=None, *, active, tag="default") -> Tensor:
         if not bool(active):
@@ -236,8 +244,8 @@ def replay(
     """Replay ``calls`` (``NodeCall``\\ s captured from WSIMOD) into noodl's node ``name``.
 
     ``pollutants`` defaults to the network's; ``QUANTITY_ONLY`` replays the volumes. Raises
-    :class:`Mismatch` at the first difference beyond ``1e-12 * scale``; returns the worst
-    difference relative to ``scale``.
+    :class:`Mismatch` at the first difference beyond the node class's ``replay_bound`` x
+    ``scale``; returns the worst difference relative to ``scale``.
     """
     p = network.pollutants if pollutants is None else pollutants
     spec = _spec(network, name)
@@ -261,7 +269,7 @@ def replay(
             node.connect(arc, "out")
         if arc_spec.out_port == name:
             node.connect(arc, "in")
-    compare = _Comparer(p, scale)
+    compare = _Comparer(p, scale, type(node).replay_bound)
     active = torch.tensor(True)
     for index, call in enumerate(calls):
         label = f"{name} call {index} (day {call.day}, {call.method}, tag {call.tag!r})"
@@ -269,7 +277,7 @@ def replay(
         script[:] = list(call.arc_calls)
         for arc in arcs.values():
             arc.label, arc.compare = label, compare
-            arc.check_entry = f"arcs.{arc.name}.flow_in" in call.pre
+            arc.known = f"arcs.{arc.name}.flow_in" in call.pre
             flow_in = call.pre.get(f"arcs.{arc.name}.flow_in", 0.0)
             arc.flow_in = torch.tensor(float(flow_in), dtype=torch.float64)
             arc.vqip_in = to_vqip(p, call.pre.get(f"arcs.{arc.name}.vqip_in", {}))

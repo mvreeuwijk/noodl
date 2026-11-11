@@ -350,7 +350,8 @@ def wsimod_reference(
 @dataclass
 class ArcCall:
     """One arc call a captured node made: the arguments as they were at entry (deep copies,
-    before WSIMOD can mutate them), the reply, and the arc's accumulators at entry."""
+    before WSIMOD can mutate them), the reply, and the arc's accumulators at entry and at
+    return."""
 
     arc: str
     method: str  # send_push_request, send_pull_request, send_push_check, send_pull_check
@@ -360,6 +361,11 @@ class ArcCall:
     reply: dict
     flow_in: float
     vqip_in: dict
+    # the accumulators at return
+    flow_in_after: float = 0.0
+    vqip_in_after: dict = field(default_factory=dict)
+    flow_out_after: float = 0.0
+    vqip_out_after: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -503,6 +509,10 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                 call.arc_calls.append(record)
                 reply = original(*args, **kwargs)
                 record.reply = copy.deepcopy(reply)
+                record.flow_in_after = arc.flow_in
+                record.vqip_in_after = copy.deepcopy(arc.vqip_in)
+                record.flow_out_after = arc.flow_out
+                record.vqip_out_after = copy.deepcopy(arc.vqip_out)
                 return reply
 
             return wrapped

@@ -517,8 +517,11 @@ This decides the demos' sewer volumes. `pull_ponded` on a `QueueTank` is `Tank.p
   (`:1043`), and `ResidentialDemand` → `Demand` (`demand.py:214`). `NonResidentialDemand` keeps
   its own name. `of_type` filters and the river order use these names.
 - **No zero preferences.** A node with two or more arcs of one direction whose preferences are
-  all zero is refused by name. WSIMOD divides by `priority = 0` when such a loop runs.
-  Negative preferences are refused too.
+  all zero is refused by name, for the directions in which its class distributes (push and pull
+  for `Node`, push for `Catchment`; a `Waste` distributes neither). WSIMOD divides by
+  `priority = 0` when such a loop runs. Negative preferences are refused too. Some zero
+  preferences beside full positive-preference arcs give `priority = 0` only in some states; that
+  is an event, not a refusal (defect table, `"zero_priority"`).
 - **Request mutation.** WSIMOD mutates request dicts in place (`arcs.py:180-185`;
   `distribution.py:40`, `:91`). One mutated dict is read again.
   1. `decorate_leakage_check` divides the request's volume by `1 − leakage` inside
@@ -606,10 +609,30 @@ shape:
 - `"events"`: a dict from each of WSIMOD's warning conditions to a `(..., T, n_nodes)` bool. The
   conditions are those behind "Storage unable to push", "demand deficit", "Spill at reservoir",
   "WWTW couldnt push", "Service reservoirs not filled", "nowhere for sludge to go", "river cant
-  push" and "ponded water cant reenter". This turns each print into a recorded fact.
+  push" and "ponded water cant reenter". This turns each print into a recorded fact. noodl adds
+  conditions of its own where WSIMOD would raise instead: `"zero_priority"` (a distribute
+  round with `priority = 0` while `avail > FLOAT_ACCURACY`, defect table),
+  `"wtw_liquor_zero_denominator"` and `"inaccurate_evaporation"`.
 - `"decisions"` (only when `diagnostics["decisions"] = True` on entry): every branch site's
   per-instance outcome per day, in call order. The gradient tests and the parity admission rule
-  use it.
+  use it. Each record is `Decision(site, call, round, active, outcome, margin)`:
+  - `site` is `"<node|arc>:<name>/<WSIMOD method>/<branch>"`, with the direction in the branch
+    for methods that serve both directions: `node:N/get_connected/<push|pull>:<arc>/below_fa`,
+    `node:N/push_distributed/{oversubscribed,not_pushed,avail,amount}`,
+    `node:N/pull_distributed/{deficit,avail}`, `node:N/check_basic/<push|pull>/clip`,
+    `arc:A/get_excess/<push|pull>/min`, `arc:A/send_push_request/clip`,
+    `arc:A/send_pull_request/clip`, `node:N/pull_check_abstraction/clip`,
+    `node:N/pull_set_abstraction/clip`; later classes extend the pattern.
+  - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
+    the calls noodl's structure makes, masked ones included, so it is the same every day; it is
+    not WSIMOD's dynamic count.
+  - `round` is the distribute loop's round, 1 to `MAXITER`, or none outside a loop.
+  - `active` is the instance mask the branch was evaluated under; only its true entries are
+    WSIMOD's decisions. A loop condition at round `r` is evaluated under the mask round `r − 1`
+    ran with, the branches inside round `r` under round `r`'s own mask.
+  - `outcome` is the comparison and `margin` is `lhs − rhs`.
+
+  Tests key the records by `(site, call, round)`.
 - `"mass_balance"`, also on `WsimodResults`: per day, the system's inflow (catchment flows,
   precipitation, `FWTW` deficits, `UnlimitedDistribution` supply, demand loads), its outflow
   (Waste, evaporation, demand consumption, unpushed sludge, WTW solids, unrouted catchment
@@ -884,6 +907,7 @@ recorded in the mass balance (Diagnostics).
 | WTW liquor blend divides by zero on a zero-input day with no previous liquor, or always when `liquor_multiplier["volume"] = 0` (`wtw.py:176-182`) | `ZeroDivisionError` | previous liquor value kept (double `where`), event recorded |
 | A `QueueArc` push below `FLOAT_ACCURACY` returns before `update_queue` (`arcs.py:378-379`) | the water is lost, counted as accepted, and due requests wait for the next real push | reproduced; the water is recorded as dropped |
 | A `QueueArc` pull rescales a zero-volume request that carries additive keys (`arcs.py:341-343`) | `ZeroDivisionError` | the rescale is skipped at zero volume, as `Arc` does (`:180-183`) |
+| A distribute round with `priority = 0` while `avail > FLOAT_ACCURACY`: some arcs have preference 0 and the others no room (`nodes.py:393`, `:462`). State-dependent, so a static refusal would refuse configurations WSIMOD runs | `ZeroDivisionError` | nothing is distributed that round (a safe denominator over zero allocations), so the amount stays unpushed or unpulled; event `"zero_priority"` |
 | The `WWTW.make_discharge` rejection at or below `FLOAT_ACCURACY` is not forced back (`wtw.py:347-348`) | the water vanishes | transcribed as a tolerance, not a defect; recorded as dropped |
 | `decays: {}` on the `Storage` family builds a `DecayTank` (`storage.py:53`, `:300`) | needs node temperature forcing, and the tank is not recorded (`model.py:1123`) | refused by name (3b) |
 | No check that `total_porosity` exceeds `field_capacity` and `wilting_point` (`land.py:942`, `:950`) | `ZeroDivisionError` or a complex number | refused by name |

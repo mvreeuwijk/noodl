@@ -257,8 +257,12 @@ def test_the_distribute_loop_stops_at_maxiter_and_says_so():
     reply = junction.push_distributed(vol(50.0), active=TRUE)
     assert float(reply[0]) == 40.0  # five rounds of one unit per sink
     assert bool(ctx.maxiter[("junction", "push_distributed", 0)])
-    sites = [site for site, _, _ in ctx.decisions]
-    assert sites.count("junction.push_distributed.0.not_pushed") == 5
+    rounds = [
+        d.round for d in ctx.decisions if d.site == "node:junction/push_distributed/not_pushed"
+    ]
+    assert rounds == [1, 2, 3, 4, 5]
+    hit = ctx.events["zero_priority"]["junction"] if "zero_priority" in ctx.events else None
+    assert hit is None or not bool(hit)
     junction.push_distributed(vol(1.0), active=TRUE)
     assert not bool(ctx.maxiter[("junction", "push_distributed", 1)])
 
@@ -267,10 +271,58 @@ def test_decisions_record_the_margin():
     junction, wastes, arcs = three_wastes()
     ctx = day(junction, *wastes, *arcs, record=True)
     junction.push_set(vol(10.0), active=TRUE)
-    site, outcome, margin = next(
-        d for d in ctx.decisions if d[0] == "junction.push_distributed.0.oversubscribed"
-    )
-    assert bool(outcome) and float(margin) == 4.0
+    by_key = {(d.site, d.call, d.round): d for d in ctx.decisions}
+    switch = by_key[("node:junction/push_distributed/oversubscribed", 0, None)]
+    assert bool(switch.outcome) and bool(switch.active) and float(switch.margin) == 4.0
+    assert ("arc:to_w0/get_excess/push/min", 0, None) in by_key
+    assert ("arc:to_w0/send_push_request/clip", 0, None) in by_key
+    assert ("node:junction/get_connected/push:to_w1/below_fa", 0, None) in by_key
+
+
+def test_decisions_after_the_loop_converged_carry_active_false():
+    junction, wastes, arcs = three_wastes()
+    ctx = day(junction, *wastes, *arcs, record=True)
+    junction.push_set(vol(3.0), active=TRUE)  # everything goes in round 1
+    by_key = {(d.site, d.call, d.round): d for d in ctx.decisions}
+    site = "node:junction/push_distributed"
+    assert bool(by_key[(f"{site}/amount", 0, 1)].active)
+    # round 2's condition is WSIMOD's own test after round 1, evaluated and false
+    entry = by_key[(f"{site}/not_pushed", 0, 2)]
+    assert bool(entry.active) and not bool(entry.outcome)
+    for r in (2, 3, 4, 5):
+        assert not bool(by_key[(f"{site}/amount", 0, r)].active)
+    for r in (3, 4, 5):
+        assert not bool(by_key[(f"{site}/not_pushed", 0, r)].active)
+        assert not bool(by_key[(f"{site}/avail", 0, r)].active)
+    # the re-polls after rounds 2-5 run masked too
+    polls = [
+        d for d in ctx.decisions if d.site == "node:junction/get_connected/push:to_w0/below_fa"
+    ]
+    assert [bool(d.active) for d in polls] == [True, True, False, False, False, False]
+
+
+def test_a_zero_priority_with_room_is_an_event_not_a_division_by_zero():
+    # preferences (0, 1) and the preference-1 arc full: priority 0 while avail is 10. WSIMOD
+    # raises ZeroDivisionError (nodes.py:462); noodl pushes nothing and records the event.
+    junction, wastes, arcs = three_wastes((10.0, 0.0, 0.0), (0.0, 1.0, 1.0))
+    ctx = day(junction, *wastes, *arcs)
+    reply = junction.push_set(vol(5.0), active=TRUE)
+    assert float(reply[0]) == 5.0
+    assert [float(a.flow_in) for a in arcs] == [0.0, 0.0, 0.0]
+    assert bool(ctx.events["zero_priority"]["junction"])
+    assert torch.isfinite(reply).all()
+
+
+def test_load_stores_walks_a_dotted_path():
+    class Tanked(StoreNode):
+        store_paths = ("tank.storage",)
+
+    store = Tanked("t", P)
+    store.tank = type("Tank", (), {})()
+    store.load_stores({"tank.storage": vol(4.0)})
+    assert float(store.tank.storage[0]) == 4.0
+    with pytest.raises(KeyError, match="'t' has no store 'storage'"):
+        store.load_stores({"storage": vol(1.0)})
 
 
 def _network(nodes, arcs, dates=("2000-01-01",)) -> WsimodNetwork:
@@ -318,6 +370,20 @@ def test_zero_and_negative_preferences_are_refused(preferences, match):
     )
     with pytest.raises(ValueError, match=match):
         Catchment.validate(net.nodes[0], net, pollutants=True)
+
+
+def test_zero_preferences_into_a_waste_are_valid():
+    # a Waste distributes nothing (waste.py:32-35), so its in-arcs' preferences are not shares
+    net = _network(
+        [_flow("c"), _flow("d"), {"name": "w", "type_": "Waste"}],
+        [
+            {"name": f"{x}_w", "type_": "Arc", "in_port": x, "out_port": "w", "preference": 0.0}
+            for x in "cd"
+        ],
+    )
+    assert Waste.validate(net.nodes[2], net, pollutants=True) == []
+    with pytest.raises(ValueError, match="every in-arc has preference 0"):
+        Node.validate(net.nodes[2], net, pollutants=True)
 
 
 def test_check_recursion_is_the_basic_checks_only():

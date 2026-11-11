@@ -2,7 +2,8 @@
 
 WSIMOD runs each purpose-built case (``_wsimod_cases.py``) under ``capture_node_calls``; the
 replay builds the noodl node alone on scripted arcs and compares every arc call it makes,
-every reply and every store to ``1e-12 * scale``, in both modes: with the case's pollutants,
+every reply and every store exactly (the node class's ``replay_bound``, 0 for Node, Waste and
+Catchment), in both modes: with the case's pollutants,
 and quantity-only on the volumes.
 """
 
@@ -16,8 +17,9 @@ import pytest
 pytest.importorskip("wsimod")
 
 from noodl.apps.wsimod.config import read_wsimod_config  # noqa: E402
+from noodl.apps.wsimod.engine import make_node  # noqa: E402
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY  # noqa: E402
-from tests.apps.wsimod._replay import BOUND, Mismatch, replay  # noqa: E402
+from tests.apps.wsimod._replay import Mismatch, replay  # noqa: E402
 from tests.verification._wsimod_cases import CASES  # noqa: E402
 from tests.verification._wsimod_reference import (  # noqa: E402
     capture_node_calls,
@@ -46,7 +48,11 @@ def test_replay_matches_wsimod(case, name):
     for mode in spec.modes:
         pollutants = network.pollutants if mode == "pollutants" else QUANTITY_ONLY
         worst = replay(network, name, calls, scale=spec.scale, pollutants=pollutants)
-        assert worst <= BOUND, (mode, worst)
+        node_spec = next(n for n in network.nodes if n.name == name)
+        bound = type(make_node(node_spec, network, pollutants)).replay_bound
+        assert worst <= bound, (mode, worst)
+        if bound == 0.0:  # Node, Waste, Catchment: bitwise WSIMOD
+            assert worst == 0.0, (mode, worst)
 
 
 def test_the_cases_reach_the_branches_they_are_built_for():

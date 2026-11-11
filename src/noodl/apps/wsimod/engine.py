@@ -9,12 +9,38 @@ distribute loops, the sub-``FLOAT_ACCURACY`` water WSIMOD drops, and the mass-ba
 
 Every branch on data goes through :meth:`Ctx.decide`, which compares detached values, so the
 outcome is a bool tensor over the batch and the values stay in the autograd graph.
+
+Decision records (spec, Diagnostics). Each is a :class:`Decision`
+``(site, call, round, active, outcome, margin)``:
+
+- ``site`` is ``"<node|arc>:<name>/<WSIMOD method>/<branch>"``, with the direction in the
+  branch for methods that serve both directions. The sites so far:
+  ``node:N/get_connected/<push|pull>:<arc>/below_fa``,
+  ``node:N/push_distributed/{oversubscribed,not_pushed,avail,amount}``,
+  ``node:N/pull_distributed/{deficit,avail}``, ``node:N/check_basic/<push|pull>/clip``,
+  ``arc:A/get_excess/<push|pull>/min``, ``arc:A/send_push_request/clip``,
+  ``arc:A/send_pull_request/clip``, ``node:N/pull_check_abstraction/clip``,
+  ``node:N/pull_set_abstraction/clip``. Later classes extend the same pattern.
+- ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
+  (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
+  structure makes, masked ones included, so it is the same on every day and for every
+  instance; it is not WSIMOD's dynamic count of the calls it actually made.
+- ``round`` is the distribute loop's round, 1 to ``MAXITER``, or ``None`` outside a loop.
+- ``active`` is the instance mask the branch was evaluated under. Only its true entries are
+  WSIMOD's decisions: a masked call or round is computed and discarded. A loop's condition at
+  round ``r`` is evaluated under the mask round ``r - 1`` ran with (WSIMOD tests it after
+  every round it runs, and before the first under the caller's mask); the branches inside the
+  round under round ``r``'s own mask.
+- ``outcome`` is the comparison; ``margin`` is ``lhs - rhs``.
+
+Tests key the records by ``(site, call, round)``.
 """
 
 from __future__ import annotations
 
 import operator
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -27,7 +53,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import NodeSpec, WsimodNetwork
     from noodl.apps.wsimod.node import Node
 
-__all__ = ["Ctx", "Engine", "dmax", "dmin", "make_node"]
+__all__ = ["Ctx", "Decision", "Engine", "dmax", "dmin", "make_node"]
 
 _OPS = {
     "<": operator.lt,
@@ -43,10 +69,22 @@ def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
 
 
+@dataclass(frozen=True)
+class Decision:
+    """One recorded branch (see the module text for the vocabulary)."""
+
+    site: str
+    call: int
+    round: int | None
+    active: Tensor
+    outcome: Tensor
+    margin: Tensor
+
+
 class Ctx:
     """One day of one batch: shape, pollutants, ``FLOAT_ACCURACY`` and the day's records.
 
-    ``decisions`` is the list of ``(site, outcome, lhs - rhs)`` in call order, kept only when
+    ``decisions`` is the list of :class:`Decision` records in call order, kept only when
     ``record_decisions``. ``events[condition][node]`` ORs the masks of WSIMOD's warning
     conditions. ``maxiter[(node, method, call index)]`` says whether that distribute loop ran
     all ``MAXITER`` rounds (WSIMOD prints "Maxiter reached", ``nodes.py:405-406``, ``:475-476``).
@@ -70,12 +108,12 @@ class Ctx:
         self.day = int(day)
         self.node_names = tuple(node_names)
         self.record_decisions = record_decisions
-        self.decisions: list[tuple[str, Tensor, Tensor]] = []
+        self.decisions: list[Decision] = []
         self.events: dict[str, dict[str, Tensor]] = {}
         self.maxiter: dict[tuple[str, str, int], Tensor] = {}
         self.dropped: Tensor = self.empty()
         self.terms: dict[str, Tensor] = {}
-        self._loop_calls: dict[tuple[str, str], int] = {}
+        self._calls: dict[tuple[str, str], int] = {}
 
     def empty(self) -> Tensor:
         """An empty VQIP of the batch shape, ``shape + (1 + K,)``."""
@@ -85,14 +123,17 @@ class Ctx:
         """Zeros of the batch shape."""
         return torch.zeros(self.shape, dtype=torch.float64)
 
-    def decide(self, site: str, lhs, op: str, rhs) -> Tensor:
+    def decide(
+        self, site: str, lhs, op: str, rhs, *, active: Tensor, call: int, round: int | None = None
+    ) -> Tensor:
         """``lhs op rhs`` on detached values: a bool tensor of the batch shape. When recording,
-        appends ``(site, outcome, lhs - rhs)`` (D12)."""
+        appends a :class:`Decision` with the ``active`` mask it was evaluated under (D12)."""
         lhs, rhs = _f64(lhs), _f64(rhs)
         outcome = torch.broadcast_to(_OPS[op](lhs.detach(), rhs.detach()), self.shape)
         if self.record_decisions:
+            mask = torch.broadcast_to(torch.as_tensor(active, dtype=torch.bool), self.shape)
             margin = torch.broadcast_to((lhs - rhs).detach(), self.shape)
-            self.decisions.append((site, outcome, margin))
+            self.decisions.append(Decision(site, call, round, mask, outcome, margin))
         return outcome
 
     def event(self, condition: str, node: str, mask: Tensor) -> None:
@@ -110,11 +151,16 @@ class Ctx:
         old = self.terms.get(name, self.empty())
         self.terms[name] = sum_vqip(self.p, old, _masked(vqip, mask))
 
+    def call(self, element: str, method: str) -> int:
+        """The static index of this call of ``method`` on ``element`` (``"node:N"``,
+        ``"arc:A"``) this day: 0, 1, ... in noodl's call order, masked calls included."""
+        index = self._calls.get((element, method), 0)
+        self._calls[(element, method)] = index + 1
+        return index
+
     def loop_site(self, node: str, method: str) -> tuple[str, str, int]:
         """The call site ``(node, method, call index this day)`` of a distribute loop."""
-        index = self._loop_calls.get((node, method), 0)
-        self._loop_calls[(node, method)] = index + 1
-        return (node, method, index)
+        return (node, method, self.call(f"node:{node}", method))
 
     def loop_exit(self, site: tuple[str, str, int], hit: Tensor) -> None:
         """Record whether the loop at ``site`` ran all ``MAXITER`` rounds."""
@@ -126,16 +172,16 @@ def _masked(vqip: Tensor, mask: Tensor) -> Tensor:
     return torch.where(mask[..., None], vqip, torch.zeros_like(vqip))
 
 
-def dmin(ctx: Ctx, site: str, a, b) -> Tensor:
+def dmin(ctx: Ctx, site: str, a, b, *, active: Tensor, call: int, round: int | None = None):
     """Python's ``min(a, b)`` as a recorded decision: ``a`` unless ``b < a``."""
     a, b = _f64(a), _f64(b)
-    return torch.where(ctx.decide(site, b, "<", a), b, a)
+    return torch.where(ctx.decide(site, b, "<", a, active=active, call=call, round=round), b, a)
 
 
-def dmax(ctx: Ctx, site: str, a, b) -> Tensor:
+def dmax(ctx: Ctx, site: str, a, b, *, active: Tensor, call: int, round: int | None = None):
     """Python's ``max(a, b)`` as a recorded decision: ``a`` unless ``b > a``."""
     a, b = _f64(a), _f64(b)
-    return torch.where(ctx.decide(site, b, ">", a), b, a)
+    return torch.where(ctx.decide(site, b, ">", a, active=active, call=call, round=round), b, a)
 
 
 def make_node(spec: NodeSpec, network: WsimodNetwork, pollutants: Pollutants) -> Node:

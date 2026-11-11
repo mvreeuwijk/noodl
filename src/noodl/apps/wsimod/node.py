@@ -61,7 +61,14 @@ class Connected:
 
 
 def _types(of_type: str | Sequence[str] | None) -> tuple[str, ...] | None:
-    """A string ``of_type`` is a one-element list (``nodes.py:253-254``)."""
+    """A string ``of_type`` is a one-element list (``nodes.py:253-254``).
+
+    WSIMOD passes strings at ``storage.py:240`` and ``wtw.py:608`` (``of_type="Sewer"``).
+    ``get_direction_arcs`` wraps them in a list, but the single-arc test (``nodes.py:367-368``,
+    ``:430-431``) does ``x in of_type`` on the string itself, a substring test. No WSIMOD class
+    name is a substring of another one an in-scope call site names, so the one-element tuple
+    is equivalent at every call site in scope.
+    """
     if of_type is None:
         return None
     return (of_type,) if isinstance(of_type, str) else tuple(of_type)
@@ -82,6 +89,12 @@ class Node:
     step_methods: ClassVar[tuple[str, ...]] = ()
     # nodes.py:76-78: in and out are the arcs' flows, which cancel; ds is empty
     mass_balance: ClassVar[dict[str, str]] = {}
+    # the directions the class distributes over (its handlers call pull/push_distributed):
+    # the zero-preference refusal applies to these only
+    distributes: ClassVar[tuple[str, ...]] = ("out", "in")
+    # the node replay's bound relative to the case scale (spec, Verification 1): 0, bitwise,
+    # for a class whose arithmetic is IEEE + - * / and comparisons only
+    replay_bound: ClassVar[float] = 0.0
 
     ctx: Ctx
 
@@ -140,7 +153,11 @@ class Node:
         if unknown:
             raise KeyError(f"node {self.name!r} has no store {sorted(unknown)[0]!r}")
         for path, value in stores.items():
-            setattr(self, path, torch.as_tensor(value, dtype=torch.float64))
+            *parents, last = path.split(".")
+            owner = self
+            for part in parents:
+                owner = getattr(owner, part)
+            setattr(owner, last, torch.as_tensor(value, dtype=torch.float64))
 
     def end_timestep(self) -> None:
         """``nodes.py:637-642``: nothing for a plain node."""
@@ -159,6 +176,8 @@ class Node:
             for arc in arcs:
                 if arc.preference < 0:
                     raise ValueError(f"arc {arc.name!r}: preference {arc.preference} is negative")
+            if direction not in cls.distributes:
+                continue
             if len(arcs) >= 2 and all(arc.preference == 0 for arc in arcs):
                 raise ValueError(
                     f"node {spec.name!r}: every {direction}-arc has preference 0 "
@@ -225,6 +244,7 @@ class Node:
         """``nodes.py:271-317``: each arc's unclipped check, zeroed below ``FLOAT_ACCURACY``,
         summed in polling order."""
         ctx = self.ctx
+        call = ctx.call(f"node:{self.name}", f"get_connected/{direction}")
         f, arcs = self.get_direction_arcs(direction, of_type)
         avail = ctx.zeros()
         priority = ctx.zeros()
@@ -232,7 +252,14 @@ class Node:
         capacity: dict[str, Tensor] = {}
         for arc in arcs:
             a = getattr(arc, f)(tag=tag, active=active)[..., 0]
-            low = ctx.decide(f"{self.name}.get_connected.{arc.name}", a, "<", ctx.fa)
+            low = ctx.decide(
+                f"node:{self.name}/get_connected/{direction}:{arc.name}/below_fa",
+                a,
+                "<",
+                ctx.fa,
+                active=active,
+                call=call,
+            )
             a = torch.where(low, torch.zeros_like(a), a)
             avail = avail + a
             preference = arc.preference
@@ -250,6 +277,16 @@ class Node:
         volume = torch.as_tensor(volume, dtype=torch.float64)
         rest = torch.zeros(volume.shape + (self.p.K,), dtype=torch.float64)
         return torch.cat([volume[..., None], rest], dim=-1)
+
+    def _zero_priority(self, connected: Connected, running: Tensor) -> None:
+        """WSIMOD divides by ``priority`` (``nodes.py:393``, ``:462``) and raises
+        ``ZeroDivisionError`` when it is 0 while ``avail > FLOAT_ACCURACY``: some arcs have
+        preference 0 and the others no room. noodl distributes nothing that round (each share
+        is ``allocation = 0`` over a safe denominator) and records ``"zero_priority"`` (spec,
+        defect table)."""
+        ctx = self.ctx
+        zero = (connected.priority == 0).detach() & (connected.avail > ctx.fa).detach()
+        ctx.event("zero_priority", self.name, running & zero)
 
     def pull_distributed(
         self,
@@ -277,14 +314,26 @@ class Node:
         deficit = request
         connected = self.get_connected("pull", types, tag, active=active)
         site = ctx.loop_site(self.name, "pull_distributed")
-        where = f"{self.name}.pull_distributed.{site[2]}"
+        where, call = f"node:{self.name}/pull_distributed", site[2]
         running = torch.as_tensor(active, dtype=torch.bool)
-        for _ in range(MAXITER):
+        for r in range(1, MAXITER + 1):
+            entering = running
             running = (
-                running
-                & ctx.decide(f"{where}.deficit", deficit, ">", ctx.fa)
-                & ctx.decide(f"{where}.avail", connected.avail, ">", ctx.fa)
+                entering
+                & ctx.decide(
+                    f"{where}/deficit", deficit, ">", ctx.fa, active=entering, call=call, round=r
+                )
+                & ctx.decide(
+                    f"{where}/avail",
+                    connected.avail,
+                    ">",
+                    ctx.fa,
+                    active=entering,
+                    call=call,
+                    round=r,
+                )
             )
+            self._zero_priority(connected, running)
             den = safe_den(connected.priority)
             for key, allocation in connected.allocation.items():
                 received = self.in_arcs[key].send_pull_request(
@@ -322,8 +371,10 @@ class Node:
         not_pushed = vqip[..., 0]
         connected = self.get_connected("push", types, tag, active=active)
         site = ctx.loop_site(self.name, "push_distributed")
-        where = f"{self.name}.push_distributed.{site[2]}"
-        switch = ctx.decide(f"{where}.oversubscribed", not_pushed, ">", connected.avail)
+        where, call = f"node:{self.name}/push_distributed", site[2]
+        switch = ctx.decide(
+            f"{where}/oversubscribed", not_pushed, ">", connected.avail, active=active, call=call
+        )
         connected = Connected(
             connected.avail,
             torch.where(switch, connected.avail, connected.priority),
@@ -334,13 +385,39 @@ class Node:
             connected.capacity,
         )
         running = torch.as_tensor(active, dtype=torch.bool)
-        for _ in range(MAXITER):
+        for r in range(1, MAXITER + 1):
+            entering = running
             running = (
-                running
-                & ctx.decide(f"{where}.not_pushed", not_pushed, ">", ctx.fa)
-                & ctx.decide(f"{where}.avail", connected.avail, ">", ctx.fa)
+                entering
+                & ctx.decide(
+                    f"{where}/not_pushed",
+                    not_pushed,
+                    ">",
+                    ctx.fa,
+                    active=entering,
+                    call=call,
+                    round=r,
+                )
+                & ctx.decide(
+                    f"{where}/avail",
+                    connected.avail,
+                    ">",
+                    ctx.fa,
+                    active=entering,
+                    call=call,
+                    round=r,
+                )
             )
-            amount = dmin(ctx, f"{where}.amount", connected.avail, not_pushed)
+            amount = dmin(
+                ctx,
+                f"{where}/amount",
+                connected.avail,
+                not_pushed,
+                active=running,
+                call=call,
+                round=r,
+            )
+            self._zero_priority(connected, running)
             den = safe_den(connected.priority)
             for key, allocation in connected.allocation.items():
                 to_send = v_change_vqip(p, not_pushed_, amount * allocation / den)
@@ -364,12 +441,20 @@ class Node:
         """``nodes.py:480-508``: the ordered sum of the neighbours' unclipped checks, clipped to
         the request only when one is given (``:505-506``). A negative pipe excess after a
         forced push is summed as it is."""
+        call = self.ctx.call(f"node:{self.name}", f"check_basic/{direction}")
         f, arcs = self.get_direction_arcs(direction, of_type)
         avail = self.ctx.empty()
         for arc in arcs:
             avail = sum_vqip(self.p, avail, getattr(arc, f)(tag=tag, active=active))
         if vqip is not None:
-            volume = dmin(self.ctx, f"{self.name}.check_basic", avail[..., 0], vqip[..., 0])
+            volume = dmin(
+                self.ctx,
+                f"node:{self.name}/check_basic/{direction}/clip",
+                avail[..., 0],
+                vqip[..., 0],
+                active=active,
+                call=call,
+            )
             avail = v_change_vqip(self.p, avail, volume)
         return avail
 
@@ -416,6 +501,7 @@ class Waste(Node):
     the model (its ``total_in`` is a mass-balance outflow, ``waste.py:38``)."""
 
     wsimod_type: ClassVar[str] = "Waste"
+    distributes: ClassVar[tuple[str, ...]] = ()
     mass_balance: ClassVar[dict[str, str]] = {"Waste.total_in": "out"}
 
     def __init__(self, spec: NodeSpec, pollutants: Pollutants) -> None:
