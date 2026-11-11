@@ -503,3 +503,52 @@ def test_the_gradient_at_zero_coefficients_is_the_reactions(key):
     central = (up - down) / (2 * h)
     assert float(grad.sum()) != 0.0
     assert float(grad.sum()) == pytest.approx(float(central), rel=1e-5)
+
+
+@pytest.mark.parametrize("change, match", [(dict(bulk_order=0.5), "ORDER BULK 0.5"),
+                                           (dict(tank_order=0.5), "ORDER TANK 0.5")])
+def test_a_reaction_order_between_0_and_1_is_refused(change, match):
+    """Ruling Q20: EPANET 2.2's `bulkrate` takes `pow(max(0, c), n - 1) = inf` at zero
+    concentration for `0 < n < 1` and returns NaN (MEASURED by the review, ORDER BULK 0.5 on
+    this network: the report's mass balance `-1.#IND`, 70 of 225 node-times NaN), so there is no
+    finite answer to reproduce: refused by name."""
+    model, _, _ = build_model(_reactive_base(**change))
+    with pytest.raises(ValueError, match=match):
+        water_run(model, duration=3600, quality=True)
+
+
+def test_a_zero_bulk_coefficient_rate_is_exactly_zero():
+    """`bulk_rate` is exactly 0 where `kb` is 0, even where the potential is not finite (an
+    order between 0 and 1 at `c = 0`); the derivative in `kb` is the potential."""
+    kb = torch.zeros(2, dtype=F64, requires_grad=True)
+    rate = bulk_rate(_t(0.0, 4.0), kb, 0.5, 0.0, BULK_TINY)
+    assert rate.tolist() == [0.0, 0.0]
+    (grad,) = torch.autograd.grad(rate.sum(), kb)
+    assert grad.tolist() == [0.0, 2.0]
+
+
+def test_zero_coefficients_requiring_a_gradient_leave_a_reactive_run_unchanged():
+    """Ruling Q19: on a reactive network (wall decay, bulk order 2), bulk coefficients of 0
+    that require a gradient give the plain run's qualities bit for bit."""
+    model, _, _ = build_model(_base(global_wall=-0.3 / 86400, bulk_order=2.0,
+                                    initial={"R1": 1.0, "T1": 0.6}))
+    drivers = initial_drivers(model)
+    drivers["quality.bulk_coefficient"] = torch.zeros(len(model.water_network.pipes),
+                                                      dtype=F64, requires_grad=True)
+    attached = water_run(model, drivers=drivers, duration=4 * 3600, quality=True)
+    plain = water_run(model, duration=4 * 3600, quality=True)
+    assert attached.node_quality.requires_grad
+    assert torch.equal(attached.node_quality.detach(), plain.node_quality)
+    assert torch.equal(attached.link_quality.detach(), plain.link_quality)
+
+
+def test_a_darcy_weisbach_roughness_not_below_the_diameter_is_refused_with_a_correlation():
+    """`adjustdata` divides by `|log(e/d)|`, 0 at `e = d` (in the file's units)."""
+    net = read_epanet_inp(BASE)
+    pipes = tuple(dataclasses.replace(p, roughness=p.diameter) if p.name == "P3" else
+                  dataclasses.replace(p, roughness=0.15e-3) for p in net.pipes)
+    dw = dataclasses.replace(net, headloss="D-W", pipes=pipes)
+    with pytest.raises(ValueError, match="'P3'"):
+        pipe_coefficients(dw, dataclasses.replace(net.quality, roughness_correlation=-1e-5))
+    _, kw = pipe_coefficients(dw, net.quality)          # no correlation: no refusal
+    assert float(kw.abs().max()) == 0.0

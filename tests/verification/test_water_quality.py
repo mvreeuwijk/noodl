@@ -733,3 +733,19 @@ def test_a_check_valve_pipe_does_not_react_like_epanet(tmp_path):
     _, diagnostics, *_ = _matches(tmp_path, "reactive_check_valve")
     chain = diagnostics["link_names"].index("P5")
     assert all(counts[chain] == 0 for counts in diagnostics["quality"][0]["segments"])
+
+
+def test_the_mass_balance_reader_takes_non_finite_terms():
+    """EPANET's report prints a non-finite term as the C runtime does (MSVC `-1.#IND`,
+    `1.#INF`; elsewhere `nan`, `inf`): read as NaN and +-inf, so a failing case reports."""
+    import math
+
+    from tests.verification._epanet_quality import mass_balance_terms
+    report = ("  Initial Mass:      -1.#IND0e+000\n  Mass Inflow:        1.#INF0e+000\n"
+              "  Mass Outflow:      -inf\n  Mass Reacted:       nan\n"
+              "  Final Mass:         1.23450e+01\n  Mass Ratio:        -1.#QNAN\n")
+    terms = mass_balance_terms(report)
+    assert math.isnan(terms["initial"]) and math.isnan(terms["reacted"])
+    assert math.isnan(terms["ratio"])
+    assert terms["inflow"] == math.inf and terms["outflow"] == -math.inf
+    assert terms["final"] == 12.345

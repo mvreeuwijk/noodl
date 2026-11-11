@@ -54,7 +54,9 @@ def _wall_from_roughness(net, pipe, factor: float) -> float:
     H-W `F / C`, D-W `F / |ln(e/d)|`, C-M `F n`, 0 when the roughness or the diameter is not
     positive. EPANET takes it BEFORE `convertunits`, so D-W's `e/d` is in the FILE's units:
     mm over mm in an SI file, millifeet over inches in a US one (`e/d * 1000 * 0.0254 /
-    0.3048`, with `net.options.flow_units`; SI without it)."""
+    0.3048`, with `net.options.flow_units`; SI without it). A D-W roughness not below the
+    diameter (in the file's units) is refused by name: at `e = d` EPANET divides by
+    `log(1) = 0`."""
     from noodl.apps.water.inp import _US_UNITS  # the reader imports the network module
     if not (pipe.roughness > 0.0 and pipe.diameter > 0.0):
         return 0.0
@@ -65,6 +67,11 @@ def _wall_from_roughness(net, pipe, factor: float) -> float:
     ratio = pipe.roughness / pipe.diameter
     if net.options.flow_units in _US_UNITS:
         ratio *= _MILLIFEET_PER_INCH_RATIO
+    if ratio >= 1.0:
+        raise ValueError(
+            f"quality: ROUGHNESS CORRELATION on pipe {pipe.name!r}, whose Darcy-Weisbach "
+            f"roughness is not below its diameter in the file's units (e/d = {ratio:g}): "
+            f"EPANET's adjustdata divides by |log(e/d)|, 0 at e = d")
     return factor / abs(math.log(ratio))
 
 
@@ -100,7 +107,9 @@ def bulk_rate(c: Tensor, kb: Tensor, order: float, limit: float, tiny: float) ->
     `kb c / c1`, `c1 = Climit + sgn(kb) c`, `c1` set to `sgn(c1) tiny` when `|c1| < tiny`
     (`tiny`: EPANET's `TINY` in the file's unit, `BULK_TINY`). Order n otherwise: `c1 = c`
     without a limiting potential, else `max(0, sgn(kb) (Climit - c))`; the potential `c1`
-    (order 1), `c1 c` (order 2), `c1 max(0, c)^(n-1)`. A negative potential is 0."""
+    (order 1), `c1 c` (order 2), `c1 max(0, c)^(n-1)`. A negative potential is 0. Where
+    `kb` is 0 the rate is exactly 0 even if the potential is not finite (EPANET's `0 < n <
+    1` at `c = 0`, which the router refuses), its derivative in `kb` kept: the potential."""
     if order == 0.0:
         potential = torch.ones_like(c)
     elif order < 0.0:
@@ -122,6 +131,7 @@ def bulk_rate(c: Tensor, kb: Tensor, order: float, limit: float, tiny: float) ->
             at_zero = 0.0 if order > 1.0 else (1.0 if order == 1.0 else math.inf)
             potential = c1 * torch.where(base > 0, safe ** (order - 1.0), at_zero)
     potential = torch.where(potential < 0, 0.0, potential)
+    potential = torch.where((kb == 0) & ~torch.isfinite(potential), 0.0, potential)
     return kb * potential
 
 
@@ -164,9 +174,11 @@ def wall_rate(c: Tensor, diameter: Tensor, kw: Tensor, rc: Tensor, *, order: flo
     concentration `c` of a pipe of `diameter` (m) with the wall coefficient `kw` and the rate
     coefficient `rc` (`wall_coefficients`). Order 0: the mass transfer `sgn(kw) c kf` or the
     reaction `kw / EPANET_LITRES_PER_M3`, whichever is smaller in magnitude (the reaction
-    mass-transfer limited), times `4 / d`; order 1 `c Rc`. 0 where `kw` or `d` is 0: both
-    forms are 0 at `kw = 0` by themselves (order 0 takes the reaction `kw / L = 0`), and
-    are left so, keeping their derivative there."""
+    mass-transfer limited), times `4 / d`; order 1 `c Rc`. 0 where `kw` or `d` is 0:
+    EPANET's `if (kw == 0.0 || d == 0.0) return 0` is kept for `d` only, since both forms
+    are exactly 0 at `kw = 0` for a finite `c` by themselves (order 0 takes the reaction
+    `kw / L = 0`; order 1's `Rc` is 0) and are left so, keeping their derivative there; the
+    test would matter only for a non-finite `c`, which the router never holds."""
     if order == 0.0:
         kf = _sgn(kw) * c * rc
         reaction = kw / EPANET_LITRES_PER_M3

@@ -321,7 +321,17 @@ def _interp(points, x):
 
 
 def _refuse_later_features(net, quality: WaterQuality) -> None:
-    """The features of later tasks, refused by name until they are modelled."""
+    """The features of later tasks, refused by name until they are modelled, and the
+    reaction orders EPANET itself has no finite answer for (Ruling Q20)."""
+    if quality.mode == "CHEMICAL":
+        for which, order in (("BULK", quality.bulk_order), ("TANK", quality.tank_order)):
+            if 0.0 < order < 1.0:
+                raise ValueError(
+                    f"quality: ORDER {which} {order:g} lies between 0 and 1: EPANET 2.2's "
+                    f"bulkrate (qualreact.c) takes pow(max(0, c), n - 1) = inf at zero "
+                    f"concentration and returns NaN (inf with a limiting potential), so "
+                    f"there is no finite answer to reproduce; use an order of 0, 1 or "
+                    f"more, or a negative (Michaelis-Menten) order")
     if quality.sources:
         raise ValueError("quality: [SOURCES] (quality sources) are not yet modelled")
     for tank in net.tanks:

@@ -229,13 +229,25 @@ def _names(en) -> tuple[list[str], list[str]]:
 
 
 def mass_balance_terms(report: str) -> dict[str, float]:
-    """The mass-balance section of an EPANET report (`writemassbalance`), `{}` without one."""
+    """The mass-balance section of an EPANET report (`writemassbalance`), `{}` without one.
+    A non-finite term reads as NaN or +-inf, as the C runtime prints it (MSVC's `-1.#IND`,
+    `1.#INF`, `1.#QNAN`, or `nan`, `inf`), so a failing case reports its numbers."""
     terms = {}
     for line in report.splitlines():
         for label, key in _TERMS.items():
             if line.strip().startswith(label):
-                terms[key] = float(line.split(":", 1)[1])
+                terms[key] = _report_float(line.split(":", 1)[1])
     return terms
+
+
+def _report_float(text: str) -> float:
+    """`text` as a float, MSVC's non-finite spellings included (`mass_balance_terms`)."""
+    word = text.strip().upper()
+    if "#IND" in word or "#QNAN" in word or "#SNAN" in word or word.lstrip("+-") == "NAN":
+        return float("nan")
+    if "#INF" in word or word.lstrip("+-") in ("INF", "INFINITY"):
+        return float("-inf") if word.startswith("-") else float("inf")
+    return float(word)
 
 
 def mass_balance_si(terms: Mapping[str, float], mode: str) -> dict[str, float]:
