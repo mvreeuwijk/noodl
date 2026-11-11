@@ -64,7 +64,7 @@ from noodl.apps.water.network import (
     solved_link_states,
     water_steady_and_cut_off,
 )
-from noodl.apps.water.quality import QualityRouter, quality_step
+from noodl.apps.water.quality import QualityMassBalance, QualityRouter, quality_step
 from noodl.apps.water.tanks import TankVolumeCurve
 
 Tensor = torch.Tensor
@@ -95,7 +95,9 @@ class WaterResults:
     n_nodes) and `link_quality` (..., T, n_links) are the quality at the report times in
     the file's quality unit `quality_units` (mg/L, ug/L, hours, percent): a node's as
     EPANET reports it, a link's the volume-weighted mean of its segments (`quality.c`,
-    `avgqual`); `None` when quality is off."""
+    `avgqual`); `None` when quality is off. `mass_balance` (`QualityMassBalance`) is the
+    quality's mass balance at the end of the run (`quality.c`, `evalmassbalance`), `None`
+    when quality is off."""
 
     time: Tensor
     head: Tensor
@@ -111,6 +113,7 @@ class WaterResults:
     node_quality: Tensor | None = None
     link_quality: Tensor | None = None
     quality_units: str | None = None
+    mass_balance: QualityMassBalance | None = None
     node_names: list[str] = field(default_factory=list)
     link_names: list[str] = field(default_factory=list)
 
@@ -571,8 +574,11 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         if t >= hydraulic_report:
             hydraulic_report += clock.report_step
         state = advanced
-    return recorder.results(reported, None if meter is None else meter.result(),
-                            None if router is None else net.quality.units)
+    results = recorder.results(reported, None if meter is None else meter.result(),
+                               None if router is None else net.quality.units)
+    if router is not None:
+        results.mass_balance = router.mass_balance()
+    return results
 
 
 #: The quality inputs `water_run` reads from the state.

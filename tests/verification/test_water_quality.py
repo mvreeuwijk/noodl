@@ -1018,3 +1018,48 @@ def test_a_2comp_tank_without_net_flow_matches_epanet(tmp_path):
     assert hours and bool((results.flow[hours, results.link_names.index("P6")] == 0.0).all())
     open_, *_ = _compare(tmp_path, "mixing_2comp")
     assert float((_quality(results, "T1") - _quality(open_, "T1")).abs().max()) > 1e-4
+
+
+def _mass_balance_differences(tmp_path: Path, case: str):
+    """`(ours, theirs, relative, ratio_difference)` for `case`: noodl's mass balance
+    (`WaterResults.mass_balance`, physical mass) and EPANET's report terms in the same
+    unit (`mass_balance_si`, quality x m3, times 1000 for a CHEMICAL: EPANET's rounded
+    `LperFT3` is removed, Ruling Q28), each term's difference over the larger of the
+    reference's term and the initial mass (a term of 0 on both sides compares equal)."""
+    path = QUALITY_CASES[case](tmp_path)
+    results, _ = run_quality(path)      # the qualities' parity is the case's own test's
+    reference = epanet_quality(path)
+    mode = read_epanet_inp(path).quality.mode
+    theirs = mass_balance_si(reference.terms, mode)
+    unit = 1000.0 if mode == "CHEMICAL" else 1.0
+    ours = results.mass_balance
+    relative = {}
+    for key in ("initial", "inflow", "outflow", "reacted", "final"):
+        mine, expected = float(getattr(ours, key)), theirs[key] * unit
+        relative[key] = (0.0 if mine == expected == 0.0 else
+                         abs(mine - expected) / max(abs(expected), 1e-300))
+    return ours, reference, theirs, relative, abs(float(ours.ratio) - reference.ratio)
+
+
+@pytest.mark.parametrize("case", sorted(QUALITY_CASES))
+def test_mass_balance_matches_epanet(tmp_path, case):
+    """Every term of EPANET's mass balance (`updatemassbalance`, the reactions, `findstoredmass`,
+    `evalmassbalance`) within 2e-5 relative and the ratio within 1e-6 (the spec's bounds), over
+    every parity case. The remaining unit difference is the flow-carried volumes' Ruling Q17
+    scale (1 - 5.4e-6 for LPS, in the inflow, outflow and the mass they build), which the 2e-5
+    bound absorbs with margin; EPANET's rounded `LperFT3` is removed on both sides."""
+    ours, reference, theirs, relative, ratio = _mass_balance_differences(tmp_path, case)
+    assert ratio < 1e-6, (case, float(ours.ratio), reference.ratio)
+    for key, value in relative.items():
+        assert value < 2e-5, (case, key, float(getattr(ours, key)), theirs[key], value)
+    # a term of 0 in EPANET is exactly 0 in noodl, and conversely
+    for key in relative:
+        assert (float(getattr(ours, key)) == 0.0) == (theirs[key] == 0.0), (case, key)
+
+
+def test_a_2comp_tank_without_net_flow_loses_mass_in_both(tmp_path):
+    """`tankmix2` with `vnet == 0` drops the stagnant zone's mass: the balance's ratio is
+    below 1 in noodl and in EPANET alike (the mass left the accounting without leaving as
+    outflow or reaction)."""
+    ours, reference, *_ = _mass_balance_differences(tmp_path, "mixing_2comp_no_flow")
+    assert float(ours.ratio) < 1.0 and reference.ratio < 1.0

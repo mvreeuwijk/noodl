@@ -35,6 +35,7 @@ and `model.link_names` order.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 import torch
 
@@ -62,8 +63,9 @@ LINKVOL_FACTOR = 0.785398
 #: `qualroute.c`, `findnodequal`).
 TRACE_QUALITY = 100.0
 _M3_PER_FT3 = 0.3048**3
-
-
+#: The mass a CHEMICAL's `c v` (quality x m3) is in the chemical's mass unit: exact litres
+#: per m3 (Ruling Q28; EPANET's `LperFT3 = 28.317` is 5.4e-6 above it and is not carried).
+EXACT_LITRES_PER_M3 = 1000.0
 
 
 def flow_volume_scale(flow_units: str | None) -> float:
@@ -75,6 +77,28 @@ def flow_volume_scale(flow_units: str | None) -> float:
     LPS). Without a file unit, 1."""
     cfs = rounded_cfs_per_m3s(flow_units)
     return 1.0 if cfs is None else cfs * _M3_PER_FT3
+
+
+@dataclass
+class QualityMassBalance:
+    """EPANET's water-quality mass balance (`MassBalance`, `quality.c`; reported by
+    `writemassbalance`, `report.c`): the mass `initial` in the network's pipes and tanks,
+    the `inflow` the sources and reservoirs added, the `outflow` the demands and the
+    reservoirs' inflow removed, the mass `reacted` away (negative when a reaction made
+    mass), the `final` mass stored, and the `ratio` of what left to what came in
+    (`evalmassbalance`: `(outflow + final + max(reacted, 0)) / (initial + inflow -
+    min(reacted, 0))`, 1 when that denominator is 0). Each a 0-d tensor (`()`: the router
+    is not batched) that keeps the autograd graph of an attached run (the spec's Ruling
+    Q5; only decisions are detached). Mass is the physical mass: a CHEMICAL's
+    `c v 1000` (`EXACT_LITRES_PER_M3`: 1 m3 at 1 mg/L is 1000 mg, the chemical's mass unit);
+    AGE's and TRACE's `c v` (quality x m3; the ratio is unit-free)."""
+
+    initial: Tensor
+    inflow: Tensor
+    outflow: Tensor
+    reacted: Tensor
+    final: Tensor
+    ratio: Tensor
 
 
 def quality_step(net, hydraulic_step: int) -> int:
@@ -356,7 +380,9 @@ class QualityRouter:
     every quality step before its transport (`react`), the mass it lost kept in `reacted`
     (quality x m3; EPANET's `MassBalance.reacted`). A CHEMICAL whose coefficients require a
     gradient reacts even at zero coefficients (adding exactly 0), so their derivative is
-    kept; `noflowqual` still follows `Reactflag`.
+    kept; `noflowqual` still follows `Reactflag`. `mass_balance` is EPANET's mass balance
+    (`QualityMassBalance`): the sources' and reservoirs' mass in and the demands' and
+    reservoirs' out are accumulated in `transport` (`updatemassbalance`).
     `quality_step` is the quality step (s, `quality_step`). `attached` keeps the autograd
     graph (module docstring). `diagnostics`, a dict, receives under `"quality"` a list
     with one dict for this run: `"times"` (s) and `"node_quality"`, `"link_quality"`
@@ -451,6 +477,10 @@ class QualityRouter:
 
         self._init_reactions(net, quality, inputs, attached)
         self._init_sources(quality, inputs, node_index)
+        # `initqual`: `MassBalance.initial = findstoredmass`, the rest 0 (`reacted` is
+        # `_init_reactions`'s)
+        self.mass_in = self.mass_out = 0.0
+        self.mass_initial = self._stored_mass()
         self.direction = [0] * n_links         # `FlowDir`, ZERO_FLOW at the start
         self.order: list[int] = []              # `SortedNodes`, none until the first sort
         self.diagnostics = None
@@ -602,6 +632,55 @@ class QualityRouter:
                 out.append((self.node[u] + self.node[v]) / 2.0)
         return self._tensor(out)
 
+    def _stored_mass(self):
+        """`findstoredmass` (`quality.c`): the mass `c v` of every segment of every link
+        and tank chain (reservoirs have none), quality x m3."""
+        pool = self.pool
+        cs, vs = pool.scalars()
+        total = 0.0
+        for chain in range(len(pool.first)):
+            for seg in pool.segments(chain):
+                total = total + cs[seg] * vs[seg]
+        return total
+
+    def mass_balance(self) -> QualityMassBalance:
+        """The mass balance now (`evalmassbalance`, which EPANET runs after every
+        `nextqual`: the state after the last `advance`), in `QualityMassBalance`'s mass
+        unit. Sums of tensors: an attached run keeps their graph."""
+        scale = EXACT_LITRES_PER_M3 if self.mode == "CHEMICAL" else 1.0
+        initial, inflow, outflow, reacted, final = (
+            torch.as_tensor(x, dtype=F64) * scale for x in (
+                self.mass_initial, self.mass_in, self.mass_out, self.reacted,
+                self._stored_mass()))
+        massin, massout = initial + inflow, outflow + final
+        if detached(reacted) > 0.0:
+            massout = massout + reacted
+        else:
+            massin = massin - reacted
+        if detached(massin) == 0.0:
+            ratio = torch.ones((), dtype=F64)
+        else:
+            ratio = massout / massin
+        return QualityMassBalance(initial, inflow, outflow, reacted, final, ratio)
+
+    def _update_mass_balance(self, n: int, massin, volout, dt: int) -> None:
+        """`updatemassbalance` (`qualroute.c`) for node `n` after its outflow was released:
+        a junction loses `max(0, demand) dt` of its quality and gains `SourceQual x volout`;
+        a reservoir loses its inflow mass `massin` and gains `SourceQual x volout` when that
+        is positive, else its quality `x volout`; a tank gains `SourceQual x volout`."""
+        if self.junction[n]:
+            lost = max(0.0, self.demand[n]) * dt * self.node[n]
+            added = self.source_qual * volout
+        elif n in self.tank_of:
+            lost = 0.0
+            added = self.source_qual * volout
+        else:
+            lost = massin
+            added = (self.source_qual if detached(self.source_qual) > 0.0
+                     else self.node[n]) * volout
+        self.mass_out = self.mass_out + lost
+        self.mass_in = self.mass_in + added
+
     def _tensor(self, values: list) -> Tensor:
         if self.attached:
             return torch.stack([torch.as_tensor(x, dtype=F64) for x in values])
@@ -730,6 +809,7 @@ class QualityRouter:
             if record:
                 inflow_v[n], inflow_m[n], outflow_v[n] = (detached(volin), detached(massin),
                                                           detached(volout))
+            self._update_mass_balance(n, massin, volout, dt)
         pool.close()
         if record:
             self.diagnostics["segments"].append(pool.counts())
@@ -816,10 +896,17 @@ class QualityRouter:
                 self.node[n] = self._no_flow_quality(n)
         elif n in self.tank_of:
             self.node[n] = self._mix_tank(self.tank_of[n], volin, massin, volin - volout)
-        if self.mode == "TRACE" and n == self.trace:
-            self.node[n] = TRACE_QUALITY
+        self.source_qual = 0.0          # `SourceQual`, for `updatemassbalance`
+        if self.mode == "TRACE":
+            if n == self.trace:
+                # the tracer added: 100 at a reservoir, else what the node lacks of it
+                self.source_qual = (TRACE_QUALITY if n not in self.tank_of
+                                    and not self.junction[n]
+                                    else max(TRACE_QUALITY - self.node[n], 0.0))
+                self.node[n] = TRACE_QUALITY
             return self.node[n]
         added = self._source_quality(n, volout, dt)
+        self.source_qual = added
         if detached(added) == 0.0:
             return self.node[n]
         if self.junction[n]:
@@ -875,5 +962,5 @@ class QualityRouter:
             pool.add(k, v, c)
 
 
-__all__ = ["LINKVOL_FACTOR", "QualityRouter", "SegmentPool", "TRACE_QUALITY",
-           "flow_volume_scale", "quality_step", "sort_nodes"]
+__all__ = ["EXACT_LITRES_PER_M3", "LINKVOL_FACTOR", "QualityMassBalance", "QualityRouter",
+           "SegmentPool", "TRACE_QUALITY", "flow_volume_scale", "quality_step", "sort_nodes"]

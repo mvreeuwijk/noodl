@@ -658,3 +658,73 @@ def test_a_darcy_weisbach_roughness_not_below_the_diameter_is_refused_with_a_cor
         pipe_coefficients(dw, dataclasses.replace(net.quality, roughness_correlation=-1e-5))
     _, kw = pipe_coefficients(dw, net.quality)          # no correlation: no refusal
     assert float(kw.abs().max()) == 0.0
+
+
+_ONE_CUBIC_METRE = """[TITLE]
+one pipe of 1 m3
+[JUNCTIONS]
+J1 0 0
+[RESERVOIRS]
+R1 10
+[PIPES]
+P1 R1 J1 {length:.15g} 1000 100 0 Open
+[QUALITY]
+J1 1
+[TIMES]
+Duration 0
+[OPTIONS]
+Units LPS
+Headloss H-W
+Quality {quality}
+[END]
+"""
+
+
+@pytest.mark.parametrize("quality, mass", [("Chlorine mg/L", 1000.0), ("Age", 1.0),
+                                            ("Trace J1", 100.0)])
+def test_mass_balance_units(tmp_path, quality, mass):
+    """One pipe of 1 m3 (`0.785398 L D^2`) holding 1 of the quality's unit: a CHEMICAL's
+    mass is `c v 1000` (1 m3 at 1 mg/L is 1000 mg; Ruling Q28), AGE's `c v` (hours x m3) and
+    TRACE's `c v` (100 % at the trace node x m3); nothing has moved yet, so only `initial`
+    and `final` hold it and the ratio is 1."""
+    path = tmp_path / "one.inp"
+    path.write_text(_ONE_CUBIC_METRE.format(length=1 / LINKVOL_FACTOR, quality=quality))
+    model, router = _router(read_epanet_inp(path))
+    balance = router.mass_balance()
+    assert float(balance.initial) == pytest.approx(mass, rel=1e-12)
+    assert float(balance.final) == pytest.approx(mass, rel=1e-12)
+    assert float(balance.inflow) == float(balance.outflow) == float(balance.reacted) == 0.0
+    assert float(balance.ratio) == 1.0
+    assert balance.ratio.shape == ()
+
+
+def test_the_mass_balance_of_a_run_closes_and_follows_updatemassbalance():
+    """A non-reactive chemical run: what the junctions' demands and the reservoir take out
+    plus what stays equals what the network started with plus what the reservoir put in
+    (the ratio is 1), and `water_run` returns the balance with its results (`None` without
+    quality)."""
+    net = _base()
+    model, _, _ = build_model(net)
+    results = water_run(model, quality=True)
+    balance = results.mass_balance
+    assert balance is not None and float(balance.final) > 0.0
+    assert float(balance.inflow) > 0.0 and float(balance.outflow) > 0.0
+    assert float(balance.reacted) == 0.0
+    assert float(balance.ratio) == pytest.approx(1.0, abs=1e-6)
+    assert float(balance.final) == pytest.approx(
+        float(balance.initial + balance.inflow - balance.outflow), rel=1e-6)
+    assert water_run(model).mass_balance is None
+
+
+def test_the_mass_balance_keeps_the_autograd_graph():
+    """Ruling Q5: the terms are sums of tensors; the final mass and the ratio carry the
+    gradient of the initial qualities."""
+    model, _, _ = build_model(_base())
+    state = initial_state(model)
+    c0 = torch.full((len(model.node_names),), 0.5, dtype=F64, requires_grad=True)
+    state["quality.initial"] = c0
+    balance = water_run(model, state, duration=3600, quality=True).mass_balance
+    for term in (balance.initial, balance.inflow, balance.final, balance.ratio):
+        assert term.requires_grad
+    (grad,) = torch.autograd.grad(balance.final, c0)
+    assert float(grad.abs().sum()) > 0.0
