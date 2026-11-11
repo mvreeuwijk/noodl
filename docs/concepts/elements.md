@@ -266,6 +266,23 @@ phi_mid = 2.000000, q = [2.0, 2.0]
 The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
 edges whose flow is an unknown, in layer edge order.
 
+**The start flow.** A layer's linear guess (`linear_init`, and the rungs of its
+[fallback ladder](solvers.md#when-newton-fails-the-fallback-ladder)) takes each implicit law's
+residual and Jacobian at zero interior potentials and at the law's start flow,
+`start_flow(drivers, ctx)`: one value per edge (with any batch dimensions in front), or `None`,
+the default, for zero flow. The loss above has no slope at zero flow, so a guess taken there
+puts the whole 10 across it, at `q = 10`; with a start flow of 1 the guess is
+`phi_mid = q = 2.4`, and with the root, 2, it is the solution. Give one where a law's tangent at
+zero flow says little about its operating point: the water application's pipes start at 1 ft/s
+and its pumps at their design flow, EPANET's own first iterate. It moves only the guess: a solve
+still starts from zeros, or from its warm start, and the start flow carries no gradient.
+
+```py
+class StartedLoss(QuadraticLoss):
+    def start_flow(self, drivers=None, ctx=None):
+        return torch.ones(1, dtype=F64)      # one value per edge of the kind
+```
+
 **One scheme vocabulary for every layer.** A dynamic law reads `ctx.scheme`, one of the names in
 `SCHEMES = ("exact", "backward_euler", "trapezoidal")` (`noodl.elements.base`): the same names and
 the same keyword `scheme` a `TransportLayer` takes. A `KirchhoffLayer` gives its laws

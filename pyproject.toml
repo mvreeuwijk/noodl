@@ -54,12 +54,14 @@ test = [
 # specific wsimod run -- a newer release could
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
-reference = ["pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1"]
+# `six`: wntr 1.5 imports it (wntr/epanet/io.py) without declaring it, so without it every
+# EPANET comparison test is skipped (`importorskip`) rather than run.
+reference = ["pyswmm>=2.1", "wntr>=1.5", "six", "wsimod==0.8.1"]
 # `dev` = `test` + `reference` (restated for the same reason as above): everything the full
 # suite needs, and what `pip install -e ".[dev]"` installs.
 dev = [
     "pytest>=8", "pytest-xdist>=3", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
-    "pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1",
+    "pyswmm>=2.1", "wntr>=1.5", "six", "wsimod==0.8.1",
 ]
 # ContamX parity: NIST's `contamxpy` ships a Windows x86-64 wheel that
 # BUNDLES the ContamX 3.4.1.7 engine, so no CONTAM installation is needed -- but there is

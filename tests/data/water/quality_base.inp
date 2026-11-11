@@ -1,0 +1,76 @@
+[TITLE]
+The per-feature base network of the EPANET quality parity (tests/verification/test_water_quality.py):
+a reservoir source R1 (1 mg/L), a loop, a tank that fills, drains and fills, a dead end, a TCV and a pump.
+Later tests edit it by these names.
+
+[JUNCTIONS]
+;ID   Elev  Demand  Pattern
+ J1   20    2
+ J2   20    4
+ J3   20    3
+ J4   20    10      DAY
+ J5   20    0
+ J6   15    3
+ J7   30    2
+
+[RESERVOIRS]
+;ID   Head
+ R1   100
+
+[TANKS]
+;ID   Elev  InitLevel  MinLevel  MaxLevel  Diameter  MinVol
+ T1   80    5          0.5       10        12        0
+
+[PIPES]
+;ID   Node1  Node2  Length  Diameter  Roughness  MinorLoss  Status
+ P1   R1     J1     1000    300       120        0          Open
+ P2   J1     J2     600     200       120        0          Open
+ P3   J2     J3     500     150       120        0          Open
+ P4   J3     J1     700     200       120        0          Open
+ P5   J3     J4     1500    150       120        0          Open
+ P6   J4     T1     400     150       120        0          Open
+ P7   J2     J5     300     100       120        0          Open
+
+[PUMPS]
+;ID   Node1  Node2  Parameters
+ PU1  J4     J7     HEAD C1
+
+[VALVES]
+;ID   Node1  Node2  Diameter  Type  Setting  MinorLoss
+ V1   J1     J6     100       TCV   5        0
+
+[CURVES]
+;ID   Flow  Head
+ C1   2     25
+
+[PATTERNS]
+;ID   Multipliers
+ DAY  0.3 0.3 0.3 0.3 0.3 0.3 0.3 0.3
+ DAY  2.0 2.0 2.0 2.0 2.0 2.0 2.0 2.0
+ DAY  0.3 0.3 0.3 0.3 0.3 0.3 0.3 0.3
+
+[QUALITY]
+;Node InitQual
+ R1   1.0
+
+[REACTIONS]
+ Global Bulk  0
+ Global Wall  0
+
+[MIXING]
+;Tank Model
+ T1   MIXED
+
+[OPTIONS]
+ Units      LPS
+ Headloss   H-W
+ Quality    CHEMICAL mg/L
+
+[TIMES]
+ Duration            24:00
+ Hydraulic Timestep  1:00
+ Quality Timestep    0:05
+ Pattern Timestep    1:00
+ Report Timestep     1:00
+
+[END]
