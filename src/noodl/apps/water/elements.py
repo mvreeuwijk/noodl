@@ -508,7 +508,9 @@ class PumpCurve(ConstitutiveLaw):
 
     ``design_flow`` (m3/s per pump, at speed 1; optional) is EPANET's ``Q0``, the flow its
     iteration starts from (`hydraul.c`, `initlinkflow`): the middle point of a three-point
-    curve, the point of a one-point curve. `FlowControlledPump.start_flow` reads it.
+    curve, the point of a one-point curve. `FlowControlledPump.start_flow` reads it. It is
+    broadcast to ``h0``'s shape (a scalar is every pump's); a shape that does not broadcast
+    there is refused.
     """
 
     def __init__(
@@ -529,10 +531,21 @@ class PumpCurve(ConstitutiveLaw):
         self.r = self._param(r, learnable)
         self.n = self._param(n, False)
         self.speed = self._param(speed, False)
-        self.register_buffer(
-            "design_flow",
-            None if design_flow is None else torch.as_tensor(design_flow, dtype=F64),
-            persistent=False)
+        if design_flow is not None:
+            # one per pump, as `h0`: a scalar is every pump's
+            design_flow = torch.as_tensor(design_flow, dtype=F64, device=self.h0.device)
+            shape = self.h0.shape
+            try:
+                fits = torch.broadcast_shapes(design_flow.shape, shape) == shape
+            except RuntimeError:
+                fits = False
+            if not fits:
+                raise ValueError(
+                    f"PumpCurve (kind {kind!r}): design_flow has shape "
+                    f"{tuple(design_flow.shape)}, which does not broadcast to the pumps' "
+                    f"shape {tuple(shape)} (that of h0)")
+            design_flow = design_flow.expand(shape).clone()
+        self.register_buffer("design_flow", design_flow, persistent=False)
         self.dp_transition = float(dp_transition)
         self.link_range = _link_range(links)
         # The exponent's constants, once: EPANET treats an exponent within TINY of 1 as a

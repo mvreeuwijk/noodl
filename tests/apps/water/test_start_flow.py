@@ -84,3 +84,36 @@ def test_build_model_gives_net1_epanets_first_iterate():
         law, cols = layer.law_for(kind)
         torch.testing.assert_close(law.start_flow(drivers), model.initial_flows[cols],
                                    rtol=1e-15, atol=0)
+
+
+def test_a_scalar_design_flow_is_each_pumps_and_gives_a_linear_guess():
+    """A scalar `design_flow` is broadcast to the pumps (`h0`'s shape), so the start flow
+    has one value per pump and the linear guess of a layer with the pump is formed."""
+    from noodl.elements import Conductance
+    from noodl.layers.kirchhoff import KirchhoffLayer
+    from noodl.topology import Network
+
+    curve = PumpCurve(torch.tensor([101.6], dtype=F64), torch.tensor([2836.0], dtype=F64),
+                      design_flow=0.1)
+    assert curve.design_flow.shape == (1,)
+    pump = FlowControlledPump(curve)
+    torch.testing.assert_close(pump.start_flow(), torch.tensor([0.1], dtype=F64),
+                               rtol=1e-15, atol=0)
+    net = Network(dtype=F64)
+    for name in ("reservoir", "junction", "tank"):
+        net.add_node(name)
+    net.add_edge("reservoir", "junction", kind="pump")
+    net.add_edge("junction", "tank", kind="pipe")
+    layer = KirchhoffLayer(net, "water", [pump, Conductance(torch.tensor([1.0], dtype=F64),
+                                                            kind="pipe")],
+                           boundary=["reservoir", "tank"])
+    phi_i, q_f = layer.linear_init(torch.tensor([0.0, 50.0], dtype=F64), {}, None, q=True)
+    assert phi_i.shape == (1,) and q_f.shape == (1,)
+    assert bool(torch.isfinite(phi_i).all() and torch.isfinite(q_f).all())
+
+
+def test_a_design_flow_that_does_not_broadcast_to_the_pumps_is_refused_by_name():
+    with pytest.raises(ValueError, match=r"PumpCurve \(kind 'pump'\).*design_flow"):
+        PumpCurve(torch.tensor([101.6, 30.0], dtype=F64), torch.tensor([2836.0, 40.0],
+                                                                       dtype=F64),
+                  design_flow=torch.tensor([0.1, 0.2, 0.3], dtype=F64))
