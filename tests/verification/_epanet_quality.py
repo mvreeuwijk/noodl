@@ -217,7 +217,15 @@ def option(en, code: int) -> float:
     return value.value
 
 
-def _names(en) -> tuple[list[str], list[str]]:
+def flow_units(en) -> str:
+    """The flow unit of an open project, as `[OPTIONS] UNITS` spells it (`EN_getflowunits`:
+    "CFS", "GPM", ..., "CMD")."""
+    return _FLOW_UNIT_CODES[en.ENgetflowunits()]
+
+
+def node_and_link_ids(en) -> tuple[list[str], list[str]]:
+    """The node and link IDs of an open project in EPANET's index order (`EN_getnodeid`,
+    `EN_getlinkid`; index `k` is position `k - 1`)."""
     nodes = [en.ENgetnodeid(k) for k in range(1, en.ENgetcount(EN_NODECOUNT) + 1)]
     links = []
     for k in range(1, en.ENgetcount(EN_LINKCOUNT) + 1):
@@ -271,7 +279,7 @@ def epanet_quality(path: Path, *, setup=None) -> QualityReference:
         en = _toolkit()
         _open(en, copy, report, directory / "quality.bin")
         try:
-            node_names, link_names = _names(en)
+            node_names, link_names = node_and_link_ids(en)
             if setup is not None:
                 setup(en)
             en.ENsolveH()
@@ -310,10 +318,10 @@ def epanet_hydraulics(path: Path, *, setup=None) -> dict:
         en = _toolkit()
         _open(en, copy, directory / "h.rpt", directory / "h.bin")
         try:
-            node_names, link_names = _names(en)
+            node_names, link_names = node_and_link_ids(en)
             if setup is not None:
                 setup(en)
-            units = _FLOW_UNIT_CODES[en.ENgetflowunits()]
+            units = flow_units(en)
             length = _FOOT if units in _FLOW_UNIT_CODES[:5] else 1.0
             en.ENopenH()
             en.ENinitH(0)

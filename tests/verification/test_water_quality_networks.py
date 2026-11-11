@@ -13,7 +13,6 @@ names its MEASURED numbers beside its bounds; a bound that differs has its measu
 the test. Net2, Net3 and Net6 are `slow`.
 """
 
-import ctypes
 from pathlib import Path
 
 import numpy as np
@@ -23,14 +22,12 @@ import torch
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import build_model
 from noodl.apps.water.quality import EXACT_LITRES_PER_M3, QualityRouter, quality_step
-from noodl.apps.water.quality_tanks import QualityTolerance
 from noodl.apps.water.simulate import water_run
 from noodl.apps.water.units import EPANET_QCF, rounded_cfs_per_m3s
 
 wntr = pytest.importorskip("wntr")
 
 from tests.verification._epanet_quality import (  # noqa: E402
-    _FLOW_UNIT_CODES,
     QualityReference,
     assert_matches_epanet,
     edited,
@@ -39,7 +36,9 @@ from tests.verification._epanet_quality import (  # noqa: E402
     epanet_results,
     epanet_session,
     first_divergence,
+    flow_units,
     mass_balance_si,
+    node_and_link_ids,
     run_quality,
 )
 
@@ -92,14 +91,9 @@ def _router_on_epanets_hydraulics(path: Path) -> dict:
     diagnostics: dict = {"node_names": list(model.node_names),
                          "link_names": list(model.link_names)}
     with epanet_session(path) as en:
-        units = _FLOW_UNIT_CODES[en.ENgetflowunits()]
+        units = flow_units(en)
         qcf, cfs = EPANET_QCF[units], rounded_cfs_per_m3s(units)
-        nodes = [en.ENgetnodeid(k) for k in range(1, en.ENgetcount(0) + 1)]
-        links = []
-        for k in range(1, en.ENgetcount(2) + 1):
-            buffer = ctypes.create_string_buffer(64)
-            assert en.ENlib.EN_getlinkid(en._project, k, buffer) == 0
-            links.append(buffer.value.decode("utf-8"))
+        nodes, links = node_and_link_ids(en)
         link_index = [links.index(n) + 1 for n in model.link_names]
         junction_index = [nodes.index(j.name) + 1 for j in net.junctions]
         duration = int(en.ENgettimeparam(_EN_DURATION))
@@ -237,10 +231,13 @@ _NET2_FIRST_TIE = 31 * 3600
 _NET2_LAST_TIE = 49 * 3600
 #: EPANET's 37 h tie, which it merges (measured at 38 h).
 _NET2_EPANET_MERGES = 38 * 3600
-#: Pipe 1's last segment and junction 1's outflow at the 31 h tie, MEASURED: EPANET's in its
-#: internal unit (its outflow from `findsourcequal` on its float32 saved demand,
-#: `EN_savehydfile`; its segment the reported 0.09000000000000001 mg/L), noodl's in mg/L
-#: after the merges of hour 30 (instrumented `QualityTolerance.merges`).
+#: Pipe 1's last segment and junction 1's outflow at the 31 h tie, as documentation only (no
+#: assertion computes on them; the decisions are checked from the runs): MEASURED by hand
+#: during Task 9, EPANET's in its internal unit (its outflow reproduced from
+#: `findsourcequal` on its float32 demand read from `EN_savehydfile`; its segment the
+#: reported 0.09000000000000001 mg/L over `Ucf`), noodl's in mg/L after the merges of hour
+#: 30 (an instrumented `QualityTolerance.merges`). EPANET: `0.28317000000000014`, not below
+#: `Ctol / Ucf = 0.28317`, not merged; noodl: `0.2831699999999997` in that unit, merged.
 _NET2_TIE_31H = {"EPANET": (2.5485300000000004, 2.2653600000000003),
                  "noodl": (0.08999999999999998, 0.08)}
 
@@ -291,11 +288,6 @@ def test_net2_as_shipped_differs_from_epanet_only_at_its_ctol_ties(tmp_path):
     pipe = len(diagnostics["node_names"]) + diagnostics["link_names"].index("1")
     assert float(error[reference.times.index(first[0]), pipe]) == pytest.approx(
         float(error.max()), rel=1e-9)
-    # the 31 h decision on each side's operands
-    tolerance = QualityTolerance(ctol, "CHEMICAL")
-    segment, outflow = _NET2_TIE_31H["EPANET"]
-    assert not abs(segment - outflow) < ctol / tolerance.ucf
-    assert tolerance.merges(*_NET2_TIE_31H["noodl"])
     # the decisions, from the runs
     below, above = (_net2_tolerance(tmp_path, t) for t in ("0.00999999", "0.01000001"))
     early = [k for k, t in enumerate(reference.times) if t < _NET2_EPANET_MERGES]
