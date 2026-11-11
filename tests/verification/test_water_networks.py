@@ -144,15 +144,16 @@ def _worst_energy(net, energy, theirs, demand):
     return max(worst, abs(float(energy.demand_charge) - demand) / (abs(demand) or 1.0))
 
 
-def _hydraulic_differences(path, results, *, duration=None, skip_nodes=()):
+def _hydraulic_differences(path, results, *, duration=None, skip_nodes=(),
+                           diagnostics=None):
     """noodl (`water_run(quality=False)` on `path`, for `duration` s or the file's) against
     EPANET's `results` at every report time noodl gives: `(model, run, differences)`,
     `differences` the worst head (relative to `max(|H|, 1 m)`, the nodes `skip_nodes` left
     out), tank level (m) and flow (m3/s), each `(value, time s, element)`, and the
-    `(time, link)` pairs whose states differ."""
+    `(time, link)` pairs whose states differ; `diagnostics` goes to `water_run`."""
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
-    run = water_run(model, quality=False, duration=duration)
+    run = water_run(model, quality=False, duration=duration, diagnostics=diagnostics)
     names, links = model.node_names, model.link_names
     rows = len(run.time)
     assert run.time.tolist() == [float(t) for t in results.node["head"].index[:rows]]
@@ -214,8 +215,10 @@ def _ky_24h(tmp_path, name):
 #: EPANET's settings for the 24 h ky4 and ky10 (`_ky_24h`). ky10: TRIALS 5000, since at
 #: TRIALS 400 EPANET (ACCURACY 1e-7) exceeds its trials at 3:29:28 and is unbalanced at
 #: 3:58:15 (warnings 2 and 1), balanced at 5000 after 410 and 437 trials (MEASURED; at 1e-6
-#: and 1e-5 with 400 trials it needs 8 and 7); its warning 6, negative pressures at 20:52:41
-#: and 21:00, is the network's state.
+#: and 1e-5 with 400 trials those steps need 7 to 9 trials, and their heads, levels, flows
+#: and states against noodl's agree with 1e-7's within 0.1 %, the same nine states
+#: differing); its warning 6, negative pressures at 20:52:41 and 21:00, is the network's
+#: state.
 _KY_EPANET = {"ky4": {}, "ky10": dict(trials=5000, warnings=(6,))}
 
 #: ky10 from 6:54:59 (24899 s), the cause `test_ky10_divergence_is_epanets_dead_headed_
@@ -234,7 +237,8 @@ _KY10_EXTENDED = (
 
 @pytest.mark.slow
 @pytest.mark.parametrize("name", [
-    "ky4", pytest.param("ky10", marks=pytest.mark.xfail(strict=True, reason=_KY10_EXTENDED))])
+    "ky4", pytest.param("ky10", marks=pytest.mark.xfail(
+        strict=True, raises=AssertionError, reason=_KY10_EXTENDED))])
 def test_ky_extended_period_hydraulics_match_epanet(tmp_path, name):
     """ky4 (TRACE) and ky10 (AGE) ship with DURATION 0; their quality runs a 24 h period,
     whose hydraulics this compares with EPANET's at every report time (`_ky_24h`, EPANET as
@@ -257,6 +261,12 @@ def test_ky_extended_period_hydraulics_match_epanet(tmp_path, name):
 #: pump and the check valve, which no open link joins to a reservoir or tank once all three
 #: shut.
 _KY10_ISLAND = ("O-Pump-10", "I-RV-5", "O-RV-5")
+#: EPANET's heads (m) of `_KY10_ISLAND` at 7 h: its closed links' 1 / CBIG conductances
+#: between I-Pump-10 (263.669 m) and J-11 (300.756 m), MEASURED.
+_KY10_ISLAND_HEADS = (275.9086, 275.9086, 288.3320)
+#: EPANET's hydraulic steps (s) from 6:54:59 to 10 h, MEASURED with the toolkit's `EN_runH`
+#: (ACCURACY 1e-7, TRIALS 5000); the binary output keeps only the report times.
+_KY10_EPANET_STEPS = [24899, 25200, 26515, 28800, 29096, 30365, 32400, 33647, 36000]
 
 
 @pytest.mark.slow
@@ -274,13 +284,16 @@ def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
     active: 5.4e-4 m3/s at 1396 m of head at 7 h, O-Pump-10 at 1659.8 m.
 
     Checked here: (1) to 6 h noodl and EPANET agree within the bounds (states equal); (2)
-    at 7-10 h EPANET's pump carries no flow while OPEN, noodl's 5.4e-4 to 2.0e-3 m3/s at
+    at 7-10 h EPANET's pump carries no flow while OPEN, P-75 and ~@RV-5 closed and the
+    cut-off nodes at its 1 / CBIG heads at 7 h (`_KY10_ISLAND_HEADS`, to 1e-3 m: measured
+    to 0.1 mm, and they move by 0.4 to 1.5 m an hour), noodl's 5.4e-4 to 2.0e-3 m3/s at
     388 to 1396 m of head; (3) with ~@Pump-10 closed AT TIME 6:54:59 (noodl's file only) noodl
-    takes EPANET's steps (26515, 30365, 33647 s, which the unedited run takes a few seconds
-    later) and its heads, levels, flows and states to 10 h are EPANET's within the bounds
-    (MEASURED: heads 5.0e-7, levels 3.1e-5 m, flows 9.0e-8 m3/s), but for the pump's own
-    state and the heads of the three nodes the closed links cut off (`_KY10_ISLAND`), for
-    which EPANET's 1 / CBIG conductances give 275.91, 275.91 and 288.33 m at 7 h and noodl's
+    takes EPANET's hydraulic steps from 6:54:59 to 10 h (`_KY10_EPANET_STEPS`, from the
+    toolkit's `EN_runH` in a probe; the unedited run takes 26516, 30368 and 33650 s) and
+    its heads, levels, flows and states to 10 h are EPANET's within the bounds (MEASURED:
+    heads 5.0e-7, levels 3.1e-5 m, flows 9.0e-8 m3/s), but for the pump's own state and
+    the heads of the three nodes the closed links cut off (`_KY10_ISLAND`), for which
+    EPANET's 1 / CBIG conductances give 275.91, 275.91 and 288.33 m at 7 h and noodl's
     limit 282.21 m for all three, the PRV's dead end tied to its inlet (2.3e-2 relative)."""
     path = _ky_24h(tmp_path, "ky10")
     results, _, _ = _epanet(path, **_KY_EPANET["ky10"])
@@ -299,15 +312,23 @@ def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
     status = results.link["status"]["~@Pump-10"].to_numpy()
     for hour in range(7, 11):
         assert abs(theirs[hour]) < 1e-30, theirs[hour]
+        for link in ("P-75", "~@RV-5"):
+            assert int(results.link["status"][link].iloc[hour]) == 0, (hour, link)
         assert int(status[hour]) == int(run.status[hour, pump])
         assert float(run.flow[hour, pump]) > 5e-4 and float(gain[hour]) > 300.0
+    for node, head in zip(_KY10_ISLAND, _KY10_ISLAND_HEADS, strict=True):
+        assert abs(float(results.node["head"][node].iloc[7]) - head) < 1e-3, node
     text = path.read_text()
     assert text.count("[CONTROLS]\n") == 1
     forced = tmp_path / "ky10-24h-pump-10-closed.inp"
     forced.write_text(text.replace(
         "[CONTROLS]\n", "[CONTROLS]\nLINK ~@Pump-10 CLOSED AT TIME 6:54:59\n"))
+    diagnostics: dict = {}
     _, run, differences = _hydraulic_differences(forced, results, duration=10 * 3600.0,
-                                                 skip_nodes=_KY10_ISLAND)
+                                                 skip_nodes=_KY10_ISLAND,
+                                                 diagnostics=diagnostics)
+    steps = [int(t) for t in diagnostics["times"] if 24899 <= t <= 36000]
+    assert steps == _KY10_EPANET_STEPS, steps
     assert differences["states"] == [(3600.0 * h, "~@Pump-10") for h in range(7, 11)]
     assert differences["heads"][0] < 1e-5, differences
     assert differences["levels"][0] < 2e-4, differences
