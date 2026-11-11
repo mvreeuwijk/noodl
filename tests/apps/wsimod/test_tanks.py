@@ -232,6 +232,7 @@ def test_queue_tank_equals_wsimod_on_random_pushes(wsimod_tanks, n):
     ops += ["pull_ponded", "excess", "check", "evaporate"]
     w = Worst()
     dropped = 0.0
+    tiny_pushes = 0
     for d in range(60):
         ctx = day(ours, p=PQ, shape=(B,), d=d)
         for k in range(int(torch.randint(1, 6, (), generator=g))):
@@ -242,6 +243,7 @@ def test_queue_tank_equals_wsimod_on_random_pushes(wsimod_tanks, n):
             if op == "push_tiny":
                 for r in requests:
                     r["volume"] = 1e-12
+                tiny_pushes += int(active.sum())  # below FLOAT_ACCURACY (1e-11) and active
             req = stack(requests)
             if op in ("push", "push_tiny"):
                 got = ours.push_storage(req, active=active, time=time)
@@ -308,6 +310,7 @@ def test_queue_tank_equals_wsimod_on_random_pushes(wsimod_tanks, n):
                 tank.internal_arc.flow_out,
             )
     assert dropped == 0.0
+    assert tiny_pushes > 0  # the tiny pushes were reached, and none is a drop (W49)
     assert w.worst == 0.0
 
 

@@ -58,7 +58,8 @@ def test_the_small_model_matches_wsimod():
     model, state, drivers = _small()
     ours = wsimod_run(model, state, drivers)
     theirs = wsimod_reference(DATA / "small")
-    assert ours.dates == theirs.dates or len(ours.dates) == len(theirs.dates) == 10
+    assert ours.dates == model.wsimod_day.network.date_labels
+    assert len(ours.dates) == len(theirs.dates) == 10
     assert ours.arc_names == theirs.arc_names
     scale = float(theirs.arc_flow.abs().max())
     assert float((ours.arc_flow - theirs.arc_flow).abs().max()) <= 1e-12 * scale
@@ -157,8 +158,11 @@ def test_a_batch_equals_its_single_runs():
 
     site = "node:junction/push_distributed/oversubscribed"
     assert outcome(site, 2) == [True, False, False, False]
-    kink = outcome("node:farm/surfaces.grass/ihacres/evaporation_kink", 4)
+    kink_site = "node:farm/surfaces.grass/ihacres/evaporation_kink"
+    kink = outcome(kink_site, 4)
     assert kink[2] != kink[3]
+    (record,) = [r for r in diagnostics["decisions"][4] if r.site == kink_site]
+    assert record.active.tolist() == [True] * 4
     for i in range(4):
         single_state = initial_state(
             model, values={"wsimod.storage": {("farm", "surface:grass"): float(soil[i])}}
@@ -308,17 +312,18 @@ def test_the_mass_balance_closes_by_hand():
 
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_the_mass_balance_closes_on_every_case(name, mode):
-    """Every case, both modes: the residual is within ``1e-12 * scale`` on every day, the
-    ``"inaccurate_evaporation"`` days apart (W75, tested below)."""
+    """Every case, both modes: the residual is within ``1e-12 * scale`` on every day;
+    ``evaporation_clamp`` apart, whose residual is the clamp gap (W75, tested below)."""
     model, state, drivers = _case(name, mode)
     diagnostics: dict = {}
     results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
-    residual = results.mass_balance.residual.abs().amax(dim=-1)
     event = diagnostics["events"]["inaccurate_evaporation"].any(dim=-1)
-    bound = 1e-12 * CASES[name].scale
-    assert float(residual[~event].max()) <= bound
-    if name != "evaporation_clamp":
-        assert not bool(event.any())
+    if name == "evaporation_clamp":
+        assert bool(event.any())  # its residual is the clamp gap: the tests below
+        return
+    assert not bool(event.any())
+    residual = results.mass_balance.residual.abs().amax(dim=-1)
+    assert float(residual.max()) <= 1e-12 * CASES[name].scale
     # the balance is not trivially zero: something moves
     balance = results.mass_balance
     assert float(balance.outflow.abs().sum() + balance.inflow.abs().sum()) > 0.0 or float(
@@ -328,14 +333,14 @@ def test_the_mass_balance_closes_on_every_case(name, mode):
 
 def test_drops_are_recorded_where_waters_are_dropped():
     """The ``QueueArc`` tiny push (``queue_arc``) and the ``Land.run`` percolation push-back
-    (``land_percolation_threshold``) drop water below ``FLOAT_ACCURACY``; it is in ``"dropped"``
-    and the balance still closes."""
+    (``land_percolation_threshold``) drop water below ``FLOAT_ACCURACY``; it is in
+    ``"dropped"``. These drops sit far below the sweep's bound, so each site also has its own
+    mini-config (``test_every_drop_site_is_balanced_in_a_whole_model``)."""
     for name in ("queue_arc", "land_percolation_threshold"):
         model, state, drivers = _case(name)
         results = wsimod_run(model, state, drivers)
         dropped = results.mass_balance.terms["dropped"]
         assert float(dropped[:, 0].sum()) > 0.0, name
-        assert float(results.mass_balance.residual.abs().max()) <= 1e-12 * CASES[name].scale
 
 
 def _tiny_sewer_push(float_accuracy: float, tiny: float) -> dict:
@@ -397,6 +402,164 @@ def test_a_tiny_push_into_a_queue_tank_is_storage_not_a_drop():
     assert float(balance.residual.abs().max()) <= 1e-15
 
 
+# --- every drop site, balanced in a whole model ----------------------------------------------
+# float_accuracy 1e-3 and a drop of 5e-4 at each site: far above the 1e-12 * scale the case
+# sweep resolves, so skipping that site's ``ctx.drop`` shows as a residual of 5e-4.
+TINY = 5e-4
+
+
+def _mini(nodes, arcs, orchestration, days=3) -> dict:
+    return {
+        "float_accuracy": 1e-3,
+        "pollutants": [],
+        "additive_pollutants": [],
+        "non_additive_pollutants": [],
+        "dates": [f"2000-01-{d:02d}" for d in range(1, days + 1)],
+        "nodes": nodes,
+        "arcs": arcs,
+        "orchestration": orchestration,
+    }
+
+
+def _arc(name, a, b, **kw) -> dict:
+    return {"name": name, "type_": kw.pop("type_", "Arc"), "in_port": a, "out_port": b, **kw}
+
+
+def _reservoir(name, **kw) -> dict:
+    return {"name": name, "type_": "Reservoir", **kw}
+
+
+def _waste(name) -> dict:
+    return {"name": name, "type_": "Waste"}
+
+
+def _works(**kw) -> dict:
+    return {
+        "name": "works",
+        "type_": "WWTW",
+        "percent_solids": 0.0002,
+        "liquor_multiplier": {"volume": 0.03},
+        **kw,
+    }
+
+
+def _catchment_on_day_2(name: str, flow: float) -> dict:
+    data = {("flow", f"2000-01-{d:02d}"): (flow if d == 2 else 0.0) for d in (1, 2)}
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _queue_arc_push() -> dict:
+    """A reservoir holding 5e-4 pushes it into a ``QueueArc``: below ``FLOAT_ACCURACY``, so
+    neither queued nor delivered (``arcs.py:378-379``)."""
+    return _mini(
+        [_reservoir("basin", capacity=30.0, initial_storage=TINY), _waste("sea")],
+        [_arc("q", "basin", "sea", type_="QueueArc", number_of_timesteps=1)],
+        [{"Reservoir": "distribute"}],
+    )
+
+
+def _queue_arc_update() -> dict:
+    """A reservoir pulls 5e-4 (all its well holds) through a delay-1 ``QueueArc``: the waiting
+    request is below ``FLOAT_ACCURACY`` when ``update_queue`` visits it, and is removed
+    (``arcs.py:483-485``); the water has already left the well."""
+    return _mini(
+        [
+            {"name": "well", "type_": "Storage", "capacity": 10.0, "initial_storage": TINY},
+            {
+                "name": "basin",
+                "type_": "Abstraction",
+                "node_type_override": "Reservoir",
+                "capacity": 10.0,
+            },
+        ],
+        [_arc("q", "well", "basin", type_="QueueArc", number_of_timesteps=1)],
+        [{"Abstraction": "make_abstractions"}],
+    )
+
+
+def _sewer_ponded() -> dict:
+    """A sewer whose tank starts 5e-4 above its capacity (see the state below) and whose outlet
+    takes nothing: the ponded water is at or below ``FLOAT_ACCURACY`` and goes nowhere
+    (``sewer.py:234-235``)."""
+    return _mini(
+        [{"name": "sewer", "type_": "Sewer", "capacity": 10.0}, _waste("sea")],
+        [_arc("out", "sewer", "sea", capacity=0.0)],
+        [{"Sewer": "make_discharge"}],
+    )
+
+
+def _wwtw_push_back() -> dict:
+    """The works' outlet is 5e-4 short of the day's treated water: the rejection is at or below
+    ``FLOAT_ACCURACY`` and vanishes (``wtw.py:347-348``)."""
+    c_v = 1 - 0.0002 - 0.03
+    return _mini(
+        [
+            _reservoir("basin", capacity=30.0, initial_storage=2.0),
+            _works(treatment_throughput_capacity=30.0),
+            _waste("sea"),
+        ],
+        [
+            _arc("in", "basin", "works"),
+            _arc("out", "works", "sea", capacity=2.0 * c_v - TINY),
+        ],
+        [{"Reservoir": "distribute"}, {"WWTW": "calculate_discharge"}, {"WWTW": "make_discharge"}],
+    )
+
+
+def _wwtw_storm_rejection() -> dict:
+    """Two delay-1 ``QueueArc`` pushes, each checked on entry against the works' spare throughput
+    (3) and storm-tank headroom (2) alone, deliver 4 + 5e-4 and 1 together: the tank rejects
+    5e-4, which is below ``FLOAT_ACCURACY`` (``wtw.py:403-404``). Catchments feed the reservoirs
+    on day 2 so that each makes a request, and so an ``update_queue``, that day."""
+    links = [{"name": f"link_{i}", "type_": "Node"} for i in (1, 2)]
+    arcs = []
+    for i in (1, 2):
+        arcs += [
+            _arc(f"f{i}", f"feeder_{i}", f"link_{i}"),
+            _arc(f"l{i}", f"link_{i}", f"basin_{i}"),
+            _arc(f"q{i}", f"basin_{i}", "works", type_="QueueArc", number_of_timesteps=1),
+        ]
+    return _mini(
+        [
+            _catchment_on_day_2("feeder_1", 1.0),
+            _catchment_on_day_2("feeder_2", 1.0),
+            *links,
+            _reservoir("basin_1", capacity=30.0, initial_storage=4.0 + TINY),
+            _reservoir("basin_2", capacity=30.0, initial_storage=1.0),
+            _works(treatment_throughput_capacity=3.0, stormwater_storage_capacity=2.0),
+            _waste("sea"),
+        ],
+        [*arcs, _arc("out", "works", "sea")],
+        [
+            {"Catchment": "route"},
+            {"Reservoir": "distribute"},
+            {"WWTW": "calculate_discharge"},
+            {"WWTW": "make_discharge"},
+        ],
+        days=2,
+    )
+
+
+DROP_SITES = {
+    "queue_arc_push": (_queue_arc_push, None),
+    "queue_arc_update": (_queue_arc_update, None),
+    "sewer_ponded": (_sewer_ponded, {("sewer", "sewer_tank"): 10.0 + TINY}),
+    "wwtw_push_back": (_wwtw_push_back, None),
+    "wwtw_storm_rejection": (_wwtw_storm_rejection, None),
+}
+
+
+@pytest.mark.parametrize("site", DROP_SITES)
+def test_every_drop_site_is_balanced_in_a_whole_model(site):
+    build, stored = DROP_SITES[site]
+    model, state, drivers = build_model(read_wsimod_config(build()), pollutants=False)
+    if stored:
+        state = initial_state(model, values={"wsimod.storage": stored})
+    balance = wsimod_run(model, state, drivers).mass_balance
+    assert float(balance.terms["dropped"][:, 0].sum()) == pytest.approx(TINY, rel=1e-9)
+    assert float(balance.residual.abs().max()) <= 1e-15
+
+
 def test_water_pushed_into_a_wwtw_after_its_treatment_is_counted():
     """W69: with the sewer's ``make_discharge`` after the works' ``calculate_discharge``,
     ``current_input`` receives water nobody treats, and ``end_timestep_`` empties it
@@ -437,34 +600,61 @@ def test_only_carried_stores_are_storage():
     assert float(results.mass_balance.terms["Demand.total_demand"][:, 0].sum()) > 0.0
 
 
-def test_the_evaporation_clamp_residual_is_wsimods_printed_gap():
+def _clamp_gap(model, state, results) -> torch.Tensor:
+    """``evaporation_clamp``'s per-day gap, from the records alone: ``E_actual - E_ihacres``
+    with ``E_actual = P - (water that reached the sea) - (change of every store)`` and
+    ``E_ihacres`` the recorded evaporation. It is 0 on a day the soil supplies what IHACRES
+    asks."""
+    reached = results.arc_flow[:, results.arc_names.index("ditch_to_sea")]
+    stores = results.tank_storage.sum(dim=-1) + results.surface["storage"].sum(dim=-1)
+    rows = model.wsimod_day.state_labels("wsimod.storage")
+    assert rows
+    first = state["wsimod.storage"][..., 0].sum(dim=-1)
+    previous = torch.cat([first[None], stores[:-1]])
+    precipitation = results.surface["precipitation"].sum(dim=-1)
+    evaporation = results.surface["evaporation"].sum(dim=-1)
+    return (precipitation - reached - (stores - previous)) - evaporation
+
+
+@pytest.mark.parametrize("mode", ["quantity", "pollutants"])
+def test_the_evaporation_clamp_residual_is_the_gap_on_every_day(mode):
     """W75: a ``Land``'s balance outflow is IHACRES's evaporation, not what ``evaporate``
-    removed. On the ``"inaccurate_evaporation"`` days the residual is the gap between the two,
-    computed here from the records alone (precipitation less the water that reached the sea
-    and the change of every store, less the recorded evaporation), and on every other day it
-    closes."""
-    model, state, drivers = _case("evaporation_clamp", "quantity")
+    removed. One rule on every day: the residual equals the gap between the two, computed
+    from the records alone, within ``1e-12 * scale``; the gap is 0 on a day without a clamp,
+    and a shortfall below ``FLOAT_ACCURACY`` that fires no event is covered too."""
+    model, state, drivers = _case("evaporation_clamp", mode)
     diagnostics: dict = {}
     results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
     names = model.wsimod_day.node_names
     event = diagnostics["events"]["inaccurate_evaporation"][:, names.index("heath")]
     assert int(event.sum()) > 5 and int((~event).sum()) > 5
-    arcs = results.arc_names
-    reached = results.arc_flow[:, arcs.index("ditch_to_sea")]
-    stores = results.tank_storage.sum(dim=-1) + results.surface["storage"].sum(dim=-1)
-    previous = torch.cat([_initial_total(model, state)[None], stores[:-1]])
-    precipitation = results.surface["precipitation"].sum(dim=-1)
-    evaporation = results.surface["evaporation"].sum(dim=-1)
-    # P = E_actual + sea + dS; the gap is E_actual - E_ihacres
-    gap = (precipitation - reached - (stores - previous)) - evaporation
+    gap = _clamp_gap(model, state, results)
     residual = results.mass_balance.residual[:, 0]
     bound = 1e-12 * CASES["evaporation_clamp"].scale
-    assert float(residual[~event].abs().max()) <= bound
-    assert float((residual[event] - gap[event]).abs().max()) <= bound
+    assert float((residual - gap).abs().max()) <= bound
     assert float(residual[event].abs().min()) > 1e-11
+    assert float(gap[~event].abs().max()) <= bound
 
 
-def _initial_total(model, state) -> torch.Tensor:
-    """The volume the recorded stores hold before day 1: the tanks' rows and the surfaces'."""
-    rows = model.wsimod_day.state_labels("wsimod.storage")
-    return state["wsimod.storage"][..., 0].sum(dim=-1) if rows else torch.zeros(())
+@pytest.mark.parametrize("mode", ["quantity", "pollutants"])
+def test_the_evaporation_clamp_residual_is_wsimods_printed_node_gap(mode):
+    """WSIMOD's node check prints "mass balance error for volume of <gap> in heath" on the
+    clamp days; noodl's residual on those days equals the printed values, in order."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_reference
+
+    theirs = wsimod_reference(CASES["evaporation_clamp"].build())
+    printed = [
+        float(m.group(1))
+        for line in theirs.printed
+        if (m := re.fullmatch(r"mass balance error for volume of (\S+) in heath", line))
+    ]
+    model, state, drivers = _case("evaporation_clamp", mode)
+    diagnostics: dict = {}
+    results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
+    names = model.wsimod_day.node_names
+    event = diagnostics["events"]["inaccurate_evaporation"][:, names.index("heath")]
+    ours = results.mass_balance.residual[event, 0]
+    assert len(printed) == int(event.sum()) > 5
+    bound = 1e-12 * CASES["evaporation_clamp"].scale
+    assert float((ours - torch.tensor(printed, dtype=torch.float64)).abs().max()) <= bound

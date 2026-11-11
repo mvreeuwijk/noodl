@@ -185,7 +185,8 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   order, per instance. The gradient tests and the parity admission rule use it;
 - `"mass_balance"`, the same object as `results.mass_balance`.
 
-**The mass balance.** WSIMOD's own system check never ran; noodl computes what it meant to.
+**The mass balance.** WSIMOD's own system check runs but cannot report: it compares the
+system's inflow with itself (`model.py:1043-1058`). noodl computes what it meant to.
 Per day, `inflow` is the sum of the nodes' `mass_balance_in` terms (catchment flows,
 precipitation, `FWTW` deficits, `UnlimitedDistribution` supply, demand loads), `outflow` that of
 their `mass_balance_out` terms (Waste, evaporation, demand consumption and backup, unrouted
@@ -202,10 +203,12 @@ water below `FLOAT_ACCURACY`; and `terms["WWTW.unprocessed_input"]`, the water p
 in the tank's storage and never enters its queue, so it is storage and not a drop. Per-day
 values (a `Demand`'s totals, a `Land`'s running flows) are terms, not storage.
 
-The residual closes to rounding on every day, except where a `Land`'s IHACRES evaporation is
-more than its soil can supply: WSIMOD's balance counts the IHACRES evaporation as the
-outflow, and the soil gives less, so on a day with the `"inaccurate_evaporation"` event the
-residual is WSIMOD's own printed gap.
+The residual closes to rounding on every day, with one known gap, and one rule for it: a
+`Land`'s outflow in WSIMOD's balance is IHACRES's evaporation, and when the soil cannot supply
+it `evaporate` removes less (the `"inaccurate_evaporation"` event). On every day the residual
+equals that gap, `E_actual - E_ihacres` summed over the lands, which WSIMOD's own node check
+prints as "mass balance error for volume of ...". The gap is 0 on days without a clamp, and a
+shortfall below `FLOAT_ACCURACY` fires no event but is in the residual all the same.
 
 ## State and drivers
 

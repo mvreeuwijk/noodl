@@ -627,6 +627,22 @@ def _demand_constant_and_loads() -> dict:
     )
 
 
+def _nonresidential_demand() -> dict:
+    """A ``NonResidentialDemand`` drawing a constant demand from a storage and pushing it on.
+    Noodl-only: WSIMOD's ``NonResidentialDemand.get_demand`` calls itself (``demand.py:143-150``,
+    ``self.get_demand()`` instead of the parent's), so ``create_demand`` recurses without end."""
+    load = {"phosphate": 0.02, "ammonia": 0.1, "temperature": 15.0}
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(60.0)),
+            _store("factory", "NonResidentialDemand", constant_demand=3.0, pollutant_load=load),
+            _store("sea", "Waste"),
+        ],
+        [_arc("supply_to_factory", "supply", "factory"), _arc("factory_to_sea", "factory", "sea")],
+        [{"NonResidentialDemand": "create_demand"}],
+    )
+
+
 def _residential_demand() -> dict:
     """A ``ResidentialDemand`` (it needs its own orchestration key) pulls its demand and builds
     the foul water of its population with the mixed temperature; with no ``Land`` or ``Sewer``
@@ -1493,6 +1509,12 @@ CASES: dict[str, Case] = {
         build=_land_sewer_ponding,
         days=_LAND_DAYS,
         scale=100.0,
+        wsimod=False,
+    ),
+    "nonresidential_demand": Case(
+        build=_nonresidential_demand,
+        days=_STORAGE_DAYS,
+        scale=60.0,
         wsimod=False,
     ),
     "batch_divergence": Case(

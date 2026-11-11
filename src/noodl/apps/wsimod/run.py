@@ -32,13 +32,17 @@ percolation push-back, the ``WWTW`` storm-tank rejection and ``make_discharge`` 
 at the record point less at the start of the day; per-day values (``Demand``/``WTW`` totals,
 ``Land`` per-day flows and running balances) are not storage (W75). All are ``(..., T, 1 +
 K_additive)``: the volume, then the additive pollutants' masses. ``residual = inflow - outflow
-- storage_change`` and closes to rounding, except on a day with the ``"inaccurate_evaporation"``
-event: a ``Land``'s outflow is IHACRES's evaporation, not what ``evaporate`` removed (W75), so
-the residual is WSIMOD's printed gap there.
+- storage_change`` and closes to rounding, apart from one known gap. One rule holds on every
+day: a ``Land``'s outflow is IHACRES's evaporation, not what ``evaporate`` removed (W75), so
+``residual`` equals the gap ``E_actual - E_ihacres``, summed over the lands
+(WSIMOD's node check prints it, "mass balance error for volume of ..."). The gap is 0 on a day
+the soil supplies what IHACRES asks; a shortfall below ``FLOAT_ACCURACY`` fires no
+``"inaccurate_evaporation"`` event and is in the residual all the same.
 """
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -202,7 +206,8 @@ def wsimod_run(
     previous = day.record_decisions
     day.record_decisions = want_decisions
     try:
-        with torch.set_grad_enabled(_requires_grad(state, drivers)):
+        # autograd is not forced on: a caller's torch.no_grad() stays in force
+        with nullcontext() if _requires_grad(state, drivers) else torch.no_grad():
             for _, _, _ in day.run_days(state, drivers, days=n):
                 records.append(day.last_record)
     finally:
