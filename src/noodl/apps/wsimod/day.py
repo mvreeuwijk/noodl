@@ -348,6 +348,23 @@ class WsimodDay:
         }
         self.inputs = (*self._drivers, *STATE_KEYS)
 
+    def to(self, device=None, dtype: torch.dtype | None = None) -> WsimodDay:
+        """``Model.to`` hook: the port is float64 on the CPU only (bitwise equality with
+        WSIMOD), so a move to another dtype or device is refused by name; float64 on the CPU
+        changes nothing."""
+        if (dtype is None or dtype == torch.float64) and (
+            device is None or torch.device(device).type == "cpu"
+        ):
+            return self
+        raise TypeError(
+            "WsimodDay: the WSIMOD port is float64 on CPU only (bitwise equality with WSIMOD); "
+            "to(device=..., dtype=...) is not supported"
+        )
+
+    def _move_with(self, mover) -> None:
+        """The hook ``Model.to`` calls for a noodl-module closure (``layers/_device.py``)."""
+        self.to(device=mover.device, dtype=mover.precision)
+
     def __repr__(self) -> str:
         return f"WsimodDay({len(self.engine.nodes)} nodes, {len(self.engine.arcs)} arcs)"
 
@@ -411,8 +428,9 @@ class WsimodDay:
                 if value.ndim == 1:  # pollutant-keyed, (K,): absent without pollutants
                     if p.K == 0:
                         continue
-                    add(f"wsimod.{spec.cls}.{name}", spec.name, node, name, value,
-                        pollutant_columns)
+                    add(
+                        f"wsimod.{spec.cls}.{name}", spec.name, node, name, value, pollutant_columns
+                    )
                 else:
                     add(f"wsimod.{spec.cls}.{name}", spec.name, node, name, value, None)
             timearea = self._timearea(node)
@@ -467,9 +485,7 @@ class WsimodDay:
             ]
             if not names:
                 continue
-            series = [
-                [nodes[n].spec.data[(variable, date)] for n in names] for date in dates
-            ]
+            series = [[nodes[n].spec.data[(variable, date)] for n in names] for date in dates]
             key = f"wsimod.{variable}"
             drivers[key] = _Driver(
                 key,
@@ -593,14 +609,10 @@ class WsimodDay:
             elif isinstance(arc, QueueArc):
                 n, j = arc.number_of_timesteps, arc.rows.shape[-2]
                 rows = [
-                    (name, d, i, k)
-                    for d in ("push", "pull")
-                    for i in range(n)
-                    for k in range(j)
+                    (name, d, i, k) for d in ("push", "pull") for i in range(n) for k in range(j)
                 ]
                 put("wsimod.arc_queue", arc, "rows", rows, (2, n, j, width))
-                put("wsimod.arc_queue_since", arc, "since",
-                    [(name, "push"), (name, "pull")], (2,))
+                put("wsimod.arc_queue_since", arc, "since", [(name, "push"), (name, "pull")], (2,))
         return slots, labels
 
     def _state_field(self, key: str) -> Field:
@@ -781,10 +793,14 @@ class WsimodDay:
                     continue
                 bound[element.name][name] = row
         if "wsimod.Arc.capacity" in self._drivers:
-            capacity = _f64(drivers.get("wsimod.Arc.capacity", self._drivers[
-                "wsimod.Arc.capacity"].template))
-            preference = _f64(drivers.get("wsimod.Arc.preference", self._drivers[
-                "wsimod.Arc.preference"].template))
+            capacity = _f64(
+                drivers.get("wsimod.Arc.capacity", self._drivers["wsimod.Arc.capacity"].template)
+            )
+            preference = _f64(
+                drivers.get(
+                    "wsimod.Arc.preference", self._drivers["wsimod.Arc.preference"].template
+                )
+            )
             for i, name in enumerate(self.arc_names):
                 self.engine.arcs[name].bind(capacity[..., i], preference[..., i])
         for name, node in nodes.items():
@@ -899,7 +915,9 @@ class WsimodDay:
         return int(k)
 
     def __call__(
-        self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor],
+        self,
+        state: Mapping[str, Tensor],
+        drivers: Mapping[str, Tensor],
         ctx: StepContext | None,
     ) -> dict[str, Tensor]:
         """Day ``ctx.t / 86400``: the new carried state; ``{}`` for a query (``ctx`` None)."""

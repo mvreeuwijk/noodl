@@ -571,22 +571,17 @@ def test_the_probe_reports_that_a_step_needs_t():
     assert "model.step needs t=" in str(report)
 
 
-def test_model_to_float64_is_a_no_op_and_other_dtypes_are_not_supported():
-    """`Model.to(dtype=torch.float64)` changes nothing and the model steps as before; the
-    closure keeps its float64 tensors, so a float32 move is not supported: the step returns
-    float64 (documented as a limitation on the WSIMOD page)."""
+def test_model_to_refuses_other_dtypes_by_name():
+    """`Model.to(dtype=torch.float64)` changes nothing and the model steps as before; another
+    dtype or device is refused by name (the port is float64 on the CPU, bitwise)."""
     model, state, drivers = build_model(_small())
     expected = model.step(state, drivers, dt=DAY, t=0.0)["wsimod.storage"]
     other, other_state, other_drivers = build_model(_small())
     assert other.to(dtype=torch.float64) is other
+    assert other.to(device="cpu") is other
     got = other.step(other_state, other_drivers, dt=DAY, t=0.0)["wsimod.storage"]
     assert torch.equal(got, expected)
-    moved, moved_state, moved_drivers = build_model(_small())
-    moved.to(dtype=torch.float32)
-    stepped = moved.step(
-        {k: v.to(torch.float32) for k, v in moved_state.items()},
-        {k: v.to(torch.float32) for k, v in moved_drivers.items()},
-        dt=DAY,
-        t=0.0,
-    )
-    assert stepped["wsimod.storage"].dtype == torch.float64
+    for kwargs in ({"dtype": torch.float32}, {"device": "meta"}):
+        moved, _, _ = build_model(_small())
+        with pytest.raises(TypeError, match="WSIMOD"):
+            moved.to(**kwargs)

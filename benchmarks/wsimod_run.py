@@ -19,7 +19,8 @@ batch. On the demos it is not what the batch-100 rows pay for (neither demo has 
 the soil's `** 0.5` is a small part of a day), so the batch rows stay close to batch 1; a model
 with many rivers or time-area groundwaters would show it.
 
-Prints and asserts nothing about the numbers (times are measured, never asserted).
+Each time is a single shot (no repeats, no warm-up). Prints and asserts nothing about the
+numbers (times are measured, never asserted).
 
 Run: `.venv/Scripts/python benchmarks/wsimod_run.py`
 """

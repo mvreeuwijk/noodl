@@ -277,17 +277,17 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | WSIMOD | noodl | Test |
 |---|---|---|
 | `Land.push_set_sewer` lacks `self.surface`, and `Land` has no `"Sewer"` check | evident intent: ponded sewer water is forced into the first impervious surface | `test_sewer_ponding_into_land_is_forced_into_the_first_impervious_surface`; `test_case_runs_where_wsimod_crashes_land_sewer_ponding` |
-| `EnfieldFoulSewer.make_discharge` (`storm_exchange` undefined) | refused by name | `test_refusals_name_the_key[EnfieldFoulSewer]` |
+| `EnfieldFoulSewer.make_discharge` (`storm_exchange` undefined) | refused by name | `test_refusals_name_the_key[mapping7-EnfieldFoulSewer]` |
 | `NonResidentialDemand.get_demand` recurses without end | evident intent: its constant demand, as a house | `test_non_residential_demand_is_its_constant_demand_as_house` |
-| `GrowingSurface.residue` is unwired | sub-project 3c; refused as a class | `test_refusals_name_the_key[GrowingSurface]` |
+| `GrowingSurface.residue` is unwired | sub-project 3c; refused as a class | `test_refusals_name_the_key[mapping8-3c]` |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
 | `UnlimitedDistribution` loses its leakage | refused | `test_leakage_refusals` |
 | overrides update the shared default dicts | per node | `test_an_override_of_pollutant_load_reaches_only_its_node` |
-| river arcs but no `Waste` | refused | `test_structural_refusals[river_without_waste]` |
-| an arc into a `Catchment` | refused | `test_structural_refusals[arc_into_catchment]` |
+| river arcs but no `Waste` | refused | `test_structural_refusals[river-without-waste]` |
+| an arc into a `Catchment` | refused | `test_structural_refusals[arc-into-catchment]` |
 | the WTW liquor blend divides by zero | the previous value is kept, event `"wtw_liquor_zero_denominator"` | `test_zero_input_on_day_one_keeps_the_previous_liquor_value`; `test_case_runs_where_wsimod_crashes_wtw_zero_input` |
-| a partial zero priority in a distribute round divides by zero, depending on the state (W43) | nothing is distributed in that round, event `"zero_priority"` | `tests/apps/wsimod/test_protocol.py` |
+| a partial zero priority in a distribute round divides by zero, depending on the state (W43) | nothing is distributed in that round, event `"zero_priority"` | `test_a_zero_priority_with_room_is_an_event_not_a_division_by_zero` |
 | `QueueArc` drops a push below `FLOAT_ACCURACY` | **reproduced** (a tolerance-scale loss that real models' delivery depends on), recorded as dropped | `test_queue_arc_delivery_matches_wsimod_on_irregular_pushes`; `test_the_tiny_push_is_recorded_as_dropped` |
 | `QueueArc` zero-volume pull with additive keys | the rescale is skipped, as `Arc` does | `test_a_zero_volume_pull_with_pollutants_skips_the_rescale` |
 | `WWTW.make_discharge` rejection at or below `FLOAT_ACCURACY` | a tolerance, recorded as dropped | `test_a_tiny_discharge_rejection_vanishes_and_is_recorded_as_dropped` |
@@ -375,9 +375,9 @@ of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad)
   `oxford` takes about 0.07 s a day without gradients.
 - **The closure is not re-entrant.** One `WsimodDay` holds one engine that every step reuses, so
   two steps of one model must not run at once (threads, or a step that calls another).
-- **`Model.to`.** `model.to(dtype=torch.float64)` works and changes nothing (tested). Another
-  dtype or a device move is not supported: the closure keeps its float64 tensors on the CPU, and
-  a float32 step silently returns float64 (tested). No GPU was available to try a device move.
+- **`Model.to`.** `model.to(dtype=torch.float64)` (or a CPU device) works and changes nothing
+  (tested). Another dtype or a device move is refused by name (`TypeError`): the port is float64
+  on the CPU, as bitwise equality with WSIMOD needs.
 - **River ties.** WSIMOD breaks a tie in the river order by set-hash order, which varies with
   `PYTHONHASHSEED`; noodl takes the configuration order (W13, W64), so a model whose river ties
   matter may differ from a WSIMOD run in the last bit. Neither demo has a `River`.
