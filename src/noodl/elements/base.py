@@ -448,6 +448,20 @@ class ImplicitLaw(ConstitutiveLaw):
 
     def linear_init(self, drivers=None):
         """Refused: an implicit law has no tangent `(c, k)`. A layer's linear guess
-        (`KirchhoffLayer.linear_init`) takes its `residual` and `jacobian` at zero flow
-        instead."""
+        (`KirchhoffLayer.linear_init`) takes its `residual` and `jacobian` at its start flow
+        (`start_flow`) instead."""
         raise self._no_flow()
+
+    def start_flow(self, drivers: Mapping[str, Tensor] | None = None,
+                   ctx: LawContext | None = None) -> Tensor | None:
+        """The flow at which a layer's linear guess (`KirchhoffLayer.linear_init`) takes this
+        law's `residual` and `jacobian`: one value per edge, with any batch dimensions in
+        front (broadcasting against the layer's batch), or `None` (the default) for zero
+        flow on every edge.
+
+        Give one where the law is far from linear around zero flow, so that its tangent
+        there says little about its operating point: a pipe whose head loss has no slope at
+        zero flow, a pump whose curve is flat there. The interior potentials of the guess
+        are still zero; only this law's flow moves. It is a starting point and carries no
+        gradient."""
+        return None

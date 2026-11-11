@@ -2102,3 +2102,40 @@ def test_a_layer_less_model_steps_an_integrating_closure():
     model = Model(net, [], closures=[Counter()])
     out = model.step({"counter.n": torch.tensor(0.0, dtype=F64)}, {}, dt=86400.0, t=0.0)
     assert float(out["counter.n"]) == 1.0
+
+
+class _CapturingLaw(ConstitutiveLaw):
+    """`k C dp` on the air paths: `C` a learnable parameter, `k` a tensor that requires grad
+    captured by a lambda, which no attribute scan reaches."""
+
+    def __init__(self, k):
+        super().__init__("airpath")
+        self.C = torch.nn.Parameter(torch.tensor([0.01, 0.02, 0.01], dtype=F64))
+        self._k = lambda: k
+
+    def flow(self, dp, drivers=None):
+        return self._k() * self.C * dp
+
+    def dflow(self, dp, drivers=None):
+        return (self._k() * self.C).detach() + torch.zeros_like(dp)
+
+    def linear_init(self, drivers=None):
+        k = (self._k() * self.C).detach()
+        return torch.zeros_like(k), k
+
+
+def test_a_closure_captured_tensor_is_refused_by_name_when_stepped_under_no_grad():
+    """Under `no_grad` an iterated step's pass solve (`on_failure="return_primal"`) with a
+    learnable parameter is the primal Newton: nothing differentiable reaches it. The tensor
+    captured in the lambda would still be read, untracked, by a differentiated step of the
+    same model, so the solve refuses it, naming the layer, from the residual at the
+    starting guess and at the root."""
+    net = _net()
+    k = torch.tensor(1.5, dtype=F64, requires_grad=True)
+    air = KirchhoffLayer(net, "air", [_CapturingLaw(k)], boundary=["ambient"])
+    model = Model(net, {"air": air}, coupling="iterate", iterate_tol={"air": 1e-10})
+    drivers = {"air.phi_boundary": torch.zeros(1, dtype=F64),
+               "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64)}
+    with torch.no_grad(), pytest.raises(
+            ValueError, match="KirchhoffLayer 'air': the residual depends on a tensor"):
+        model.step({}, drivers, 60.0)

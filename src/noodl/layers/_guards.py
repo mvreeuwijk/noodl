@@ -14,7 +14,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl._tracking import bulk_values
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.storage import NodeStorage
 from noodl.withdrawals import NodeWithdrawal
 
@@ -35,6 +35,17 @@ _OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType
 def _detached(params) -> list:
     """`params` with every tensor detached."""
     return [p.detach() if isinstance(p, torch.Tensor) else p for p in params]
+
+
+def plain_call(owner) -> bool:
+    """Whether calling `owner` (a law, a withdrawal or a storage) as a module is calling its
+    own method (`flow`, an implicit law's `residual`, `rate`, and their slopes): its class
+    keeps its base's `forward` and it carries no forward hook."""
+    base = (ImplicitLaw if isinstance(owner, ImplicitLaw)
+            else ConstitutiveLaw if isinstance(owner, ConstitutiveLaw)
+            else NodeWithdrawal if isinstance(owner, NodeWithdrawal) else NodeStorage)
+    return not (type(owner).forward is not base.forward or owner._forward_hooks
+                or owner._forward_pre_hooks)
 
 
 def _same_objects(a, b) -> bool:
@@ -249,11 +260,7 @@ class _GuardsMixin:
         """Whether calling every owner as a module (what the threaded solve does) is calling
         its own method (what the primal solve does): no law, withdrawal or storage overrides
         `forward` (its alias for `flow` or `rate`) or carries a forward hook."""
-        owners = [*((el, ConstitutiveLaw) for el in self._laws),
-                  *((ns, NodeWithdrawal) for ns in self._withdrawals),
-                  *((st, NodeStorage) for st in self._storage)]
-        return not any(type(o).forward is not base.forward or o._forward_hooks
-                       or o._forward_pre_hooks for o, base in owners)
+        return all(plain_call(o) for o in (*self._laws, *self._withdrawals, *self._storage))
 
     def _threads_grad(self, drivers: Mapping, sources, phi_boundary, extra=()) -> bool:
         """`_reaches_grad` whatever the grad mode: whether any of those tensors requires

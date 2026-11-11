@@ -39,9 +39,10 @@ APPS = {
     "water": (
         ["src/noodl/apps/water/", "src/noodl/apps/inpfile.py",
          "tests/apps/water/", "tests/apps/inp/", "tests/data/water/",
-         "tests/verification/test_water_parity.py", "tests/verification/test_water_networks.py"],
+         "tests/verification/test_water_parity.py", "tests/verification/test_water_networks.py",
+         "tests/verification/test_water_quality", "tests/verification/_epanet_quality.py"],
         ["tests/apps/water", "tests/apps/inp", "tests/verification/test_water_parity.py",
-         "tests/verification/test_water_networks.py"],
+         "tests/verification/test_water_networks.py", "tests/verification/test_water_quality*.py"],
     ),
     "wsimod": (
         ["src/noodl/apps/wsimod/", "src/noodl/layers/allocation.py", "tests/apps/wsimod/",

@@ -187,6 +187,22 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   other built-in law's `dflow` is exact, which `tests/elements/test_dflow_exact.py` checks.
   The same attribute exists on `NodeWithdrawal`, and on `NodeStorage` for its `rate_slope`
   (audited by the same test).
+- **A law is its module call.** A layer calls each law as a module, so an overridden
+  `forward` or a forward hook is part of the law. The module call of a law with a flow is
+  `law(dp, drivers, ctx)`, its flow; that of an implicit law is `law(dp, q, drivers, ctx)`,
+  its residual (`ImplicitLaw.forward` returns `residual`), so a hook on an implicit law acts
+  on its residual: scaling it leaves the root where it is, adding a term moves it. Wherever
+  such a law's module call differs from its own method, the layer evaluates it by that call
+  and takes its slope from that call by autograd, not from its `dflow` or `jacobian`: in
+  every solve, with or without `differentiable`, with or without flow unknowns; in the
+  starting guess (the call's value and slope at `dp = 0` replace its `linear_init`) and the
+  storage-ramp fallback; and in the layer's public `flows`, `residual`, `balance`,
+  `storage_flows`, `jacobian`, `dflows`, `adjoint` and `linear_init`. A `dp_independent`
+  law is still checked against its own `dflow`, but a hook may make its call depend on `dp`,
+  so the slope of that call is
+  taken by autograd too, zero where it does not depend on `dp`. The same holds for a
+  withdrawal and a storage. A law without either (every library law) keeps its own `flow`,
+  `dflow`, `jacobian` and `linear_init`.
 
 ## Implicit, coupled and dynamic constitutive laws
 
@@ -265,6 +281,24 @@ phi_mid = 2.000000, q = [2.0, 2.0]
 
 The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
 edges whose flow is an unknown, in layer edge order.
+
+**The start flow.** A layer's linear guess (`linear_init`, and the rungs of its
+[fallback ladder](solvers.md#when-newton-fails-the-fallback-ladder)) takes each implicit law's
+residual and Jacobian at zero interior potentials and at the law's start flow,
+`start_flow(drivers, ctx)`: one value per edge (with any batch dimensions in front, which must
+broadcast against the layer's batch), or `None`, the default, for zero flow. A start flow of
+another width or batch is refused, naming the law. The loss above has no slope at zero flow, so a guess taken there
+puts the whole 10 across it, at `q = 10`; with a start flow of 1 the guess is
+`phi_mid = q = 2.4`, and with the root, 2, it is the solution. Give one where a law's tangent at
+zero flow says little about its operating point: the water application's pipes start at 1 ft/s
+and its pumps at their design flow, EPANET's own first iterate. It moves only the guess: a solve
+still starts from zeros, or from its warm start, and the start flow carries no gradient.
+
+```py
+class StartedLoss(QuadraticLoss):
+    def start_flow(self, drivers=None, ctx=None):
+        return torch.ones(1, dtype=F64)      # one value per edge of the kind
+```
 
 **One scheme vocabulary for every layer.** A dynamic law reads `ctx.scheme`, one of the names in
 `SCHEMES = ("exact", "backward_euler", "trapezoidal")` (`noodl.elements.base`): the same names and

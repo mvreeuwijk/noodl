@@ -80,8 +80,9 @@ class _FallbackMixin:
           the exact root. When the ramp from the linear guess does not converge and the
           failed solve had a warm start (`phi0` or `q0`), the ramp runs once more from that
           start: a linear guess may be formed and still settle nowhere (a water network in
-          its resistance form at zero flow carries the head difference between its reservoir
-          and its tank over the `RQtol` slope floor, a flow of 1e7 m3/s).
+          its resistance form, its laws taken at zero flow, carries the head difference
+          between its reservoir and its tank over the `RQtol` slope floor, a flow of 1e7
+          m3/s; the water laws' own start flows, `ImplicitLaw.start_flow`, avoid that).
 
         `diagnostics`, when given, then also receives `"fallback"`, the rung that converged
         (`None` if the first solve did, or no rung did), and `"fallback_iterations"`, the
@@ -168,18 +169,21 @@ class _FallbackMixin:
         diagnostics.update(diag, fallback=None, fallback_iterations=0)
         return out
 
-    def _ramp(self, x0, phi_boundary, drivers, sources, step, newton_kwargs, report):
+    def _ramp(self, x0, phi_boundary, drivers, sources, step, newton_kwargs, report,
+              call=None):
         """`storage_ramp` from `x0` on this solve's own primal residual and Jacobian
         (without gradients): the starting point of the fallback ladder's `"storage_ramp"`
         rung. The rows of the flow unknowns take a storage with the sign of their own
-        diagonal (an inertia), the potential rows its size."""
+        diagonal (an inertia), the potential rows its size. `call` is the solve's own
+        (`module_call`), so an owner whose module call is not its own method is ramped on
+        that call."""
         u = self._unknowns if step.layout is None else step.layout
 
         def residual(x):
-            return self._residual(x, phi_boundary, drivers, sources, step)[0]
+            return self._residual(x, phi_boundary, drivers, sources, step, call)[0]
 
         def operator(x):
-            return self._operator(x, phi_boundary, drivers, step)
+            return self._operator(x, phi_boundary, drivers, step, call)
 
         signed = None
         if u is not None:

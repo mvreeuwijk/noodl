@@ -79,12 +79,18 @@ the residual is invisible to the implicit adjoint. Two checks look for one:
 - **Before solving, by attribute.** Every tensor a law or withdrawal holds — plain
   attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
   objects — is scanned, and one that requires grad without being threaded is refused by name.
-- **At every Newton iterate, from the starting guess to the root, by evaluation.** The forward
-  Newton evaluates the residual with every threaded tensor detached; if the result still
-  requires grad, some other tensor reaches it (a tensor captured by a closure, which no scan
-  can see), and the solve is refused. The root is the point the adjoint linearises at, so a law
+- **At every Newton iterate of a differentiated solve, from the starting guess to the root, by
+  evaluation.** The forward Newton evaluates the residual with every threaded tensor
+  detached; if the result still requires grad, some other tensor reaches it (a tensor
+  captured by a closure, which no scan can see), and the solve is refused. The root is the point the adjoint linearises at, so a law
   that reads such a tensor only on a branch the solve reaches after leaving the starting guess
   is caught there. The check is the forward's own residual evaluations: it costs none extra.
+  Where the solve is not differentiated because nothing differentiable reaches it
+  (`on_failure="return_primal"`, as `Model`'s iterated passes solve), the primal Newton runs
+  the same check at every iterate under grad mode. Under `torch.no_grad()` with a threaded
+  tensor that requires grad (a learnable parameter), it runs at the starting guess and at the
+  root only, with the threaded tensors detached: two residual evaluations more than the
+  primal Newton, in that case alone.
 
 What the evaluation establishes is structural and pointwise: the residual's autograd graph at
 those points reaches no un-threaded tensor. It does not prove that no such tensor could be

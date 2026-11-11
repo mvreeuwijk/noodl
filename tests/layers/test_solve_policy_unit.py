@@ -65,7 +65,7 @@ def test_flow_unknowns_return_primal_without_diagnostics_refused_naming_it():
 @pytest.mark.parametrize("reaches", [True, False])
 def test_return_primal(kind, reaches):
     """Differentiated ("raise") where something reaches the solve, else `forward_only`
-    ("return"): the fast path's threaded forward Newton, the other path's primal solve."""
+    ("return"): the primal solve, on either path."""
     layer, call = LAYERS[kind]()
     drivers, sources, phi_b = _args(call, reaches)
     kw = {"on_failure": "return_primal"}

@@ -321,8 +321,9 @@ with flow unknowns it is the linear guess of the potentials and the flow unknown
 law with a flow is replaced by its tangent at zero (its own `linear_init`; a law with several
 ports, and every law on a phasor layer, is taken at its flow and Jacobian at the starting
 potentials instead: the same for a linear law), each implicit law by its residual and Jacobian at
-zero interior potentials and zero flows, the withdrawals and storages by their value and slope
-there, and the system is solved once. On a layer with flow unknowns the result is detached: no
+zero interior potentials and its start flow (`start_flow`, zero unless the law gives one; see
+[Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws)),
+the withdrawals and storages by their value and slope there, and the system is solved once. On a layer with flow unknowns the result is detached: no
 gradient flows to `phi_boundary`, `sources`, the drivers or the law parameters, unlike on a
 layer without flow unknowns. On a phasor layer it is complex. `q=True` returns `(phi_interior, q_implicit)`, the second the flows of
 `implicit_edges` (empty on a layer without flow unknowns). A system the guess finds singular is
@@ -880,7 +881,12 @@ Three more things about `iterate_tol`:
   its last Newton iterate and the iteration carries on from it (that pass is never judged
   converged); only the iteration's own verdict raises. A solve that is differentiated still
   raises (`on_failure="return_primal"`, the passes' default), and an explicit `on_failure` is
-  passed through as given.
+  passed through as given. A pass that nothing differentiable reaches is not differentiated:
+  on every layer it is the primal solve, the same Newton iteration as `differentiable=False`,
+  on each law's own slope. It still refuses a tensor that requires grad and that a law reads
+  untracked, through a closure ([differentiability](differentiability.md)): at every iterate
+  in grad mode, and at the starting guess and at the root under `torch.no_grad()` with a
+  learnable parameter, where every iterate of a differentiated solve would check it.
 
 ### Introspection
 

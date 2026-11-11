@@ -205,12 +205,13 @@ air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
   flows' rows carry the ramp). When the linear guess cannot be formed (it is singular, as
   for a water network without a pump at zero flow) the ramp starts where the failed solve
   did. When the guess is formed but the ramp from it does not converge, and the failed
-  solve had a warm start, the ramp runs once more from that start: Net1 in its resistance
-  form has a linear guess (its pump's gradient at zero flow is floored at `RQtol`, as
-  EPANET floors it) that carries the 52 m between its reservoir and its tank over the
-  pipes' `RQtol` floor, a flow of 1e7 m³/s, and nothing settles from there; from the
-  warm start the ramp converges in 16 iterations
-  (`tests/apps/water/test_fallback.py`). `diagnostics["fallback_iterations"]` then counts
+  solve had a warm start, the ramp runs once more from that start. A guess taken at zero
+  flow can settle nowhere: Net1 in its resistance form, its laws started at zero flow,
+  carries the 52 m between its reservoir and its tank over the pipes' `RQtol` floor, a
+  flow of 1e7 m³/s, and the ramp from the warm start converges in 16 iterations instead
+  (`tests/apps/water/test_fallback.py`). Its laws give their own start flows
+  (`ImplicitLaw.start_flow`, EPANET's first iterate), so the guess is within a factor of
+  two of the solution and the first ramp converges. `diagnostics["fallback_iterations"]` then counts
   both ramps' stages. On a layer without flow unknowns the shift keeps the operator
   symmetric positive definite, so the SPD certificate and its solvers still apply.
 
