@@ -15,13 +15,14 @@ initial point of the circuit.
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
-| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
+| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
+| [WSIMOD](wsimod.md) | WSIMOD's urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed | `build_model`, `read_wsimod_config` |
 | [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
 
-## Why these seven
+## Why these eight
 
 They are not a feature list. They are the argument that the factorisation works.
 
@@ -39,6 +40,8 @@ all four:
   Kirchhoff solve.
 - The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
+- The **WSIMOD** application is a closure too: WSIMOD's own day of push and pull requests,
+  transcribed call for call, so the flows are WSIMOD's rules, batched and differentiable.
 - The **electrical circuits** application solves for a potential, the node voltage, with the
   currents of ideal sources, inductors and transformers as extra unknowns: the nodal solve the
   building and water applications use, with the implicit laws' flows added as unknowns.
@@ -56,7 +59,7 @@ solves the per-node QP inside the allocation layer's projection mode.
 Each application page ends with a **Verification** section: code-to-code comparisons against
 established reference models that solve the same equations (CONTAM and ContamX and the Modelica
 Buildings Library for building physics, MUNICH for street air quality, SWMM through pyswmm for
-sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation, the
+sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation and for the WSIMOD application, the
 Modelica Standard Library and pandapower for electrical circuits), plus
 checks against analytical solutions, conservation identities and finite-difference gradients.
 

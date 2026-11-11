@@ -79,13 +79,19 @@ class Node:
 
     ``wsimod_type`` is the class name WSIMOD gives the instance after its renames; ``of_type``
     filters and the river order use it. ``store_paths`` names the node's stores by WSIMOD
-    attribute path (the keys of :meth:`stores`); ``step_methods`` the zero-argument methods an
+    attribute path (the keys of :meth:`stores`), ``carried_paths`` the carried ones among them
+    (the rest are per-day values); ``step_methods`` the zero-argument methods an
     orchestration slot may name; ``mass_balance`` the terms :meth:`record_terms` adds, with
     their side (``"in"``, ``"out"``, ``"ds"``; D11).
     """
 
     wsimod_type: ClassVar[str] = "Node"
     store_paths: ClassVar[tuple[str, ...]] = ()
+    # the store paths carried from one day to the next (spec, State; W68, W75): a subset of
+    # ``store_paths``, which also names the per-day values the replay loads at every call.
+    # ``WsimodDay`` loads and dumps only these; the others reset every day, as WSIMOD's
+    # ``end_timestep`` resets them (or overwrites them before they are read).
+    carried_paths: ClassVar[tuple[str, ...]] = ()
     step_methods: ClassVar[tuple[str, ...]] = ()
     # nodes.py:76-78: in and out are the arcs' flows, which cancel; ds is empty
     mass_balance: ClassVar[dict[str, str]] = {}

@@ -612,6 +612,11 @@ class Land(Node):
         self.running_inflow_mb = empty(pollutants, ())
         self.running_outflow_mb = empty(pollutants, ())
         self.store_paths = self.store_paths_of([(s.cls, s.name) for s in spec.surfaces])
+        # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
+        # running mass balance are the day's (W75)
+        self.carried_paths = tuple(
+            p for p in self.store_paths if p.endswith(".storage")
+        )
 
     @classmethod
     def store_paths_of(cls, surfaces: Sequence[tuple[str, str]]) -> tuple[str, ...]:

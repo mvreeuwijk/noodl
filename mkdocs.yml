@@ -67,6 +67,7 @@ nav:
       - Sewers: applications/sewer.md
       - Water distribution: applications/water.md
       - Flow allocation: applications/allocation.md
+      - WSIMOD: applications/wsimod.md
       - Electrical circuits: applications/electrical.md
       - Coupling: applications/coupling.md
   - Catalogue:
@@ -75,7 +76,7 @@ nav:
       - Street air quality: catalogue/street_aq.md
       - Sewers: catalogue/sewer.md
       - Water distribution: catalogue/water.md
-      - Flow allocation (WSIMOD): catalogue/wsimod.md
+      - WSIMOD: catalogue/wsimod.md
       - Electrical circuits: catalogue/electrical.md
   - Verification: verification.md
   - File formats:

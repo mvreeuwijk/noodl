@@ -30,7 +30,7 @@ from noodl.apps.wsimod.arcs import _put_row, check_travel_time
 from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
-from noodl.apps.wsimod.tanks import QueueTank, Tank
+from noodl.apps.wsimod.tanks import QueueTank, Tank, bind_timearea
 from noodl.apps.wsimod.vqip import (
     Pollutants,
     extract_vqip,
@@ -149,6 +149,7 @@ class Storage(Node):
 
     wsimod_type: ClassVar[str] = "Storage"
     store_paths: ClassVar[tuple[str, ...]] = ("tank.storage",)
+    carried_paths: ClassVar[tuple[str, ...]] = ("tank.storage",)
     step_methods: ClassVar[tuple[str, ...]] = ("distribute",)
     distributes: ClassVar[tuple[str, ...]] = ("out",)  # distribute's push_distributed
     # storage.py:76: the storage change is the engine's, from the stores (D11)
@@ -366,6 +367,7 @@ class QueueGroundwater(Storage):
         "tank.internal_arc.register",
         "tank.internal_arc.present",
     )
+    carried_paths: ClassVar[tuple[str, ...]] = store_paths
     step_methods: ClassVar[tuple[str, ...]] = ("infiltrate", "distribute")
 
     def __init__(self, spec: NodeSpec, pollutants: Pollutants) -> None:
@@ -410,6 +412,15 @@ class QueueGroundwater(Storage):
 
     def _tanks(self) -> list[Tank]:
         return [self.tank, self.check_tank] if hasattr(self, "check_tank") else [self.tank]
+
+    def bind(self, parameters: Mapping[str, Tensor]) -> None:
+        """The day's parameters; ``"timearea"`` ``(..., L+1)`` holds the fractions by travel
+        time (W56, :func:`~noodl.apps.wsimod.tanks.bind_timearea`)."""
+        super().bind(parameters)
+        if "timearea" in self.params:
+            self.timearea = bind_timearea(
+                f"node {self.name!r}", "timearea", tuple(self.timearea), self.params["timearea"]
+            )
 
     def _push_check_frozen(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
         """``storage.py:71`` bound to the first tank (see the class text)."""
@@ -556,6 +567,8 @@ class RiverReservoir(Reservoir):
 
     wsimod_type: ClassVar[str] = "Reservoir"
     store_paths: ClassVar[tuple[str, ...]] = ("tank.storage", "total_environmental_satisfied")
+    # total_environmental_satisfied is reset every day (storage.py:1130-1133)
+    carried_paths: ClassVar[tuple[str, ...]] = ("tank.storage",)
     step_methods: ClassVar[tuple[str, ...]] = (
         "distribute",
         "make_abstractions",

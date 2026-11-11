@@ -830,7 +830,8 @@ class LayerRefs(Mapping[str, LayerRef]):
 
     Item access works for every name; attribute access for names that are identifiers.
     `closure_state` maps each closure-carried state key to a `Field` when its closure
-    declares the labels (a `key_labels` attribute, `{key: labels}`), else to the plain key.
+    declares the labels (a `key_labels` attribute, `{key: labels}`, or `{key: Field}` for a key
+    whose layout the closure builds itself), else to the plain key.
     `inputs` maps each input a closure, reaction, law or head term reads itself -- a wind
     speed, an inflow, a photolysis rate -- to its `Field`, as the closure's or reaction's
     `input_specs`, or the builder's `model.input_specs`, declares it (`input_field`).
@@ -852,6 +853,9 @@ class LayerRefs(Mapping[str, LayerRef]):
             labels = model._closure_spec(closure).key_labels.get(key)
             if labels is None:
                 closure_state[key] = key
+            elif isinstance(labels, Field):
+                # a key with a trailing layout of its own (labelled rows of several columns)
+                closure_state[key] = labels
             else:
                 closure_state[key] = Field(
                     key, role="state", layer=None, axis="label", labels=labels,

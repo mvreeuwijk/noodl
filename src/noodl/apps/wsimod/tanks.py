@@ -38,11 +38,36 @@ from noodl.apps.wsimod.vqip import (
     write,
 )
 
-__all__ = ["DecayTank", "QueueTank", "ResidenceTank", "Tank"]
+__all__ = ["DecayTank", "QueueTank", "ResidenceTank", "Tank", "bind_timearea"]
 
 
 def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
+
+
+def bind_timearea(where: str, name: str, keys: tuple[int, ...], value) -> dict[int, Tensor]:
+    """The day's time-area fractions on the configured keys (W56, W70; spec, Inputs).
+
+    ``value`` holds one fraction per travel time, ``(..., L+1)`` (the driver's row of a node).
+    The keys are structure (they size the ``QueueTank``'s register, W50), so the result keeps
+    the configured keys in their configured order, which is the order WSIMOD walks the dict in
+    (``storage.py:337``, ``sewer.py:194``); a non-zero fraction at any other time is refused
+    by name. The fractions are batchable and learnable.
+    """
+    value = _f64(value)
+    if value.ndim < 1 or value.shape[-1] <= max(keys):
+        raise ValueError(
+            f"{where}: {name} of shape {tuple(value.shape)}; expected (..., >= {max(keys) + 1}) "
+            "fractions, one per travel time"
+        )
+    other = [t for t in range(value.shape[-1]) if t not in keys]
+    if other and bool((value[..., other] != 0).any()):
+        bad = [t for t in other if bool((value[..., t] != 0).any())]
+        raise ValueError(
+            f"{where}: {name} has a non-zero fraction at time(s) {bad}, which the configuration "
+            f"does not list ({sorted(keys)}); the keys are structure, the fractions are not"
+        )
+    return {k: value[..., k] for k in keys}
 
 
 class Tank:

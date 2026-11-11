@@ -51,6 +51,8 @@ class Arc:
     """
 
     ctx: Ctx
+    # the stores carried from one day to the next (the keys of :meth:`stores`)
+    carried_paths: tuple[str, ...] = ()
 
     def __init__(self, spec: ArcSpec, in_port: Node, out_port: Node, pollutants: Pollutants):
         self.spec = spec
@@ -232,6 +234,8 @@ class AltQueueArc(Arc):
     name of its own, ``tanks.py:484-486``); ``owner`` is the node an event is recorded at.
     """
 
+    carried_paths: tuple[str, ...] = ("register", "present")
+
     def __init__(
         self,
         spec: ArcSpec,
@@ -412,6 +416,8 @@ class QueueArc(Arc):
     ``J`` grows while the labels are recorded and is fixed afterwards. It is the larger of
     the two directions' counts, so the other direction's surplus rows stay empty.
     """
+
+    carried_paths: tuple[str, ...] = ("rows", "since")
 
     def __init__(self, spec: ArcSpec, in_port: Node, out_port: Node, pollutants: Pollutants):
         self.number_of_timesteps = check_travel_time(

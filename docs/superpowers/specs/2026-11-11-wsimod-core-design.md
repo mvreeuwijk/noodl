@@ -144,9 +144,16 @@ per direction and tag.
   - `River.pull_check_river` (`storage.py:660-686`, `of_type` [River, Node]).
 - **Terminating handlers.** Every other check handler terminates. These are the tanks, `Waste`,
   `Catchment`, `Demand`, `FWTW`, `UnlimitedDistribution`, `QueueGroundwater`, the `Sewer` push
-  check, the `River` push check and `Land`.
+  check, the `River` push check and `Land`'s push checks.
 
-Only a cycle in this graph is refused by name at build time, naming the cycle. WSIMOD does not
+Only a cycle in this graph that a check can enter is refused by name at build time, naming the
+cycle (`structure.recursion_cycles`). Push checks run on every push request, so every push cycle
+is entered. Pull checks run only upstream of a node that pulls: the step methods
+`create_demand`, `treat_water` and `make_abstractions` start them, and they climb the in-arcs
+through recursing handlers only. `Land` and `Sewer` both keep `pull_check_basic` as their
+default pull check, so `Land → Sewer` runoff with `Sewer → Land` ponding is a cycle of the pull
+graph, but no pull check enters it, and it is accepted (Task 13 corrects this paragraph, which
+listed `Land` as terminating). WSIMOD does not
 fail cleanly on such a cycle. `query_handler` (`nodes.py:335-343`) catches the exception and
 calls the handler again at every level, so the work doubles per level and the run hangs. Fable
 confirmed this by running it: a two-`Node` `push_check` cycle did not finish in 120 s.
@@ -256,8 +263,8 @@ shape, and the model's labels give each row a name.
 |---|---|---|
 | `"wsimod.storage"` | (..., n_tanks, 1+K) | every `Tank`/`ResidenceTank`/`QueueTank` `.storage` and every surface's `.storage`, labelled `(node, attribute)` in WSIMOD's attribute names: `tank`, `sewer_tank`, `stormwater_tank`, `service_reservoir_tank`, `surface_runoff`, `subsurface_runoff`, `percolation`, `surface:<name>` |
 | `"wsimod.active_storage"` | (..., n_queue_tanks, 1+K) | `QueueTank.active_storage` (`tanks.py:478`) |
-| `"wsimod.travel_queue"` | (..., n_alt_queues, L+1, 1+K) | the `{time: vqip}` queue of every `AltQueueArc` as a dense shift register: each `QueueTank`'s internal arc, and each user `AltQueueArc`. `L` is the largest travel time the structure can enter (pipe time, time-area keys, `number_of_timesteps`). A user `AltQueueArc` shifts at `end_timestep` but is flushed only by its next push, because nothing calls its `update_queue` at the end of the day (`arcs.py:603-660`). A `QueueTank`'s arc is also flushed at the end of the day (`tanks.py:633-634`) |
-| `"wsimod.travel_queue_present"` | (..., n_alt_queues, L+1) | each register's key set (bool; Shift register below): WSIMOD assigns a first entry and sums later ones, which differ by rounding |
+| `"wsimod.travel_queue"` | (..., n_registers, 1+K) | the `{time: vqip}` queue of every `AltQueueArc` as a dense shift register: each `QueueTank`'s internal arc (nodes in configuration order, labelled `"<node>.<tank>.internal_arc"`), then each user `AltQueueArc` (arc order), one row `(arc, i)` per travel time `i = 0 … L`. `L` is the arc's own largest travel time the structure can enter (pipe time, time-area keys, `number_of_timesteps`), so the registers are flattened along the rows rather than padded to a common `L` (Task 13; D10's `(arc, i)` labels). A user `AltQueueArc` shifts at `end_timestep` but is flushed only by its next push, because nothing calls its `update_queue` at the end of the day (`arcs.py:603-660`). A `QueueTank`'s arc is also flushed at the end of the day (`tanks.py:633-634`) |
+| `"wsimod.travel_queue_present"` | (..., n_registers) | each register's key set (bool; Shift register below): WSIMOD assigns a first entry and sums later ones, which differ by rounding |
 | `"wsimod.arc_queue"` | (..., n_rows, 1+K) | `QueueArc` request rows (below), labelled `(arc, direction, i, j)` |
 | `"wsimod.arc_queue_since"` | (..., n_anchors) | per `(arc, direction)`, the days since the arc's last call in that direction that reached `update_queue`, saturating at `n` (below); `n` at the start |
 | `"wsimod.liquor"` | (..., n_wtw, 1+K) | `WTW.liquor` of every `WWTW` and `FWTW`, empty at the start. Neither `end_timestep` resets it (`wtw.py:447-453`, `:646-653`), and every treatment blends with it (`:174-182`). For a `WWTW` it is also an inflow to the next day (`:340`). For an `FWTW` only its non-additive entries and volume matter. `solids` needs no state, because each treatment overwrites it completely (`:204-208`) |
@@ -334,7 +341,10 @@ delivered or returned as backflow (`backflow_enabled` is always true on these pa
   and the tag; `QueueArc.calls[direction][j]` is call `j`'s label. The first day that calls the
   arc records them, or `begin_tracing()`/`end_tracing()` bracket `build_model`'s tracing day;
   every later day must repeat the sequence, or the call (or the day's `end_timestep`, for a
-  short day) raises. `J` grows while the labels are recorded.
+  short day) raises. `J` grows while the labels are recorded. Because `update_queue` visits
+  every row, the day's whole call sequence depends on `J`: `WsimodDay` runs the tracing day a
+  second time from the initial state, with every `J` fixed, and records that day's
+  `Ctx.sequence`, which every later day must repeat (Task 13).
 
 The W21 test proves this layout against WSIMOD's delivery order. It drives the arc with pushes
 on irregular days, with several pushes and several distribute rounds on one day, and with a

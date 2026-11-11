@@ -25,7 +25,7 @@ from torch import Tensor
 from noodl.apps.wsimod.arcs import check_travel_time
 from noodl.apps.wsimod.engine import Ctx, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
-from noodl.apps.wsimod.tanks import QueueTank
+from noodl.apps.wsimod.tanks import QueueTank, bind_timearea
 from noodl.apps.wsimod.vqip import Pollutants, extract_vqip, sum_vqip, v_change_vqip
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -61,7 +61,7 @@ class Sewer(Node):
     Parameters (:meth:`bind`): ``capacity``, ``chamber_area`` and ``chamber_floor`` reach the tank.
     ``pipe_time`` and the keys of ``pipe_timearea`` are structure: they fix the tank's register
     length (W50), so they are read once from the configuration. The fractions of
-    ``pipe_timearea`` are the configured ones.
+    ``pipe_timearea`` are a parameter, ``"pipe_timearea"`` ``(..., L+1)`` by travel time (W70).
     """
 
     wsimod_type: ClassVar[str] = "Sewer"
@@ -71,6 +71,7 @@ class Sewer(Node):
         "sewer_tank.internal_arc.register",
         "sewer_tank.internal_arc.present",
     )
+    carried_paths: ClassVar[tuple[str, ...]] = store_paths
     step_methods: ClassVar[tuple[str, ...]] = ("make_discharge",)
     # sewer.py:116: the storage change only, from the stores (D11)
     mass_balance: ClassVar[dict[str, str]] = {}
@@ -132,6 +133,13 @@ class Sewer(Node):
         ):
             if name in self.params:
                 setattr(self.sewer_tank, field, self.params[name])
+        if "pipe_timearea" in self.params:  # W70: the fractions by travel time, (..., L+1)
+            self.pipe_timearea = bind_timearea(
+                f"node {self.name!r}",
+                "pipe_timearea",
+                tuple(self.pipe_timearea),
+                self.params["pipe_timearea"],
+            )
 
     # --- state ------------------------------------------------------------------------------
     def stores(self) -> dict[str, Tensor]:

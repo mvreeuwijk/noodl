@@ -323,9 +323,12 @@ def test_every_key_of_every_application_reports_a_unit():
     model, state, drivers = water.build_model(water.twoloop())
     assert model.refs.water.flow.unit == "m3/s" and model.refs.water.sources.unit == "m3/s"
 
-    model, state, drivers = wsimod.build_model(DATA / "allocation" / "quickstart_topology.json")
-    w = model.refs.wsimod
-    assert w.storage.unit == "m3" and w.requests.unit == "m3/s" and w.flow.unit == "m3/s"
-    assert w.quantity == "storage"
+    model, state, drivers = wsimod.build_model(
+        wsimod.read_wsimod_config(DATA / "wsimod" / "small")
+    )
+    fields = model.refs.fields()  # the closure's own layouts (key_labels Fields, input_specs)
+    assert fields["wsimod.storage"].unit == "m3"
+    assert fields["wsimod.storage"].labels == (("river", "tank"),)
+    assert fields["wsimod.Arc.capacity"].unit == "m3/d" and fields["wsimod.flow"].unit == "m3/d"
     # The check table shows them.
-    assert "m3/s" in str(model.check(state, drivers))
+    assert "m3/d" in str(model.check(state, drivers))

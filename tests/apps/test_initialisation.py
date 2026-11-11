@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import json
 from pathlib import Path
 
 import pytest
 import torch
 
 from noodl.apps import sewer, street_aq, water, wsimod
-from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -133,39 +131,34 @@ def test_street_probe_flags_a_misspelt_meteorology_key():
 
 
 # --------------------------------------------------------------------------- wsimod
-def test_wsimod_requests_by_arc_name_reproduce_the_layer_step():
-    topology = json.loads((DATA / "allocation" / "quickstart_topology.json").read_text())
-    model, state, _ = wsimod.build_model(topology)
+def test_wsimod_values_by_name_reproduce_the_hand_built_step():
+    network = wsimod.read_wsimod_config(DATA / "wsimod" / "small")
+    model, state0, drivers0 = wsimod.build_model(network)
+    day = model.wsimod_day
+    state = wsimod.initial_state(model, values={"wsimod.storage": {("river", "tank"): 9.0}})
     drivers = wsimod.initial_drivers(
-        model, values={"wsimod.requests": {"baseflow": 0.3, "runoff": 0.1}}
+        model, values={"wsimod.Arc.capacity": {"river_to_outlet": 3.0}}
     )
-    state = wsimod.initial_state(model, values={"wsimod": {"my_groundwater": 5.0}})
-    assert model.check(state, drivers, dt=1.0, probe=True).ok
+    assert model.check(state, drivers).ok
 
-    net = Network()
-    for node in topology["nodes"]:
-        net.add_node(node["name"])
-    for arc in topology["arcs"]:
-        net.add_edge(arc["source"], arc["target"], kind="link", name=arc["name"])
-    arcs = [a["name"] for a in topology["arcs"]]
-    layer = AllocatedFlowLayer(
-        net, "cap", "link", s_max=torch.full((net.n,), float("inf"), dtype=F64),
-        c_arc=torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=F64),
-    )
-    r = torch.zeros(len(arcs), dtype=F64)
-    r[arcs.index("baseflow")], r[arcs.index("runoff")] = 0.3, 0.1
-    s = torch.zeros(net.n, dtype=F64)
-    s[net.node_index("my_groundwater")] = 5.0
-    s_ref, f_ref = layer.step(s, {"cap.requests": r}, dt=1.0)
-    out = model.step(state, drivers, 1.0)
-    assert torch.equal(out["wsimod.s"], s_ref) and torch.equal(out["wsimod.q"], f_ref)
+    hand_state = {k: v.clone() for k, v in state0.items()}
+    row = day.state_labels("wsimod.storage").index(("river", "tank"))
+    hand_state["wsimod.storage"][row, 0] = 9.0
+    capacity = drivers0["wsimod.Arc.capacity"].clone()
+    capacity[day.arc_names.index("river_to_outlet")] = 3.0
+    hand_drivers = {**drivers0, "wsimod.Arc.capacity": capacity}
+    for key in state:
+        assert torch.equal(state[key], hand_state[key]), key
+    out = model.step(state, drivers, dt=86400.0, t=0.0)
+    ref = model.step(hand_state, hand_drivers, dt=86400.0, t=0.0)
+    for key in out:
+        assert torch.equal(out[key], ref[key]), key
 
 
 def test_wsimod_refuses_an_unknown_name():
-    topology = json.loads((DATA / "allocation" / "quickstart_topology.json").read_text())
-    model, _, _ = wsimod.build_model(topology)
-    with pytest.raises(KeyError, match="did you mean 'baseflow'"):
-        wsimod.initial_drivers(model, values={"wsimod.requests": {"basefow": 1.0}})
+    model, _, _ = wsimod.build_model(wsimod.read_wsimod_config(DATA / "wsimod" / "small"))
+    with pytest.raises(KeyError, match="did you mean 'river_to_outlet'"):
+        wsimod.initial_drivers(model, values={"wsimod.Arc.capacity": {"river_to_outlt": 1.0}})
 
 
 # ------------------------------------------------- review regressions (stock app models)
@@ -198,7 +191,6 @@ def test_the_building_builder_can_return_the_same_triple_as_the_others():
     from noodl.apps import building_physics as bp
     from noodl.apps.building_physics.elements import orifice_law_from_edges
     from noodl.heads import Stack
-    from noodl.topology import Network
 
     def network():
         net = Network(dtype=F64)

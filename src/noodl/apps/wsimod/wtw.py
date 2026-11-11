@@ -307,6 +307,8 @@ class WWTW(WTW):
         "liquor",
         "solids",
     )
+    # wtw.py:447-453 keeps liquor and treated; current_input and solids are emptied
+    carried_paths: ClassVar[tuple[str, ...]] = ("stormwater_tank.storage", "treated", "liquor")
     step_methods: ClassVar[tuple[str, ...]] = ("calculate_discharge", "make_discharge")
     distributes: ClassVar[tuple[str, ...]] = ("out",)  # make_discharge's push_distributed
     # wtw.py:293: solids go to landfill; :294-297 the storage changes are the engine's (D11)
@@ -524,6 +526,15 @@ class FWTW(WTW):
         "total_pulled",
         "previous_pulled",
         "unpushed_sludge",
+    )
+    # wtw.py:646-653 keeps liquor and sets previous_pulled; the day's totals and treated are
+    # emptied. current_input and solids are not, but treat_water overwrites current_input
+    # before anything reads it and the solids' non-additive columns are never written, so
+    # neither carries anything (spec, State).
+    carried_paths: ClassVar[tuple[str, ...]] = (
+        "service_reservoir_tank.storage",
+        "liquor",
+        "previous_pulled",
     )
     step_methods: ClassVar[tuple[str, ...]] = ("treat_water",)
     distributes: ClassVar[tuple[str, ...]] = ("out", "in")

@@ -158,6 +158,9 @@ class Ctx:
         self.dropped: Tensor = self.empty()
         self.terms: dict[str, Tensor] = {}
         self.frames: list[str] = []
+        # every (element, method, index) of :meth:`call`, in call order: the day's static call
+        # sequence, which D2 fixes on the tracing day
+        self.sequence: list[tuple[str, str, int]] = []
         self._calls: dict[tuple[str, str], int] = {}
 
     def empty(self) -> Tensor:
@@ -201,6 +204,7 @@ class Ctx:
         ``"arc:A"``) this day: 0, 1, ... in noodl's call order, masked calls included."""
         index = self._calls.get((element, method), 0)
         self._calls[(element, method)] = index + 1
+        self.sequence.append((element, method, index))
         return index
 
     @contextmanager
