@@ -260,9 +260,10 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network, mon
                                           differentiable=differentiable, **step,
                                           **TIGHT), diag
     # `on_failure="return_primal"`: a differentiable solve nothing reaches is not
-    # differentiated; it runs the primal Newton (no `FunctionalLaws` built), with the
-    # closure check at every residual, or, under no_grad with a grad-requiring driver or
-    # owner parameter, without it. All are the primal solve bit for bit too.
+    # differentiated; it runs the primal Newton, with the closure check at every residual
+    # (no `FunctionalLaws` built), or, under no_grad with a grad-requiring driver or owner
+    # parameter, at the starting guess and at the root only (one `FunctionalLaws`, for
+    # those two residuals). All are the primal solve bit for bit too.
     unread = {"unread": _t([1.0]).requires_grad_(True)}
     cases = [("checked", {}, torch.enable_grad, None),
              ("grad-requiring driver", unread, torch.no_grad, None)]
@@ -278,7 +279,7 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network, mon
                                     on_failure="return_primal", **step, **TIGHT), diag
         if learnable is not None:
             learnable.requires_grad_(False)
-        assert not built, name
+        assert len(built) == (0 if name == "checked" else 1), name
     (phi_p, q_p), diag_p = out[False]
     for key in (True, *(c[0] for c in cases)):
         (phi_d, q_d), diag_d = out[key]
@@ -372,7 +373,8 @@ def test_return_primal_that_nothing_reaches_is_the_primal_newton_on_both_paths(
     with torch.enable_grad() if mode == "grad" else torch.no_grad():
         phi, q = layer.solve(phi_b, drivers, sources, diagnostics=diag,
                              on_failure="return_primal", **tol)
-    assert not built
+    # under no_grad one `FunctionalLaws` checks the residual at the start and at the root
+    assert len(built) == (1 if mode == "no_grad" else 0)
     assert not phi.requires_grad and not q.requires_grad
     assert torch.equal(phi, phi_p) and torch.equal(q, q_p)
     assert diag["newton_iterations"] == diag_p["newton_iterations"]

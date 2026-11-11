@@ -29,7 +29,8 @@ class SolvePolicy:
     path. `forward_only`: a differentiable solve that nothing reaches
     (`on_failure="return_primal"`). Both paths run it as their primal solve, the Newton of
     `differentiable=False` on the layer's own slopes, with the closure check at every
-    residual.
+    residual (under `no_grad` with a threaded tensor that requires grad, at the starting
+    guess and at the root only).
     """
 
     differentiable: bool

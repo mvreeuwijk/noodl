@@ -883,7 +883,10 @@ Three more things about `iterate_tol`:
   raises (`on_failure="return_primal"`, the passes' default), and an explicit `on_failure` is
   passed through as given. A pass that nothing differentiable reaches is not differentiated:
   on every layer it is the primal solve, the same Newton iteration as `differentiable=False`,
-  on each law's own slope.
+  on each law's own slope. It still refuses a tensor that requires grad and that a law reads
+  untracked, through a closure ([differentiability](differentiability.md)): at every iterate
+  in grad mode, and at the starting guess and at the root under `torch.no_grad()` with a
+  learnable parameter, where every iterate of a differentiated solve would check it.
 
 ### Introspection
 

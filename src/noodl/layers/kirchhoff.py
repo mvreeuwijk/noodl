@@ -1853,13 +1853,16 @@ class KirchhoffLayer(
         # A differentiable solve that nothing reaches (`forward_only`) is the primal solve on
         # either path: the same Newton, on the layer's own slopes, as `differentiable=False`,
         # with that closure check at every residual (`primal_checked`) where nothing it
-        # threads requires grad (under `no_grad` a threaded tensor may still require grad,
-        # which the check, run under grad mode, would take for a captured one). Its
-        # residual evaluates each owner as the differentiated solve would, by its module
+        # threads requires grad. Under `no_grad` a threaded tensor (a learnable parameter)
+        # may still require grad, which that check, run under grad mode, would take for a
+        # captured one: there the residual is checked at the starting guess and at the root
+        # only, with the threaded tensors detached as the differentiated solve detaches
+        # them (`checker`, built for those two evaluations alone).
+        # Its residual evaluates each owner as the differentiated solve would, by its module
         # call: the primal solve with flow unknowns always does, and the fast path's calls
         # the owner's own method, the same thing unless `forward` is overridden or hooked
         # (`_plain_calls`), where it calls the module instead (`primal_call`).
-        fn = None
+        fn = checker = None
         primal_checked = False
         primal_call = None
         if policy.differentiable:
@@ -1867,6 +1870,9 @@ class KirchhoffLayer(
             if policy.forward_only:
                 primal_checked = (torch.is_grad_enabled() or not self._threads_grad(
                     drivers, sources, phi_boundary, starts))
+                if not primal_checked:
+                    checker = FunctionalLaws(self, drivers, sources, phi_boundary, step,
+                                             history)
                 if u is None and not self._plain_calls():
                     primal_call = self._owner_call
             else:
@@ -1944,9 +1950,15 @@ class KirchhoffLayer(
                     last["op"] = op
                 return op
 
+            if checker is not None:
+                self._require_threaded(lambda *p: checker.residual_fn(x0, *p),
+                                       checker.all_params)
             with torch.no_grad():
                 result = self._newton_primal(residual_fn, operator_fn, x0, newton_kwargs,
                                              diagnostics, on_fail, requested=requested)
+                if checker is not None:
+                    self._require_threaded(lambda *p: checker.residual_fn(result.x, *p),
+                                           checker.all_params)
                 if ((primal_checked or primal_call is not None)
                         and point.get("x") is not result.x):
                     # the root is checked too, and its flows are those of `primal_call`
