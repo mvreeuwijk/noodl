@@ -586,3 +586,26 @@ def test_two_treatment_works_do_not_share_their_dicts():
     assert w1["process_parameters"]["phosphate"]["constant"] == 0.5
     assert w2["process_parameters"]["phosphate"]["constant"] == 0.01
     assert NODE_SCHEMAS["WWTW"].parameters["liquor_multiplier"] == {}
+
+
+def test_a_demand_with_a_residential_override_runs_in_the_demand_slot():
+    """``Model.save`` writes ``type_: Demand`` with ``node_type_override: ResidentialDemand``:
+    the slot key follows ``type_``, the class the override."""
+    network = read_wsimod_config(
+        {
+            "pollutants": [],
+            "additive_pollutants": [],
+            "non_additive_pollutants": [],
+            "dates": ["2000-01-01"],
+            "nodes": [
+                {
+                    "name": "homes",
+                    "type_": "Demand",
+                    "node_type_override": "ResidentialDemand",
+                    "data_input_dict": {("temperature", "2000-01-01"): 5.0},
+                }
+            ],
+            "arcs": [],
+        }
+    )
+    assert (network.nodes[0].slot_key, network.nodes[0].cls) == ("Demand", "ResidentialDemand")

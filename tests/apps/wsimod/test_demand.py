@@ -552,3 +552,34 @@ def test_no_demand_or_distribution_handler_recurses_except_the_distribution_pull
         assert not cls.check_recurses(spec, "pull", "default")
     assert Distribution.check_recurses(spec, "pull", "default")
     assert not Distribution.check_recurses(spec, "push", "default")
+
+
+def test_components_are_pushed_garden_then_house():
+    """``demand.py:79-119``: ``create_demand`` pushes in dict order, ``garden`` (to Land, tag
+    ``("Demand", "Garden")``) before ``house`` (to Sewer, tag ``"Demand"``)."""
+    node = make("ResidentialDemand", population=10.0, per_capita=0.1, gardening_efficiency=0.5)
+    node.bind({"temperature": torch.tensor(10.0)})
+    land = StoreNode("land", P, wsimod_type="Land")
+    sewer = StoreNode("sewer", P, wsimod_type="Sewer")
+    order: list[tuple[str, float]] = []
+
+    def recorder(label, volume=None):
+        def push(vqip, *, active):
+            if bool(active):  # a masked round is computed and discarded
+                order.append((label, float(vqip[0])))
+            return torch.zeros_like(vqip)
+
+        def check(vqip=None, *, active):
+            return vol(8.0 if volume is None else volume)
+
+        return push, check
+
+    land.push_set_handler[("Demand", "Garden")], land.push_check_handler[("Demand", "Garden")] = (
+        recorder("garden")
+    )
+    sewer.push_set_handler["Demand"], sewer.push_check_handler["Demand"] = recorder("house", 50.0)
+    arc("to_land", node, land)
+    arc("to_sewer", node, sewer)
+    day(node, land, sewer)
+    node.create_demand(active=TRUE)
+    assert order == [("garden", 8.0 * 0.5), ("house", 10.0 * 0.1)]
