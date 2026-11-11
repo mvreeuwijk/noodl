@@ -91,6 +91,8 @@ refused by name.
   overrides, per node (WSIMOD's shared mutable defaults are not reproduced). A treatment works
   with an empty `process_parameters` or `liquor_multiplier` gets WSIMOD's defaults for the
   model's additive pollutants (`wtw.py:73-85`).
+- `decays` must be `None` on the Storage family (any dict, even `{}`, builds a `DecayTank`) and
+  empty on a surface; anything else is refused by name (sub-project 3b).
 - Classes WSIMOD has that are not read are refused by name with where they go:
   `DecayArc` and `DecayArcAlt` (sub-project 3b), `GrowingSurface`, `IrrigationSurface`,
   `GardenSurface` and `VariableAreaSurface` (3c), and `EnfieldFoulSewer`, whose
@@ -129,6 +131,13 @@ compute derived quantities.
   `process_parameters` merges per pollutant, and `surfaces` (a `Land`) merges per named surface.
   Every other value replaces the old one. A pervious surface's `depth` is the physical depth, as
   in the configuration.
+- A pervious surface's soil-temperature overrides (`soil_temp_w_prev`, `soil_temp_w_air`,
+  `soil_temp_w_deep`, `soil_temp_deep`) are state attributes in WSIMOD, not constructor keywords.
+  They are stored in `SurfaceSpec.parameters` all the same, which is where the model builder
+  reads them.
+- A `QueueGroundwater` override of `number_of_timesteps` (a key of its `QueueTank`, not a
+  constructor keyword of the node) is refused.
+- An override of `decays` is refused (decay is sub-project 3b).
 - `filename` (a node) and `data_input_dict` (a surface) are refused: WSIMOD opens an override's
   file relative to the current working directory, not the configuration directory
   (`nodes.py:93-99`, `land.py:413-421`).

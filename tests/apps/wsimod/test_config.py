@@ -442,6 +442,29 @@ REFUSALS = [
         "capacity",
     ),
     (_override(node={"type_": "Land", "name": "land", "surfaces": {"nowhere": {}}}), "nowhere"),
+    (
+        _with(
+            arcs=[],
+            nodes=[
+                {
+                    "name": "l",
+                    "type_": "Land",
+                    "surfaces": [{"surface": "u", "type_": "ImperviousSurface"}],
+                }
+            ],
+            overrides={
+                "nodes": [
+                    {"type_": "Land", "name": "l", "surfaces": {"u": {"depth": 1}}},
+                ]
+            },
+        ),
+        "depth",
+    ),
+    (_node(type_="Storage", decays={}), "3b"),
+    (_node(type_="Groundwater", decays={"phosphate": {"constant": 1}}), "decays"),
+    (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "decays": {"a": 1}}]), "3b"),
+    (_node(type_="Waste", data_input_dict={}), "data_input_dict"),
+    (_override(node={"type_": "Catchment", "name": "a", "decays": {}}), "decays"),
     (_override(arc={"name": "nowhere", "type_": "Arc"}), "nowhere"),
     (_override(arc={"name": "ab", "type_": "Arc", "diameter": 1}), "diameter"),
 ]
@@ -465,3 +488,101 @@ def test_an_orchestration_is_read_as_slot_method_pairs():
     assert net.orchestration == [("Land", "run"), ("Catchment", "route")]
     with pytest.raises(ValueError, match="orchestration"):
         read_wsimod_config({"nodes": [], "orchestration": [{"Land": "run", "River": "x"}]})
+
+
+def test_overrides_replace_top_level_keys_and_the_overrides_section():
+    net = read_wsimod_config(
+        _base(), overrides={"nodes": [{"name": "w", "type_": "Waste"}], "arcs": []}
+    )
+    assert [n.name for n in net.nodes] == ["w"] and net.arcs == []
+    section = {"nodes": [{"type_": "Catchment", "name": "a", "bogus": 1}]}
+    with pytest.raises(ValueError, match="bogus"):
+        read_wsimod_config(_base(), overrides={"overrides": section})
+    base = _base()
+    net = read_wsimod_config(
+        base,
+        overrides={
+            "overrides": {"arcs": [{"name": "ab", "type_": "Arc", "capacity": 7.0}]},
+        },
+    )
+    assert net.arcs[0].capacity == 7.0
+    assert "overrides" not in base  # the caller's mapping is untouched
+
+
+def test_a_foul_sewer_is_overridden_by_its_slot_key():
+    net = read_wsimod_config(
+        {
+            "nodes": [
+                {"name": "foul_1", "type_": "Sewer", "capacity": 0.1},
+                {"name": "storm", "type_": "Sewer"},
+            ],
+            "overrides": {"nodes": [{"type_": "Foul", "name": "foul_1", "capacity": 0.2}]},
+        }
+    )
+    assert net.nodes[0].parameters["capacity"] == 0.2
+    assert net.nodes[1].parameters["capacity"] == 0
+    with pytest.raises(ValueError, match="Sewer"):
+        read_wsimod_config(
+            {
+                "nodes": [{"name": "foul_1", "type_": "Sewer"}],
+                "overrides": {"nodes": [{"type_": "Sewer", "name": "foul_1", "capacity": 1}]},
+            }
+        )
+
+
+def test_nodes_and_arcs_keep_the_configuration_order_in_both_forms():
+    names = ["z", "m", "a", "k"]
+    nodes = [{"name": n, "type_": "Waste"} for n in names]
+    arcs = [
+        {"name": f"{x}{y}", "type_": "Arc", "in_port": x, "out_port": y}
+        for x, y in [("k", "z"), ("a", "z"), ("m", "z"), ("z", "a")]
+    ]
+    as_lists = read_wsimod_config({"nodes": nodes, "arcs": arcs})
+    as_mappings = read_wsimod_config(
+        {"nodes": {n["name"]: n for n in nodes}, "arcs": {a["name"]: a for a in arcs}}
+    )
+    for net in (as_lists, as_mappings):
+        assert [n.name for n in net.nodes] == names
+        assert [a.name for a in net.arcs] == ["kz", "az", "mz", "za"]
+
+
+def test_surfaces_given_as_a_dict_on_the_node_read_like_a_list():
+    rural = {"surface": "rural", "type_": "PerviousSurface", "area": 3}
+    urban = {"surface": "urban", "type_": "ImperviousSurface"}
+    as_dict = read_wsimod_config(
+        {"nodes": [{"name": "l", "type_": "Land", "surfaces": {"rural": rural, "urban": urban}}]}
+    )
+    as_list = read_wsimod_config(
+        {"nodes": [{"name": "l", "type_": "Land", "surfaces": [rural, urban]}]}
+    )
+    for net in (as_dict, as_list):
+        assert [(s.name, s.cls) for s in net.nodes[0].surfaces] == [
+            ("rural", "PerviousSurface"),
+            ("urban", "ImperviousSurface"),
+        ]
+        assert net.nodes[0].surfaces[0].parameters["area"] == 3
+
+
+def test_two_treatment_works_do_not_share_their_dicts():
+    net = read_wsimod_config(
+        {
+            "nodes": [{"name": "w1", "type_": "WWTW"}, {"name": "w2", "type_": "WWTW"}],
+            "overrides": {
+                "nodes": [
+                    {
+                        "type_": "WWTW",
+                        "name": "w1",
+                        "liquor_multiplier": {"volume": 0.1},
+                        "process_parameters": {"phosphate": {"constant": 0.5}},
+                    }
+                ]
+            },
+        }
+    )
+    w1, w2 = (n.parameters for n in net.nodes)
+    assert w1["liquor_multiplier"] is not w2["liquor_multiplier"]
+    assert w1["process_parameters"] is not w2["process_parameters"]
+    assert w1["liquor_multiplier"]["volume"] == 0.1 and w2["liquor_multiplier"]["volume"] == 0.03
+    assert w1["process_parameters"]["phosphate"]["constant"] == 0.5
+    assert w2["process_parameters"]["phosphate"]["constant"] == 0.01
+    assert NODE_SCHEMAS["WWTW"].parameters["liquor_multiplier"] == {}

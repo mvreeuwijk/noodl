@@ -243,6 +243,12 @@ def _checked_parameters(
     return parameters
 
 
+def _refuse_decays(where: str, decays: object) -> None:
+    """The Storage family needs ``decays: None`` (any dict, even ``{}``, builds a
+    ``DecayTank``) and a Surface an empty one: decay is sub-project 3b."""
+    raise ValueError(f"{where}: 'decays' {decays!r} is not supported (decay is sub-project 3b)")
+
+
 def _fill_wtw_defaults(parameters: dict, pollutants: Pollutants) -> None:
     """``WTW.__init__`` fills an empty ``process_parameters`` and ``liquor_multiplier`` from the
     model's additive pollutants (``wtw.py:73-85``), a fresh dict per node."""
@@ -272,6 +278,9 @@ def _apply_overrides(
         if key not in schema.override_keys:
             raise ValueError(f"{where}: {key!r} is not an override of {schema.name}")
     for key, value in overrides.items():
+        # The PerviousSurface soil-temperature keys (soil_temp_w_prev, _w_air, _w_deep, _deep) are
+        # state attributes in WSIMOD, not constructor keywords (land.py:753-756); they are
+        # stored in the surface's parameters here for the Land task to read from there.
         if key in ("surfaces", "surface"):  # the node's surfaces; a surface's own name
             continue
         if key in ("pollutant_load", "liquor_multiplier"):
@@ -352,7 +361,7 @@ def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSp
     schema = NODE_SCHEMAS[cls]
     slot_key = "Foul" if "foul" in name else type_  # model.py:658-660
     entry.pop("geometry", None)  # model.py:661-662
-    if ("filename" in entry or entry.get("data_input_dict")) and (
+    if ("filename" in entry or "data_input_dict" in entry) and (
         "data_input_dict" not in schema.parameters
     ):
         raise ValueError(f"{where}: {cls} does not take forcing data (data_input_dict)")
@@ -366,6 +375,8 @@ def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSp
             for s in _items(entry.pop("surfaces"), f"{where} surfaces")
         ]
     parameters = _checked_parameters(entry, schema, where)
+    if parameters.get("decays") is not None:  # storage.py:53, :300 build a DecayTank
+        _refuse_decays(where, parameters["decays"])
     if "process_parameters" in parameters:
         _fill_wtw_defaults(parameters, pollutants)
     return NodeSpec(name, cls, slot_key, parameters, data, surfaces)
@@ -378,7 +389,10 @@ def _read_surface(entry: dict, base: Path | None, owner: str) -> SurfaceSpec:
     name = entry.pop("surface", schema.parameters["surface"])
     where = f"{owner}, surface {name!r}"
     data = _forcing(entry, base, where)
-    return SurfaceSpec(name, type_, _checked_parameters(entry, schema, where), data)
+    parameters = _checked_parameters(entry, schema, where)
+    if parameters["decays"]:
+        _refuse_decays(where, parameters["decays"])
+    return SurfaceSpec(name, type_, parameters, data)
 
 
 def _read_arc(entry: dict, node_names: set[str]) -> ArcSpec:

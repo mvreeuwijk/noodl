@@ -304,6 +304,9 @@ _RENAMED = {
     "RiverReservoir": "Reservoir",
     "ResidentialDemand": "Demand",
 }
+# land.py:627-632: ``ImperviousSurface.apply_overrides`` pops ``depth`` and ignores it (a printed
+# error), though ``Surface`` consumes ``depth``; the override is refused.
+_NOT_OVERRIDES = {"ImperviousSurface": frozenset({"depth"})}
 _DERIVED = {
     "Surface": frozenset({"capacity", "parent"}),
     "ImperviousSurface": frozenset({"capacity", "parent", "depth"}),
@@ -325,6 +328,7 @@ def _schema(name: str) -> ClassSchema:
         for key, value in _CONSTRUCTORS[cls][0].items():
             parameters.setdefault(key, copy.deepcopy(value))
         override_keys |= _OVERRIDES.get(cls, frozenset())
+    override_keys -= _NOT_OVERRIDES.get(name, frozenset())
     return ClassSchema(
         name=name,
         parameters=parameters,
