@@ -188,50 +188,8 @@ class KirchhoffLayer(
     Every law must declare `phasor_capable`, withdrawals are refused (a load is an edge to
     ground), and `power_residual` is the complex power balance.
 
-    `storage` (default none) are `NodeStorage` objects (`noodl.storage`): an amount stored at
-    interior nodes, which a step of `dt` turns into a withdrawal into storage with the step
-    rate of the layer's scheme; without a step (a steady solve) storage is absent. A layer
-    with storage is `dynamic` and takes `dt`, `history` and `storage_flow` in `solve`.
-    Storage adds no flow unknowns: without flow unknowns its Jacobian gains only a
-    non-negative diagonal, so a network of conductances with storage keeps its symmetric
-    positive definite system, and a storage node counts as grounded during a step. A layer
-    with flow unknowns takes storage too (its diagonal slot of each node row).
-    `mode="initial"` holds each node with a storage entry whose `initial()` is not `None` at
-    that potential, on every layer: without flow unknowns that one solve uses the
-    sparse operator with the held rows. A phasor layer takes no storage (a capacitance is an
-    edge law there).
-
-    With `scheme="forward_euler"` the storage sits at BOUNDARY nodes instead, and is stepped
-    by forward Euler (EPANET's tank): it is never an unknown. The solve holds each storage
-    node at its potential at the step start, which it reads from `history=(phi, None)` on
-    every call (`Model` passes the state's `"<name>.phi"`); `"<name>.phi_boundary"` gives
-    the other boundary nodes only (`prescribed`). The step then moves
-    it by `dt * inflow / C` (`advance_storage`), `inflow` being the flow the solve delivers
-    to the node (`storage_flows`) and `C` the storage's capacity, or, for a storage that is
-    not linear, to `potential_of(amount + dt * inflow)` (`NodeStorage.potential_of`). Only a
-    linear storage (a constant capacity, `LinearStorage`) or one that gives `potential_of` is
-    accepted there, and only one entry per node. Such a layer's solve takes no step and does
-    not depend on `dt`.
-
-    `scheme` (default `"trapezoidal"`; `"backward_euler"` the other) is the time-integration
-    scheme of a transient step of a layer with dynamic laws or storage, one of `SCHEMES`
-    (`noodl.elements.base`); a `solve` call may give its own. `"exact"` is a `TransportLayer`
-    scheme and is refused here by name. `"forward_euler"` is for storage at boundary nodes
-    only (above): a layer with storage at interior nodes, with dynamic laws or with no storage
-    refuses it, and a layer with boundary storage refuses every other scheme.
-
-    `newton_defaults` (default none) are Newton keywords (`solvers.newton.newton`) every
-    `solve` of this layer uses unless the call gives its own, for laws that need them: the
-    sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
-    each non-decreasing, so the residual is the gradient of a convex function). A layer
-    with flow unknowns refuses ``line_search="convex"``, by keyword or here: its residual is
-    not the gradient of a convex function.
-
-    `fallback` (default none) is the ladder `solve` climbs when Newton does not converge,
-    rungs from `FALLBACK_RUNGS` tried in order: `"linear_guess"` solves again from the
-    linear initial guess, `"storage_ramp"` lets the network settle from it through a
-    fictitious storage removed in steps (`noodl.solvers.continuation.storage_ramp`) and
-    solves again from there. A `solve` call may give its own; see `solve`."""
+    The keyword arguments `storage`, `scheme`, `newton_defaults` and `fallback` are
+    described with the constructor (`__init__`)."""
 
     def __init__(
         self,
@@ -251,6 +209,52 @@ class KirchhoffLayer(
         storage: Sequence[NodeStorage] = (),
         fallback: Sequence[str] = (),
     ) -> None:
+        """Build the layer on `net`, with `laws` on its edge kinds and `boundary` nodes.
+
+        `storage` (default none) are `NodeStorage` objects (`noodl.storage`): an amount stored at
+        interior nodes, which a step of `dt` turns into a withdrawal into storage with the step
+        rate of the layer's scheme; without a step (a steady solve) storage is absent. A layer
+        with storage is `dynamic` and takes `dt`, `history` and `storage_flow` in `solve`.
+        Storage adds no flow unknowns: without flow unknowns its Jacobian gains only a
+        non-negative diagonal, so a network of conductances with storage keeps its symmetric
+        positive definite system, and a storage node counts as grounded during a step. A layer
+        with flow unknowns takes storage too (its diagonal slot of each node row).
+        `mode="initial"` holds each node with a storage entry whose `initial()` is not `None` at
+        that potential, on every layer: without flow unknowns that one solve uses the
+        sparse operator with the held rows. A phasor layer takes no storage (a capacitance is an
+        edge law there).
+
+        With `scheme="forward_euler"` the storage sits at BOUNDARY nodes instead, and is stepped
+        by forward Euler (EPANET's tank): it is never an unknown. The solve holds each storage
+        node at its potential at the step start, which it reads from `history=(phi, None)` on
+        every call (`Model` passes the state's `"<name>.phi"`); `"<name>.phi_boundary"` gives
+        the other boundary nodes only (`prescribed`). The step then moves
+        it by `dt * inflow / C` (`advance_storage`), `inflow` being the flow the solve delivers
+        to the node (`storage_flows`) and `C` the storage's capacity, or, for a storage that is
+        not linear, to `potential_of(amount + dt * inflow)` (`NodeStorage.potential_of`). Only a
+        linear storage (a constant capacity, `LinearStorage`) or one that gives `potential_of` is
+        accepted there, and only one entry per node. Such a layer's solve takes no step and does
+        not depend on `dt`.
+
+        `scheme` (default `"trapezoidal"`; `"backward_euler"` the other) is the time-integration
+        scheme of a transient step of a layer with dynamic laws or storage, one of `SCHEMES`
+        (`noodl.elements.base`); a `solve` call may give its own. `"exact"` is a `TransportLayer`
+        scheme and is refused here by name. `"forward_euler"` is for storage at boundary nodes
+        only (above): a layer with storage at interior nodes, with dynamic laws or with no storage
+        refuses it, and a layer with boundary storage refuses every other scheme.
+
+        `newton_defaults` (default none) are Newton keywords (`solvers.newton.newton`) every
+        `solve` of this layer uses unless the call gives its own, for laws that need them: the
+        sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
+        each non-decreasing, so the residual is the gradient of a convex function). A layer
+        with flow unknowns refuses ``line_search="convex"``, by keyword or here: its residual is
+        not the gradient of a convex function.
+
+        `fallback` (default none) is the ladder `solve` climbs when Newton does not converge,
+        rungs from `FALLBACK_RUNGS` tried in order: `"linear_guess"` solves again from the
+        linear initial guess, `"storage_ramp"` lets the network settle from it through a
+        fictitious storage removed in steps (`noodl.solvers.continuation.storage_ramp`) and
+        solves again from there. A `solve` call may give its own; see `solve`."""
         check_scheme(name, scheme)
         self.scheme = scheme
         self.newton_defaults = dict(newton_defaults or {})
