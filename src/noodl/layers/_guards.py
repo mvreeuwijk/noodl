@@ -14,7 +14,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl._tracking import bulk_values
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.storage import NodeStorage
 from noodl.withdrawals import NodeWithdrawal
 
@@ -39,9 +39,10 @@ def _detached(params) -> list:
 
 def plain_call(owner) -> bool:
     """Whether calling `owner` (a law, a withdrawal or a storage) as a module is calling its
-    own method (`flow`, `rate` and their slopes): its class keeps its base's `forward` and it
-    carries no forward hook."""
-    base = (ConstitutiveLaw if isinstance(owner, ConstitutiveLaw)
+    own method (`flow`, an implicit law's `residual`, `rate`, and their slopes): its class
+    keeps its base's `forward` and it carries no forward hook."""
+    base = (ImplicitLaw if isinstance(owner, ImplicitLaw)
+            else ConstitutiveLaw if isinstance(owner, ConstitutiveLaw)
             else NodeWithdrawal if isinstance(owner, NodeWithdrawal) else NodeStorage)
     return not (type(owner).forward is not base.forward or owner._forward_hooks
                 or owner._forward_pre_hooks)

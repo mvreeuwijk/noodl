@@ -169,18 +169,21 @@ class _FallbackMixin:
         diagnostics.update(diag, fallback=None, fallback_iterations=0)
         return out
 
-    def _ramp(self, x0, phi_boundary, drivers, sources, step, newton_kwargs, report):
+    def _ramp(self, x0, phi_boundary, drivers, sources, step, newton_kwargs, report,
+              call=None):
         """`storage_ramp` from `x0` on this solve's own primal residual and Jacobian
         (without gradients): the starting point of the fallback ladder's `"storage_ramp"`
         rung. The rows of the flow unknowns take a storage with the sign of their own
-        diagonal (an inertia), the potential rows its size."""
+        diagonal (an inertia), the potential rows its size. `call` is the solve's own
+        (`module_call`), so an owner whose module call is not its own method is ramped on
+        that call."""
         u = self._unknowns if step.layout is None else step.layout
 
         def residual(x):
-            return self._residual(x, phi_boundary, drivers, sources, step)[0]
+            return self._residual(x, phi_boundary, drivers, sources, step, call)[0]
 
         def operator(x):
-            return self._operator(x, phi_boundary, drivers, step)
+            return self._operator(x, phi_boundary, drivers, step, call)
 
         signed = None
         if u is not None:
