@@ -1640,7 +1640,7 @@ class FlowControlledPipe(ImplicitLaw):
     gradient are the max's. Away from a solution the fixed ``kappa`` alone misjudges an
     iterate that overshoots forward: ``h`` grows as ``q^1.852`` and ``kappa q`` only
     linearly, so ``loss < -kappa q`` closes an open check valve; the closed row then puts
-    every pipe in series with it at exactly zero flow, where the next step, on the
+    every pipe in series with it at zero flow (to round-off), where the next step, on the
     ``RQtol`` slope, overshoots by six orders and closes it again (measured: a check valve
     between two reservoirs cycles so for 200 iterations, and converges in 5 with the
     second test).
