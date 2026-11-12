@@ -302,7 +302,9 @@ class DecayTank(Tank):
 
     def end_timestep(self) -> None:
         if self.decay is None:
-            self.total_decayed = empty(self.p, ())  # tanks.py:444: reset even over no pollutants
+            # tanks.py:444: reset even over no pollutants. Deliberately unbatched (the init
+            # shape): nothing decays here, so nothing reads it at a batch shape.
+            self.total_decayed = empty(self.p, ())
             if "temperature" not in self.parent.params:
                 raise KeyError(f"{self.site}: the parent has no ('temperature', t) forcing")
             return  # generic_temperature_decay over no pollutants: storage unchanged
