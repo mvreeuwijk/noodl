@@ -74,6 +74,7 @@ EVENT_NAMES = (
     "zero_priority",
     "wtw_liquor_zero_denominator",
     "inaccurate_evaporation",
+    "wtw_negative_solids",
 )
 """The warning conditions a run reports (D13): WSIMOD's prints and noodl's own."""
 

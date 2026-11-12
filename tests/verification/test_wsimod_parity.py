@@ -52,19 +52,13 @@ DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
 CONFIG = {"quantity": "config.yml", "pollutants": "config_no_deposition.yml"}
 FULL = 1456  # both demos' dates
 
-# 3a runs no WTW processes on the pollutant demos (sub-project 3b); the task that ports the
-# process removes its marks (plan D1)
-WTW = pytest.mark.xfail(strict=True, raises=ValueError, reason="the WTW processes are Task 3")
-
 DEMOS = [
     pytest.param("quickstart", "quantity", FULL, id="quickstart-quantity"),
     pytest.param("quickstart", "pollutants", FULL, id="quickstart-pollutants"),
     pytest.param("oxford", "quantity", 365, id="oxford365-quantity"),
-    pytest.param("oxford", "pollutants", 365, id="oxford365-pollutants", marks=WTW),
+    pytest.param("oxford", "pollutants", 365, id="oxford365-pollutants"),
     pytest.param("oxford", "quantity", FULL, id="oxford-quantity", marks=pytest.mark.slow),
-    pytest.param(
-        "oxford", "pollutants", FULL, id="oxford-pollutants", marks=[pytest.mark.slow, WTW]
-    ),
+    pytest.param("oxford", "pollutants", FULL, id="oxford-pollutants", marks=pytest.mark.slow),
 ]
 
 
@@ -107,10 +101,7 @@ def test_demo_matches_wsimod(case, mode, days):
     assert bool(results.arc_flow.abs().sum() > 0)
 
 
-@pytest.mark.parametrize(
-    "case",
-    [pytest.param("quickstart"), pytest.param("oxford", marks=WTW)],
-)
+@pytest.mark.parametrize("case", ["quickstart", "oxford"])
 def test_demo_quantity_only_equals_the_pollutant_run_volumes(case):
     """Spec, Verification 3: a quantity-only run's volumes equal the pollutant run's, exactly
     (``torch.equal``): every arc flow, tank storage and surface field."""
@@ -125,7 +116,6 @@ def test_demo_quantity_only_equals_the_pollutant_run_volumes(case):
         assert torch.equal(values.nan_to_num(), other.nan_to_num()), field
 
 
-@WTW
 def test_oxfords_urban_surface_holds_no_storage_after_the_first_day():
     """Review Focus 4, through the whole model: the urban (impervious) surface's storage is 0
     after day 1 to rounding, and bitwise WSIMOD's. The impervious surface stores nothing between
@@ -400,6 +390,20 @@ def test_case_matches_wsimod(name, mode):
         # WSIMOD's node check prints the water a node drops below FLOAT_ACCURACY too (the
         # percolation push-back of land_percolation_threshold); noodl counts it in "dropped"
         assert mass_balance_worst(results) <= BOUND
+
+
+def test_the_wtw_treatment_case_makes_negative_solids_on_cold_days():
+    """X22: the case's works make negative solids on some days and not on others (temperatures
+    cross 20 degC), its plant on every day (its water stays near 11 degC); each is a day the
+    parity test above compares bitwise with WSIMOD, which has no such event of its own."""
+    _, diagnostics = case_ours("wtw_treatment", "pollutants")
+    event = diagnostics["events"]["wtw_negative_solids"]
+    names = diagnostics["node_names"]
+    works = event[:, names.index("works")]
+    assert 0 < int(works.sum()) < len(works)
+    assert bool(event[:, names.index("plant")].any())
+    quantity = case_ours("wtw_treatment", "quantity")[1]["events"]["wtw_negative_solids"]
+    assert not bool(quantity.any())  # no additive pollutants, no solids to go negative
 
 
 @pytest.mark.parametrize("name", [n for n, spec in CASES.items() if set(spec.modes) >= set(MODES)])

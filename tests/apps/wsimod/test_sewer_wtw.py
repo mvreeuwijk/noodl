@@ -9,6 +9,8 @@ The values asserted are WSIMOD's, worked out from ``sewer.py`` and ``wtw.py`` by
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 import torch
 
@@ -160,7 +162,7 @@ def test_zero_input_on_day_one_keeps_the_previous_liquor_value():
     plant = make("FWTW", pollutants=PP, **neutral(service_reservoir_initial_storage=10.0))
     for node in (works, plant):
         ctx = day(node, pollutants=PP)
-        node.bind({"liquor_multiplier": m_v})
+        node.bind({"liquor_multiplier": torch.stack([m_v, m_v])})  # volume, phosphate
         if node is works:
             node.calculate_discharge(active=TRUE)
         else:
@@ -193,7 +195,7 @@ def test_a_zero_denominator_keeps_the_liquor_value_of_the_day_before():
     fired = []
     for number, inflow in enumerate(inflows):
         ctx = day(works, pollutants=PP, number=number)
-        works.bind({"liquor_multiplier": m_v[number]})
+        works.bind({"liquor_multiplier": torch.stack([m_v[number], m_v[number]])})
         if inflow:
             vqip = PP.to_vqip({"volume": inflow, "phosphate": 0.1, "temperature": 10.0})
             works.push_set(vqip, active=TRUE)
@@ -211,7 +213,7 @@ def test_a_zero_denominator_keeps_the_liquor_value_of_the_day_before():
 def test_without_non_additive_pollutants_there_is_no_liquor_blend_to_divide():
     """``wtw.py:174`` loops over the non-additive pollutants only: a quantity-only run (or one
     with additive pollutants only) never divides, so no decision or event is recorded."""
-    only_additive = Pollutants(("phosphate",), ("phosphate",), ())
+    only_additive = Pollutants(("phosphate", "temperature"), ("phosphate", "temperature"), ())
     for pollutants in (P, only_additive):
         works = make("WWTW", pollutants=pollutants)
         ctx = day(works, pollutants=pollutants)
@@ -565,26 +567,19 @@ def _works(**node) -> tuple[NodeSpec, object]:
     return network.nodes[0], network
 
 
-def test_non_neutral_wtw_processes_are_refused():
-    """Spec, Pollutants in 3a: WSIMOD's defaults (constant 0.01, exponent 1.001, multiplier 0.7)
-    and any other non-neutral form are 3b; a quantity-only run ignores them."""
-    spec, network = _works()  # the reader fills WSIMOD's defaults (wtw.py:73-85)
-    with pytest.raises(ValueError, match="process_parameters.*3b"):
-        WWTW.validate(spec, network, pollutants=True)
+def test_wsimods_default_wtw_processes_build():
+    """3a refused these (the neutral process only); the general treatment takes them (X10):
+    constant 0.01, exponent 1.001, multiplier 0.7, volume 0.03 (wtw.py:73-85)."""
+    spec, network = _works()  # the reader fills WSIMOD's defaults
+    assert spec.parameters["process_parameters"] == {
+        "phosphate": {"constant": 0.01, "exponent": 1.001}
+    }
+    assert spec.parameters["liquor_multiplier"] == {"phosphate": 0.7, "volume": 0.03}
+    assert WWTW.validate(spec, network, pollutants=True) == []
     assert WWTW.validate(spec, network, pollutants=False) == [
         "process_parameters",
         "liquor_multiplier",
     ]
-    for node in (
-        neutral() | {"liquor_multiplier": {"phosphate": 0.7, "volume": 0.03}},
-        neutral() | {"process_parameters": {"phosphate": {"constant": C_V, "exponent": 1.001}}},
-        neutral() | {"process_parameters": {"phosphate": {"constant": 0.9, "exponent": 1}}},
-    ):
-        spec, network = _works(**node)
-        with pytest.raises(ValueError, match="process_parameters.*3b"):
-            WWTW.validate(spec, network, pollutants=True)
-    spec, network = _works(**neutral())
-    assert WWTW.validate(spec, network, pollutants=True) == []
     # a configured volume constant that is not the derived one is ambiguous (wtw.py:92, :146)
     stale = neutral()
     stale["process_parameters"]["volume"] = {"constant": 0.5}
@@ -594,6 +589,231 @@ def test_non_neutral_wtw_processes_are_refused():
     spec, network = _works(liquor_multiplier={"phosphate": 0.03})
     with pytest.raises(ValueError, match="liquor_multiplier has no 'volume'"):
         WWTW.validate(spec, network, pollutants=False)
+
+
+_TWO = {
+    "pollutants": ["phosphate", "ammonia", "temperature"],
+    "additive_pollutants": ["phosphate", "ammonia"],
+    "non_additive_pollutants": ["temperature"],
+}
+_ENTRY = {"constant": 0.1, "exponent": 1.01}
+_PROCESS = {"phosphate": _ENTRY, "ammonia": _ENTRY}
+_LIQUOR = {"phosphate": 0.5, "ammonia": 0.5, "volume": 0.03}
+PP2 = Pollutants(
+    ("phosphate", "ammonia", "temperature"), ("phosphate", "ammonia"), ("temperature",)
+)
+
+
+def _two(**node):
+    network = read_wsimod_config({**_TWO, "nodes": [{"name": "w", "type_": "WWTW", **node}]})
+    return network.nodes[0], network
+
+
+def _with(name: str, entry: dict) -> dict:
+    return {"process_parameters": {**_PROCESS, name: entry}}
+
+
+@pytest.mark.parametrize(
+    ("node", "match", "stage"),
+    [
+        ({"process_parameters": {"ammonia": _ENTRY}}, "phosphate", "read"),
+        (
+            {"process_parameters": {"phosphate": {"constant": 0.1}, "ammonia": _ENTRY}},
+            "exponent",
+            "read",
+        ),
+        ({"liquor_multiplier": {"phosphate": 0.5, "volume": 0.03}}, "ammonia", "read"),
+        (_with("temperature", _ENTRY), "temperature", "validate"),
+        (_with("nitratee", _ENTRY), "nitratee", "validate"),
+        ({"liquor_multiplier": {**_LIQUOR, "nitratee": 0.1}}, "nitratee", "validate"),
+        (_with("volume", {"exponent": 1.1}), "exponent", "validate"),
+        (_with("phosphate", {"constant": 0.1, "exponent": 0}), "exponent", "validate"),
+        (_with("ammonia", {"constant": 0.1, "exponent": -1}), "exponent", "validate"),
+    ],
+    ids=[
+        "process_lacks_pollutant",
+        "process_lacks_exponent",
+        "liquor_lacks_pollutant",
+        "temperature_entry",
+        "unknown_process_entry",
+        "unknown_liquor_entry",
+        "volume_exponent",
+        "exponent_zero",
+        "exponent_negative",
+    ],
+)
+def test_wtw_treatment_refusals(node, match, stage):
+    """D20: a partial configured dict is refused by the reader; the entries WSIMOD never reads
+    and a non-positive exponent by ``validate``."""
+    if stage == "read":
+        with pytest.raises(ValueError, match=match):
+            _two(**node)
+        return
+    spec, network = _two(**node)
+    with pytest.raises(ValueError, match=match):
+        WWTW.validate(spec, network, pollutants=True)
+
+
+def test_a_non_positive_exponent_in_a_batched_driver_is_refused_at_bind():
+    works = make("WWTW", pollutants=PP2, process_parameters=_PROCESS, liquor_multiplier=_LIQUOR)
+    for bad in (0.0, -1.0):
+        exponent = torch.tensor([[1.01, 1.01], [1.01, bad]], dtype=torch.float64)
+        with pytest.raises(ValueError, match="exponent"):
+            works.bind({"process_parameters.exponent": exponent})
+    works.bind({"process_parameters.exponent": torch.full((3, 2), 1.5, dtype=torch.float64)})
+
+
+def test_the_general_treatment_reproduces_the_neutral_split_bitwise():
+    """3a's neutral numbers through the general code: ``x * c * 1.0`` is ``x * c`` exactly."""
+    works = make("WWTW", pollutants=PP, **neutral())
+    day(works, pollutants=PP)
+    x, v = 1.0 / 3.0, 100.0 / 7.0
+    works.current_input = PP.to_vqip({"volume": v, "phosphate": x, "temperature": 10.0})
+    works.treat_current_input(active=TRUE)
+    treated, liquor, solids = (PP.to_dict(a) for a in (works.treated, works.liquor, works.solids))
+    assert treated["volume"] == v * C_V and treated["phosphate"] == x * C_V
+    assert liquor["volume"] == v * 0.03 and liquor["phosphate"] == x * 0.03
+    assert solids["volume"] == v * 0.0002
+    assert solids["phosphate"] == x - x * C_V - x * 0.03
+
+
+def test_cold_influent_makes_negative_solids_and_says_so():
+    """constant 0.5, exponent 1.1 and multiplier 0.7 at 0 degC: the factor is ``1.1 ** 20``
+    (6.7), the treated phosphate exceeds the influent and the remainder is negative (X22)."""
+    works = make(
+        "WWTW",
+        pollutants=PP,
+        process_parameters={"phosphate": {"constant": 0.5, "exponent": 1.1}},
+        liquor_multiplier={"phosphate": 0.7, "volume": 0.03},
+    )
+    ctx = day(works, pollutants=PP)
+    x = 0.8
+    works.current_input = PP.to_vqip({"volume": 10.0, "phosphate": x, "temperature": 0.0})
+    works.treat_current_input(active=TRUE)
+    treated, liquor, solids = (PP.to_dict(a) for a in (works.treated, works.liquor, works.solids))
+    assert treated["phosphate"] == x * 0.5 * 1.1**20
+    assert liquor["phosphate"] == x * 0.7
+    assert solids["phosphate"] == (x - treated["phosphate"]) - liquor["phosphate"]
+    assert solids["phosphate"] < 0
+    assert bool(ctx.events["wtw_negative_solids"]["n"])
+    assert treated["phosphate"] + liquor["phosphate"] + solids["phosphate"] == pytest.approx(x)
+    # a warm day: positive solids, no event
+    works = make("WWTW", pollutants=PP, **neutral())
+    ctx = day(works, pollutants=PP)
+    works.current_input = PP.to_vqip({"volume": 10.0, "phosphate": x, "temperature": 25.0})
+    works.treat_current_input(active=TRUE)
+    assert not bool(ctx.events.get("wtw_negative_solids", {}).get("n", False))
+
+
+def test_treat_current_input_equals_wsimods_on_random_inputs():
+    """The general treatment against a live ``WTW`` (``wtw.py:163-214``): 200 random influents
+    at temperatures in [-5, 35], 10 % with no volume, per-pollutant constants, exponents (one
+    exactly 1) and liquor multipliers. ``treated``, ``liquor`` and ``solids`` are equal."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes.wtw import WTW as TheirWTW
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    generator = torch.Generator().manual_seed(7)
+
+    def uniform(low: float, high: float) -> float:
+        return low + (high - low) * float(torch.rand((), generator=generator, dtype=torch.float64))
+
+    process = {
+        "phosphate": {"constant": uniform(0.005, 0.5), "exponent": uniform(0.95, 1.1)},
+        "ammonia": {"constant": uniform(0.005, 0.5), "exponent": 1},
+    }
+    liquor = {"volume": 0.03, "phosphate": uniform(0.1, 0.9), "ammonia": uniform(0.1, 0.9)}
+    reset_wsimod_globals()
+    constants.POLLUTANTS = ["phosphate", "ammonia", "temperature"]
+    constants.ADDITIVE_POLLUTANTS = ["phosphate", "ammonia"]
+    constants.NON_ADDITIVE_POLLUTANTS = ["temperature"]
+    try:
+        theirs = TheirWTW(
+            name="w", process_parameters=copy.deepcopy(process), liquor_multiplier=dict(liquor)
+        )
+        ours = make("WTW", pollutants=PP2, process_parameters=process, liquor_multiplier=liquor)
+        day(ours, pollutants=PP2)
+        ours.bind({})
+        for _ in range(200):
+            influent = {
+                "volume": 0.0 if uniform(0, 1) < 0.1 else uniform(0.1, 50),
+                "phosphate": uniform(0.0, 2.0),
+                "ammonia": uniform(0.0, 2.0),
+                "temperature": uniform(-5, 35),
+            }
+            old = {
+                "volume": uniform(0.1, 3),
+                "phosphate": uniform(0, 1),
+                "ammonia": uniform(0, 1),
+                "temperature": uniform(0, 25),
+            }
+            theirs.current_input = dict(influent)
+            theirs.liquor = dict(old)
+            theirs.treated = theirs.empty_vqip()
+            theirs.solids = theirs.empty_vqip()
+            theirs.treat_current_input()
+            ours.current_input = PP2.to_vqip(influent)
+            ours.liquor = PP2.to_vqip(old)
+            ours.treated = PP2.to_vqip({})
+            ours.solids = PP2.to_vqip({})
+            ours.treat_current_input(active=TRUE)
+            for name in ("treated", "liquor", "solids"):
+                expected = PP2.to_vqip(getattr(theirs, name))
+                assert torch.equal(getattr(ours, name), expected), (name, influent)
+    finally:
+        reset_wsimod_globals()
+
+
+def test_a_partial_wtw_override_merges():
+    """X36: ``{"phosphate": {"constant": 0.2}}`` over WSIMOD's defaults keeps the exponent, as
+    ``apply_overrides`` does (``wtw.py:146-148``)."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes.wtw import WTW as TheirWTW
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    override = {"process_parameters": {"phosphate": {"constant": 0.2}}}
+    network = read_wsimod_config(
+        {
+            **_LISTS,
+            "nodes": [{"name": "w", "type_": "WWTW"}],
+            "overrides": {"nodes": {"w": {"type_": "WWTW", "name": "w", **override}}},
+        }
+    )
+    merged = network.nodes[0].parameters["process_parameters"]["phosphate"]
+    assert merged == {"constant": 0.2, "exponent": 1.001}
+    reset_wsimod_globals()
+    constants.POLLUTANTS = ["phosphate", "temperature"]
+    constants.ADDITIVE_POLLUTANTS = ["phosphate"]
+    constants.NON_ADDITIVE_POLLUTANTS = ["temperature"]
+    try:
+        theirs = TheirWTW(name="w")
+        theirs.apply_overrides(copy.deepcopy(override))
+        assert theirs.process_parameters["phosphate"] == merged
+    finally:
+        reset_wsimod_globals()
+
+
+def test_a_3a_shaped_liquor_multiplier_driver_is_refused():
+    """D19: 3a's ``(n,)`` ``liquor_multiplier`` has no column axis; the step names the key and
+    the shape ``(..., n, 1 + K_additive)``."""
+    from noodl.apps.wsimod import build_model
+    from tests.apps.wsimod.test_build import _arc, _catchment, _mapping, _node
+
+    mapping = _mapping(
+        [_catchment("c"), _node("w", "WWTW"), _node("o", "Waste")],
+        [_arc("a", "c", "w"), _arc("b", "w", "o")],
+    )
+    network = read_wsimod_config(mapping)
+    model, state, drivers = build_model(network, pollutants=False)
+    key = "wsimod.WWTW.liquor_multiplier"
+    assert drivers[key].shape == (1, 1)
+    drivers[key] = torch.tensor([0.03], dtype=torch.float64)
+    with pytest.raises(ValueError, match=r"wsimod.WWTW.liquor_multiplier.*1 \+ K_additive"):
+        model.step(state, drivers, dt=86400.0, t=0.0)
 
 
 def test_additive_pollutants_need_temperature():

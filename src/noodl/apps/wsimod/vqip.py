@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
+from torch.autograd.function import once_differentiable
 
 
 @dataclass(frozen=True)
@@ -157,3 +158,43 @@ def v_change_vqip(p: Pollutants, t: Tensor, v: Tensor) -> Tensor:
 def ds_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     """core.py:305-328. Volume and additive differences; non-additive columns 0."""
     return torch.where(p.volume_or_additive_mask, t1 - t2, torch.zeros_like(t1))
+
+
+class _PowPython(torch.autograd.Function):
+    """``x ** y`` as Python evaluates it for floats (the C library's ``pow``), elementwise.
+
+    IHACRES raises the moisture ratio to ``ihacres_p`` (``land.py:950``) and a treatment works
+    raises its ``exponent`` to ``20 - T`` (``wtw.py:191-193``); ``torch.pow`` can
+    differ from ``float.__pow__`` in the last bit, so the forward pass calls Python's, once per
+    instance (the :func:`~noodl.apps.wsimod.storage.pow_half` pattern). An ``int`` exponent in
+    WSIMOD (the default ``10``) is converted to a double by ``float.__pow__``, so the float
+    exponent here is the same call. The gradients are ``y x^(y-1)`` and ``x^y ln x`` where
+    ``x > 0``, and 0 where ``x == 0`` (a saturated soil; the slope there is documented, not
+    propagated).
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor, y: Tensor) -> Tensor:
+        xb, yb = torch.broadcast_tensors(x.detach(), y.detach())
+        pairs = zip(xb.reshape(-1).tolist(), yb.reshape(-1).tolist(), strict=True)
+        out = torch.tensor([a**b for a, b in pairs], dtype=torch.float64).reshape(xb.shape)
+        ctx.save_for_backward(x, y, out)
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad: Tensor) -> tuple[Tensor, Tensor]:
+        x, y, out = ctx.saved_tensors
+        positive = x > 0
+        safe = torch.where(positive, x, torch.ones_like(x))
+        zero = torch.zeros_like(grad)
+        gx = torch.where(positive, grad * y * out / safe, zero)
+        gy = torch.where(positive, grad * out * torch.log(safe), zero)
+        return gx.sum_to_size(x.shape), gy.sum_to_size(y.shape)
+
+
+def pow_python(x: Tensor, y: Tensor) -> Tensor:
+    """``x ** y`` bitwise as Python computes it for floats; gradient 0 where ``x == 0``."""
+    return _PowPython.apply(
+        torch.as_tensor(x, dtype=torch.float64), torch.as_tensor(y, dtype=torch.float64)
+    )

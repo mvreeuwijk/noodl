@@ -34,8 +34,45 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 `UnlimitedDistribution`, `Sewer`, `WTW`, `WWTW`, `FWTW` and `Land` with `Surface`,
 `ImperviousSurface` and `PerviousSurface` (IHACRES); the arcs `Arc`, `QueueArc`, `AltQueueArc`,
 `PullArc`, `PushArc`, `SewerArc` and `WeirArc`. The soil temperature of a `PerviousSurface` is
-live (below); the other processes that change a pollutant (treatment, decay, deposition) are later
-sub-projects and are refused unless they are neutral.
+live (below), and so is the treatment works' pollutant treatment (below); the other processes
+that change a pollutant (decay, deposition) are later sub-projects and are refused unless they are
+neutral.
+
+### Treatment works
+
+`WTW.treat_current_input` (`wtw.py:163-214`) splits the day's input into treated water, liquor and
+solids. Every additive pollutant `k` has its own `process_parameters[k] = {constant, exponent}` and
+`liquor_multiplier[k]`; the volume's constant is derived, `1 - percent_solids -
+liquor_multiplier["volume"]`. With `T` the influent's temperature:
+
+```
+treated[k] = influent[k] * constant[k] * exponent[k] ** (20 - T)     (volume: no factor)
+liquor[k]  = influent[k] * liquor_multiplier[k]                       (overwritten, not blended)
+solids[k]  = (influent[k] - treated[k]) - liquor[k]                   (the remainder, unclamped)
+```
+
+The power is Python's, evaluated once per element, so every value is bitwise WSIMOD's. Three
+quirks are transcribed. The factor *rises* as the temperature falls when `exponent > 1`
+(`20 - T` grows). Nothing caps `constant * factor + liquor_multiplier`: where it exceeds 1 the
+solids go negative and the works creates mass (WSIMOD's lists still close, the solids being the
+remainder), and noodl records the event `"wtw_negative_solids"` on that day. And with no
+influent the temperature column is whatever `current_input` holds, 0 after a reset; `exponent ** 20`
+then multiplies a zero mass.
+
+The drivers, one row per node of the class (`WTW`, `WWTW` or `FWTW`):
+
+| Key | Shape | Columns |
+|---|---|---|
+| `"wsimod.<Class>.process_parameters.constant"`, `"....exponent"` | `(..., n, K_additive)` | the additive pollutants; absent in a quantity-only run |
+| `"wsimod.<Class>.liquor_multiplier"` | `(..., n, 1 + K_additive)` | `volume`, then the additive pollutants; `(..., n, 1)` in a quantity-only run |
+
+`liquor_multiplier` was `(..., n)`, the volume entry alone, in 3a: a driver of that shape is
+refused, naming the key and the new shape. An `exponent` of 0 or below is refused (also in a
+batched driver, when the day is bound): `0 ** negative` raises where `T > 20` and a negative base
+gives a complex number. A configured `process_parameters` or `liquor_multiplier` must name every
+additive pollutant (WSIMOD raises `KeyError` otherwise); an override may be partial and merges.
+Entries for a pollutant that is not additive, for one the model does not list, and a `volume`
+`exponent` are refused: WSIMOD never reads them.
 
 ### The soil temperature
 
@@ -192,7 +229,8 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   `"environmental_not_able_to_push"`, `"demand_not_able_to_push"`, `"leakage_not_going_to_gw"`,
   `"more_treated_than_input"`, `"excess_treated_water"` and `"more_backflow_than_vqip"`, and
   noodl's own `"zero_priority"` (a distribute round with priority 0 where WSIMOD divides by
-  zero), `"wtw_liquor_zero_denominator"` and `"inaccurate_evaporation"`;
+  zero), `"wtw_liquor_zero_denominator"`, `"inaccurate_evaporation"` and
+  `"wtw_negative_solids"` (an additive solids column of a treatment works is negative);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
   that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
   order, per instance. The gradient tests and the parity admission rule use it;
@@ -249,11 +287,11 @@ configured value.
 ## Quantity only or with pollutants
 
 `build_model(network, pollutants=False)` runs on the volumes alone (`K = 0`). The parameters such
-a run does not read — surface deposition loads, a demand's `pollutant_load`, non-neutral
-treatment processes, a catchment's pollutant series — are listed by name in
+a run does not read — surface deposition loads, a demand's `pollutant_load`, the treatment works'
+pollutant entries, a catchment's pollutant series — are listed by name in
 `model.ignored_by_quantity_only`. With `pollutants=True` (the default) the same configuration is
-refused if any of them is not neutral, since the process that would change the pollutants is not
-ported yet: until the rest of 3b and 3c, real configurations need `pollutants=False`. The
+refused if a process that is not ported yet would change the pollutants: until the rest of 3b and
+3c, such configurations need `pollutants=False`. The
 soil temperature is not among them (it is ported); its weights are only listed as ignored.
 
 ## Refusals
@@ -262,7 +300,7 @@ Everything that cannot run is refused by name when the model is built, where WSI
 mid-run, hang or silently do something else:
 
 - out-of-scope classes and keys (by the reader);
-- non-neutral pollutant processes, `decays`, River biochemistry (nitrate among the pollutants);
+- `decays`, River biochemistry (nitrate among the pollutants);
 - a `total_porosity` not above `field_capacity`, a residence time of 0, `leakage` outside
   `[0, 1)`, preferences that are negative or all zero, travel times that are not whole days;
 - a cycle that makes WSIMOD's checks recurse into each other, which makes WSIMOD retry at
@@ -300,6 +338,7 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | overrides update the shared default dicts | per node | `test_an_override_of_pollutant_load_reaches_only_its_node` |
 | river arcs but no `Waste` | refused | `test_structural_refusals[river-without-waste]` |
 | an arc into a `Catchment` | refused | `test_structural_refusals[arc-into-catchment]` |
+| WTW solids are the unclamped remainder, negative where `constant * factor + liquor_multiplier > 1` | transcribed; event `"wtw_negative_solids"` | `test_cold_influent_makes_negative_solids_and_says_so`; case `wtw_treatment` |
 | the WTW liquor blend divides by zero | the previous value is kept, event `"wtw_liquor_zero_denominator"` | `test_zero_input_on_day_one_keeps_the_previous_liquor_value`; `test_case_runs_where_wsimod_crashes_wtw_zero_input` |
 | a partial zero priority in a distribute round divides by zero, depending on the state (W43) | nothing is distributed in that round, event `"zero_priority"` | `test_a_zero_priority_with_room_is_an_event_not_a_division_by_zero` |
 | `QueueArc` drops a push below `FLOAT_ACCURACY` | **reproduced** (a tolerance-scale loss that real models' delivery depends on), recorded as dropped | `test_queue_arc_delivery_matches_wsimod_on_irregular_pushes`; `test_the_tiny_push_is_recorded_as_dropped` |
@@ -379,10 +418,10 @@ of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad)
 
 ## Limitations
 
-- **Sub-projects 3b and 3c.** The processes that change a pollutant (river biochemistry,
-  treatment, decay, deposition, the land's nutrient pools, `GrowingSurface`, the garden and
-  irrigation surfaces) are refused unless neutral. The soil temperature is ported. Until the
-  rest of 3b, a real configuration needs `pollutants=False`.
+- **Sub-projects 3b and 3c.** The processes that change a pollutant (river biochemistry, decay,
+  deposition, the land's nutrient pools, `GrowingSurface`, the garden and irrigation surfaces)
+  are refused unless neutral. The soil temperature and the treatment works' pollutant treatment
+  are ported. Until the rest of 3b, a real configuration needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:

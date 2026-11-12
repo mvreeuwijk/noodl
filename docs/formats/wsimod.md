@@ -90,7 +90,13 @@ refused by name.
 - `NodeSpec.parameters` holds the class's defaults, then the configuration's values, then the
   overrides, per node (WSIMOD's shared mutable defaults are not reproduced). A treatment works
   with an empty `process_parameters` or `liquor_multiplier` gets WSIMOD's defaults for the
-  model's additive pollutants (`wtw.py:73-85`).
+  model's additive pollutants (`wtw.py:73-85`): constant 0.01, exponent 1.001, multiplier 0.7 and
+  volume 0.03. A non-empty `process_parameters` must name every additive pollutant with its
+  `constant` and `exponent`, and a non-empty `liquor_multiplier` every additive pollutant and
+  `volume`; WSIMOD raises `KeyError` otherwise, and so the reader refuses it by name. Entries for
+  a pollutant that is not additive or not listed, a `volume` `exponent` and an `exponent` of 0 or
+  below are refused when the model is built (WSIMOD never reads the first two, and `0 **
+  negative` raises).
 - `decays` must be `None` on the Storage family (any dict, even `{}`, builds a `DecayTank`) and
   empty on a surface; anything else is refused by name (sub-project 3b).
 - Classes WSIMOD has that are not read are refused by name with where they go:
@@ -128,7 +134,8 @@ compute derived quantities.
   surface's `depth` are deprecated in WSIMOD, which ignores them with a printed warning; they
   are refused here.
 - `pollutant_load` and `liquor_multiplier` merge by update (the other keys are kept),
-  `process_parameters` merges per pollutant, and `surfaces` (a `Land`) merges per named surface.
+  `process_parameters` merges per pollutant and per key (an override of one `constant` keeps the
+  `exponent`; a partial override is allowed where a partial configured entry is not), and `surfaces` (a `Land`) merges per named surface.
   Every other value replaces the old one. A pervious surface's `depth` is the physical depth, as
   in the configuration.
 - A pervious surface's soil-temperature overrides (`soil_temp_w_prev`, `soil_temp_w_air`,
@@ -151,5 +158,5 @@ constructs them and noodl runs them, so it decides the order of every push and p
 WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own is set-hash
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
-and run bit for bit as WSIMOD runs them; a configuration with real pollutant processes needs
-`pollutants=False` until sub-project 3b. See the [WSIMOD application](../applications/wsimod.md).
+and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
+(decay, river biochemistry, deposition) needs `pollutants=False` until sub-projects 3b and 3c. See the [WSIMOD application](../applications/wsimod.md).

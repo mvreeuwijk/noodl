@@ -249,6 +249,33 @@ def _refuse_decays(where: str, decays: object) -> None:
     raise ValueError(f"{where}: 'decays' {decays!r} is not supported (decay is sub-project 3b)")
 
 
+def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) -> None:
+    """A configured ``process_parameters`` or ``liquor_multiplier`` must name every additive
+    pollutant, ``process_parameters`` with its ``constant`` and ``exponent``: WSIMOD reads them
+    all (``wtw.py:188-201``, ``KeyError`` otherwise). An empty one is filled by
+    :func:`_fill_wtw_defaults`. Overrides may be partial (they merge, X36)."""
+    process = parameters.get("process_parameters") or {}
+    liquor = parameters.get("liquor_multiplier") or {}
+    for name in pollutants.additive if process else ():
+        entry = process.get(name)
+        if not isinstance(entry, Mapping):
+            raise ValueError(
+                f"{where}: process_parameters has no entry for the additive pollutant {name!r} "
+                "(WTW treatment reads one per additive pollutant, wtw.py:188-199)"
+            )
+        for key in ("constant", "exponent"):
+            if key not in entry:
+                raise ValueError(
+                    f"{where}: process_parameters[{name!r}] has no {key!r} (wtw.py:191, :197)"
+                )
+    for name in pollutants.additive if liquor else ():
+        if name not in liquor:
+            raise ValueError(
+                f"{where}: liquor_multiplier has no entry for the additive pollutant {name!r} "
+                "(WTW treatment reads one per additive pollutant, wtw.py:201)"
+            )
+
+
 def _fill_wtw_defaults(parameters: dict, pollutants: Pollutants) -> None:
     """``WTW.__init__`` fills an empty ``process_parameters`` and ``liquor_multiplier`` from the
     model's additive pollutants (``wtw.py:73-85``), a fresh dict per node."""
@@ -378,6 +405,7 @@ def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSp
     if parameters.get("decays") is not None:  # storage.py:53, :300 build a DecayTank
         _refuse_decays(where, parameters["decays"])
     if "process_parameters" in parameters:
+        _refuse_partial_wtw(where, parameters, pollutants)
         _fill_wtw_defaults(parameters, pollutants)
     return NodeSpec(name, cls, slot_key, parameters, data, surfaces)
 

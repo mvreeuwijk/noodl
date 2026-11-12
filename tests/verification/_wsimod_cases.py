@@ -969,6 +969,74 @@ def _wtw_zero_input() -> dict:
     )
 
 
+def _wtw_catchment(name: str, days: int, seed: int, *, flow: tuple[float, float]) -> dict:
+    """A catchment whose temperature crosses 20 degC (daily values in [-5, 35]), for the
+    treatment's temperature factor ``exponent ** (20 - T)``."""
+    rng = random.Random(seed)
+    data = {}
+    for date in _dates(days):
+        data[("flow", date)] = round(rng.uniform(*flow), 6)
+        data[("phosphate", date)] = round(rng.uniform(1e-3, 1e-2), 8)
+        data[("ammonia", date)] = round(rng.uniform(1e-3, 5e-2), 8)
+        data[("temperature", date)] = round(rng.uniform(-5.0, 35.0), 4)
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _wtw_treatment() -> dict:
+    """The treatment processes (``wtw.py:163-214``) on the topologies of ``wwtw_storm_tank`` and
+    ``fwtw_deficit_sludge``, side by side. The ``WWTW`` has per-pollutant constants and
+    exponents (one above 1, one below), liquor multipliers other than the volume's and a
+    catchment whose temperature crosses 20 degC; cold days make its phosphate solids negative
+    (``0.55 x 1.07 ** (20 - T) + 0.35 > 1`` below about 15 degC, ``:207-208``). The ``FWTW``'s
+    supply is topped up by a small, varying catchment, so its water's temperature moves too."""
+    works = _wwtw_storm_tank()
+    plant = _fwtw_deficit_sludge()
+    days = _STORAGE_DAYS
+    nodes = [dict(n) for n in works["nodes"]]
+    for node in nodes:
+        if node["name"] == "inflow":
+            node.update(_wtw_catchment("inflow", days, 41, flow=(5.0, _FLOW_MAX)))
+        if node["name"] == "works":
+            node["process_parameters"] = {
+                "phosphate": {"constant": 0.55, "exponent": 1.07},
+                "ammonia": {"constant": 0.3, "exponent": 0.98},
+            }
+            node["liquor_multiplier"] = {"phosphate": 0.35, "ammonia": 0.5, "volume": 0.035}
+    for node in plant["nodes"]:
+        node = dict(node)
+        if node["name"] == "sea":
+            node["name"] = "sea_f"
+        if node["name"] == "plant":
+            node["process_parameters"] = {
+                "phosphate": {"constant": 0.3, "exponent": 1.02},
+                "ammonia": {"constant": 0.45, "exponent": 1.0},
+            }
+            node["liquor_multiplier"] = {"phosphate": 0.645, "ammonia": 0.2, "volume": 0.03}
+        nodes.append(node)
+    nodes.append(_wtw_catchment("source", days, 42, flow=(0.5, 3.0)))
+    arcs = [dict(a) for a in works["arcs"]]
+    for arc in plant["arcs"]:
+        arc = dict(arc)
+        for end in ("in_port", "out_port"):
+            if arc[end] == "sea":
+                arc[end] = "sea_f"
+        arcs.append(arc)
+    arcs.append(_arc("source_to_supply", "source", "supply"))
+    return _storage_case(
+        nodes,
+        arcs,
+        [
+            {"Catchment": "route"},
+            {"Reservoir": "distribute"},
+            {"Sewer": "make_discharge"},
+            {"WWTW": "calculate_discharge"},
+            {"FWTW": "treat_water"},
+            {"Demand": "create_demand"},
+            {"WWTW": "make_discharge"},
+        ],
+    )
+
+
 # --- land and its surfaces (Task 12) -----------------------------------------------------------
 _LAND_DAYS = 40
 
@@ -1644,6 +1712,12 @@ CASES: dict[str, Case] = {
         days=_STORAGE_DAYS,
         scale=150.0,
         replay=("plant", "sludge_sewer"),
+    ),
+    "wtw_treatment": Case(
+        build=_wtw_treatment,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_wtw_treatment()),
+        replay=("works", "combined", "plant", "sludge_sewer"),
     ),
     "queue_tank_time_zero": Case(
         build=_queue_tank_time_zero,

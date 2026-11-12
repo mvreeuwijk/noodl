@@ -146,6 +146,11 @@ class Node:
         """This day's parameter and forcing slices, by name."""
         self.params = {k: torch.as_tensor(v, dtype=torch.float64) for k, v in parameters.items()}
 
+    def driver_columns(self) -> dict[str, tuple[str, ...]]:
+        """The parameters that take one value per named column rather than per node, by
+        parameter name (a driver's ``columns``, D6); a plain node has none."""
+        return {}
+
     def configured_parameters(self, date: datetime) -> dict[str, Tensor]:
         """The configuration's values for ``date`` (unbatched), in :meth:`bind`'s form; the
         replay harness uses it to load a call's day forcing."""

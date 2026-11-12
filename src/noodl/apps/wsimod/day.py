@@ -143,6 +143,8 @@ _PARAMETER_UNITS = {
     "treatment_throughput_capacity": "m3/d",
     "percent_solids": "-",
     "liquor_multiplier": "-",
+    "constant": "-",
+    "exponent": "-",
     "stormwater_storage_capacity": "m3",
     "stormwater_storage_area": "m2",
     "stormwater_storage_elevation": "m",
@@ -424,9 +426,12 @@ class WsimodDay:
         pollutant_columns = p.names
         for spec in network.nodes:
             node = nodes[spec.name]
+            named = node.driver_columns()
             for name, value in self._node_parameters(node).items():
                 value = _f64(value)
-                if value.ndim == 1:  # pollutant-keyed, (K,): absent without pollutants
+                if name in named:  # one value per named column (X10, X34)
+                    add(f"wsimod.{spec.cls}.{name}", spec.name, node, name, value, named[name])
+                elif value.ndim == 1:  # pollutant-keyed, (K,): absent without pollutants
                     if p.K == 0:
                         continue
                     add(
@@ -708,9 +713,15 @@ class WsimodDay:
             trailing = d.template.shape
             rank = len(trailing)
             if value.ndim < rank or tuple(value.shape[-rank:]) != tuple(trailing):
+                hint = ""
+                if key.endswith(".liquor_multiplier"):  # D19, X10
+                    hint = (
+                        ": 3a's (..., n) layout, the volume entry alone, is gone; the columns "
+                        "are 'volume' then the additive pollutants, (..., n, 1 + K_additive)"
+                    )
                 raise ValueError(
                     f"driver {key!r} of shape {tuple(value.shape)}; expected (..., "
-                    f"{', '.join(str(x) for x in trailing)})"
+                    f"{', '.join(str(x) for x in trailing)}){hint}"
                 )
             shapes.append(value.shape[:-rank])
         return torch.broadcast_shapes(*shapes) if shapes else torch.Size(())

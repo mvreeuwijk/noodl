@@ -544,19 +544,8 @@ RUNS = (
     ("pollutants-", "quickstart", "config_no_deposition.yml", "pollutants"),
     ("pollutants-", "oxford", "config_no_deposition.yml", "pollutants"),
 )
-# 3a computes the WTW processes neutrally; WSIMOD's defaults on the demo's WWTW and FWTW differ
-# until sub-project 3b's Task 3 (plan D1)
-WTW = pytest.mark.xfail(strict=True, raises=Mismatch, reason="the WTW processes are Task 3")
 DEMO_PAIRS = [
-    pytest.param(
-        demo,
-        config,
-        mode,
-        cls,
-        marks=[WTW]
-        if config == "config_no_deposition.yml" and demo == "oxford" and cls in ("WWTW", "FWTW")
-        else [],
-    )
+    pytest.param(demo, config, mode, cls)
     for _, demo, config, mode in RUNS
     for cls in DEMO_CLASSES[demo]
 ]

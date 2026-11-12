@@ -443,6 +443,28 @@ def test_the_driver_names_follow_d6():
     assert "wsimod.concentration" not in drivers
 
 
+def test_quantity_only_driver_shapes():
+    """O2, X34: the WTW drivers of a quantity-only run. ``liquor_multiplier`` keeps its volume
+    column, ``(n, 1)``; the pollutant entries have no driver."""
+    network = read_wsimod_config(DATA / "oxford")
+    model, _, drivers = build_model(network, pollutants=False)
+    n = {cls: sum(1 for s in network.nodes if s.cls == cls) for cls in ("WWTW", "FWTW")}
+    assert n["WWTW"] and n["FWTW"]
+    for cls, count in n.items():
+        template = model.driver_template[f"wsimod.{cls}.liquor_multiplier"]
+        assert template.shape == (count, 1)
+        assert model.wsimod_day.drivers[f"wsimod.{cls}.liquor_multiplier"].columns == ("volume",)
+    assert not any(".process_parameters." in key for key in drivers)
+    # the pollutant run: volume then the additive pollutants, and the constants and exponents
+    network = read_wsimod_config(DATA / "oxford", config_name="config_no_deposition.yml")
+    model, _, drivers = build_model(network, pollutants=True)
+    k = len(network.pollutants.additive)
+    for cls, count in n.items():
+        assert drivers[f"wsimod.{cls}.liquor_multiplier"].shape == (count, 1 + k)
+        for field in ("constant", "exponent"):
+            assert drivers[f"wsimod.{cls}.process_parameters.{field}"].shape == (count, k)
+
+
 def test_a_time_area_fraction_is_a_driver():
     """W56/W70: the fractions are drivers ``(..., n, L+1)`` bound each day, learnable; a
     fraction at a time the configuration does not list is refused by name."""

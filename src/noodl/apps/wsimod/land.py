@@ -18,9 +18,10 @@ on it.
 
 The arithmetic is WSIMOD's ``+ - * /``, ``min``/``max`` in WSIMOD's order, and IHACRES's
 ``exp`` and ``**`` evaluated per instance by Python's own ``math.exp`` and ``float.__pow__``
-(:func:`~noodl.apps.wsimod.storage.exp_python`, :func:`pow_python`), so every value is bitwise
-WSIMOD's (``replay_bound = 0``). Every method takes the caller's ``active`` mask and writes
-state only where it holds (D3); data branches are :meth:`Ctx.decide` (D12).
+(:func:`~noodl.apps.wsimod.storage.exp_python`, :func:`~noodl.apps.wsimod.vqip.pow_python`), so
+every value is bitwise WSIMOD's (``replay_bound = 0``). Every method takes the caller's
+``active`` mask and writes state only where it holds (D3); data branches are
+:meth:`Ctx.decide` (D12).
 
 The surfaces' sites (engine.py, Decision records) are their owner's with the attribute path
 ``surfaces.<name>``: ``node:N/surfaces.<name>/precipitation_evaporation/dry``,
@@ -37,14 +38,21 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from torch import Tensor
-from torch.autograd.function import once_differentiable
 
 from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
 from noodl.apps.wsimod.storage import exp_python
 from noodl.apps.wsimod.tanks import DecayTank, ResidenceTank, Tank
-from noodl.apps.wsimod.vqip import Pollutants, empty, safe_den, sum_vqip, v_change_vqip, write
+from noodl.apps.wsimod.vqip import (
+    Pollutants,
+    empty,
+    pow_python,
+    safe_den,
+    sum_vqip,
+    v_change_vqip,
+    write,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import NodeSpec, SurfaceSpec, WsimodNetwork
@@ -54,7 +62,6 @@ __all__ = [
     "Land",
     "PerviousSurface",
     "Surface",
-    "pow_python",
     "surface_derived",
 ]
 
@@ -77,43 +84,6 @@ LAND_FORCING = ("precipitation", "et0", "temperature")
 
 def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
-
-
-class _PowPython(torch.autograd.Function):
-    """``x ** y`` as Python evaluates it for floats (the C library's ``pow``), elementwise.
-
-    IHACRES raises the moisture ratio to ``ihacres_p`` (``land.py:950``); ``torch.pow`` can
-    differ from ``float.__pow__`` in the last bit, so the forward pass calls Python's, once per
-    instance (the :func:`~noodl.apps.wsimod.storage.pow_half` pattern). An ``int`` exponent in
-    WSIMOD (the default ``10``) is converted to a double by ``float.__pow__``, so the float
-    exponent here is the same call. The gradients are ``y x^(y-1)`` and ``x^y ln x`` where
-    ``x > 0``, and 0 where ``x == 0`` (a saturated soil; the slope there is documented, not
-    propagated).
-    """
-
-    @staticmethod
-    def forward(ctx, x: Tensor, y: Tensor) -> Tensor:
-        xb, yb = torch.broadcast_tensors(x.detach(), y.detach())
-        pairs = zip(xb.reshape(-1).tolist(), yb.reshape(-1).tolist(), strict=True)
-        out = torch.tensor([a**b for a, b in pairs], dtype=torch.float64).reshape(xb.shape)
-        ctx.save_for_backward(x, y, out)
-        return out
-
-    @staticmethod
-    @once_differentiable
-    def backward(ctx, grad: Tensor) -> tuple[Tensor, Tensor]:
-        x, y, out = ctx.saved_tensors
-        positive = x > 0
-        safe = torch.where(positive, x, torch.ones_like(x))
-        zero = torch.zeros_like(grad)
-        gx = torch.where(positive, grad * y * out / safe, zero)
-        gy = torch.where(positive, grad * out * torch.log(safe), zero)
-        return gx.sum_to_size(x.shape), gy.sum_to_size(y.shape)
-
-
-def pow_python(x: Tensor, y: Tensor) -> Tensor:
-    """``x ** y`` bitwise as Python computes it for floats; gradient 0 where ``x == 0``."""
-    return _PowPython.apply(_f64(x), _f64(y))
 
 
 # --- derived quantities (D5) -------------------------------------------------------------------
