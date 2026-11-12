@@ -123,13 +123,16 @@ def _derive(cls: str, values: Mapping):
     ``depth = pore_depth`` (``:612``). ``PerviousSurface`` keeps ``field_capacity_m`` and
     ``wilting_point_m`` on the physical depth and passes the simulated depth
     ``depth * total_porosity`` (``:796-816``), with ``subsurface_coefficient = 1 -
-    percolation_coefficient`` (``:820``).
+    percolation_coefficient`` (``:820``). A growing surface's physical depth is its
+    ``rooting_depth`` (``:1192``, ``:1251``), and after an override too (``:400``, ``:881-884``),
+    so its derived values are construction's.
     """
     if cls == "ImperviousSurface":
         depth = values["pore_depth"]
         return {"capacity": values["area"] * depth, "depth": depth}
-    if cls == "PerviousSurface":
-        physical = values["depth"]
+    if "total_porosity" in values:
+        # a growing surface passes its rooting_depth as the physical depth (``:1192``, ``:1251``)
+        physical = values["rooting_depth"] if "rooting_depth" in values else values["depth"]
         depth = physical * values["total_porosity"]
         return {
             "capacity": values["area"] * depth,
@@ -188,6 +191,9 @@ class Surface(DecayTank):
 
     surface_class: ClassVar[str] = "Surface"
     parameter_defaults: ClassVar[dict[str, float]] = {"area": 1, "depth": 1, "datum": 10}
+    # a growing surface (``GrowingSurface`` and its subclasses) also reads the fertiliser and
+    # manure data; ``land.py`` tests the flag, never the class (it does not import ``growing``)
+    is_growing: ClassVar[bool] = False
     # the per-day state WSIMOD keeps on the surface besides its storage (recorded, model.py:1135)
     flow_fields: ClassVar[tuple[str, ...]] = ()
 
@@ -249,6 +255,14 @@ class Surface(DecayTank):
             self.inflows.append(self.simple_deposition)
         self.processes: list = []
         self.outflows: list = []
+
+    @classmethod
+    def validate_spec(
+        cls, surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
+    ) -> list[str]:
+        """The refusals of a class beyond :func:`_validate_surface`'s common ones, from the
+        spec alone; returns what a quantity-only run ignores. None for these surfaces."""
+        return []
 
     # --- parameters -----------------------------------------------------------------------------
     def _param(self, name: str) -> Tensor:
@@ -345,8 +359,10 @@ class Surface(DecayTank):
                 self.ctx.part(NITRITE_CARRY_OVER, "in", carried, active)
         for f in self.inflows + self.processes + self.outflows:
             in_, out_ = f(active=active)
-            self.ctx.part(PART_NAMES[f.__name__], "in", in_, active)
-            self.ctx.part(PART_NAMES[f.__name__], "out", out_, active)
+            part = PART_NAMES.get(f.__name__)  # a function absent from it returns empty VQIPs
+            if part is not None:
+                self.ctx.part(part, "in", in_, active)
+                self.ctx.part(part, "out", out_, active)
             parent.running_inflow_mb = write(
                 active, sum_vqip(p, parent.running_inflow_mb, in_), parent.running_inflow_mb
             )
@@ -549,6 +565,18 @@ class PerviousSurface(Surface):
                     "divide by the simulated depth less it)"
                 )
 
+    def crop_et0_coefficient(self) -> Tensor:
+        """The factor ``get_climate`` multiplies ``et0`` by: the surface's ``et0_coefficient``
+        (``land.py:911``). A growing surface overrides it with the day's, which its
+        ``calc_crop_cover`` writes."""
+        return self._param("et0_coefficient")
+
+    def get_climate(self) -> tuple[Tensor, Tensor]:
+        """``land.py:905-911``: the day's precipitation depth and ``et0 * et0_coefficient``
+        (the order WSIMOD multiplies in)."""
+        precipitation = self.parent.params["precipitation"]
+        return precipitation, self.parent.params["et0"] * self.crop_et0_coefficient()
+
     def ihacres(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:913-1044``, in WSIMOD's order:
 
@@ -570,8 +598,7 @@ class PerviousSurface(Surface):
         site = f"{self.site}/ihacres"
         area = self.area
         # get_climate (land.py:905-911) and the temperature (:924)
-        precipitation = parent.params["precipitation"]
-        evaporation_depth = parent.params["et0"] * self._param("et0_coefficient")
+        precipitation, evaporation_depth = self.get_climate()
         temperature = parent.params["temperature"]
         # land.py:927-928
         infiltrated = dmin(
@@ -1007,12 +1034,12 @@ def _refuse_surface_data(
                 f"{where}: surface data {variable!r}: residue is not ported (np.py:312 calls a "
                 "dict, land.py:1281 leaves it unwired; Y36, L21); drop it"
             )
-        if variable in SURFACE_INPUTS:
+        if variable in SURFACE_INPUTS and not SURFACE_CLASSES[surface.cls].is_growing:
             raise ValueError(
                 f"{where}: surface data {variable!r}: fertiliser and manure are read by a "
                 f"growing surface only, and a {surface.cls} is not one"
             )
-        if variable not in SURFACE_DEPOSITION:
+        if variable not in SURFACE_DEPOSITION and variable not in SURFACE_INPUTS:
             raise ValueError(
                 f"{where}: surface data {variable!r} is not read (a surface's data_input_dict "
                 "holds deposition only, land.py:375-380)"
@@ -1045,10 +1072,12 @@ def _validate_surface(
       the run's dates, in either mode. A quantity-only run ignores the values.
     - ``pollutant_load``: any value is accepted (``simple_deposition``); a quantity-only run
       ignores it.
-    - ``PerviousSurface``: ``total_porosity`` above ``field_capacity`` and ``wilting_point``
-      (``:942``, ``:950`` divide by the difference), a positive simulated depth less either, a
-      non-zero ``area`` (``get_cmd`` divides, ``:893``) and ``ihacres_p >= 0`` (``0 ** p`` with
-      ``p < 0`` raises ``ZeroDivisionError`` on a saturated soil). With pollutants on, a
+    - ``PerviousSurface`` and the growing classes (whose physical depth is ``rooting_depth``, D18),
+      then the class's own :meth:`Surface.validate_spec`: ``total_porosity`` above
+      ``field_capacity`` and ``wilting_point`` (``:942``, ``:950`` divide by the difference), a
+      positive simulated depth less either, a non-zero ``area`` (``get_cmd`` divides, ``:893``)
+      and ``ihacres_p >= 0`` (``0 ** p`` with ``p < 0`` raises ``ZeroDivisionError`` on a
+      saturated soil). With pollutants on, a
       ``temperature`` pollutant (``calculate_soil_temperature`` reads it, ``:1069``) and a
       non-zero total soil weight ``soil_temp_w_air + soil_temp_w_deep + soil_temp_w_prev``
       (``:1073``; ``ZeroDivisionError`` in WSIMOD).
@@ -1067,9 +1096,12 @@ def _validate_surface(
     # run pollutant is unread (D15, listed by the reader)
     if surface.parameters.get("pollutant_load") and not pollutants:
         ignored.append(f"{prefix}.pollutant_load")
-    if surface.cls != "PerviousSurface":
+    cls = SURFACE_CLASSES[surface.cls]
+    if not issubclass(cls, PerviousSurface):
         return ignored
-    values = {**PerviousSurface.parameter_defaults, **surface.parameters}
+    values = {**cls.parameter_defaults, **surface.parameters}
+    if "rooting_depth" in values:  # a growing surface's physical depth (D18)
+        values["depth"] = values["rooting_depth"]
     porosity = values["total_porosity"]
     for name in ("field_capacity", "wilting_point"):
         if not porosity > values[name]:
@@ -1091,6 +1123,7 @@ def _validate_surface(
             f"{where}: ihacres_p {values['ihacres_p']} is negative (land.py:950 raises "
             "ZeroDivisionError on a saturated soil)"
         )
+    ignored += cls.validate_spec(surface, network, where, pollutants=pollutants)
     weights = {k: float(values[k]) for k in SOIL_TEMPERATURE_DEFAULTS}
     # ``neutral`` only decides which soil weights are listed as ignored when pollutants=False
     neutral = (

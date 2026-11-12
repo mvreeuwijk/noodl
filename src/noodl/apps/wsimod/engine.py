@@ -83,6 +83,11 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   adds ``node:N/surfaces.<name>.nutrient_pool.<pool>/extract/clip:<N|P>`` (``np.py:553``;
   ``call`` that pool's extract count) for the pools ``fast_pool``, ``humus_pool``,
   ``dissolved_inorganic_pool``, ``dissolved_organic_pool`` and ``adsorbed_inorganic_pool``.
+  A growing surface adds ``node:N/surfaces.<name>/calc_crop_cover/{unsown,crop,depletion,
+  unstressed,stress_floor,stress_zero_denominator}`` (``:1531``, ``:1550``, ``:1560``, ``:1561``,
+  ``:1564``; the last is noodl's guard for ``(1 - ET_depletion_factor) * TAW == 0``, whose event is
+  ``"crop_water_stress_zero_denominator"``, Y17); its sowing, harvest and leap tests are
+  structural and record nothing (:meth:`GrowingSurface.set_dates`).
   Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
@@ -298,6 +303,7 @@ def _register_all() -> None:
     """Import every module that registers node classes."""
     import noodl.apps.wsimod.catchment  # noqa: F401
     import noodl.apps.wsimod.demand  # noqa: F401
+    import noodl.apps.wsimod.growing  # noqa: F401
     import noodl.apps.wsimod.land  # noqa: F401
     import noodl.apps.wsimod.sewer  # noqa: F401
     import noodl.apps.wsimod.storage  # noqa: F401
@@ -326,6 +332,13 @@ class Engine:
             self.arcs[spec.name] = ARC_CLASSES[spec.cls](
                 spec, self.nodes[spec.in_port], self.nodes[spec.out_port], pollutants
             )
+        # D7: a growing surface builds its crop calendar for the network's dates, and refuses
+        # (by name, with the first date) any date whose interpolation would raise
+        for spec in network.nodes:
+            for surface in getattr(self.nodes[spec.name], "surfaces", ()):
+                set_dates = getattr(surface, "set_dates", None)
+                if set_dates is not None:
+                    set_dates(network.dates, network.date_labels)
 
     def begin_day(self, ctx: Ctx) -> None:
         """Give every node and arc the day's context."""

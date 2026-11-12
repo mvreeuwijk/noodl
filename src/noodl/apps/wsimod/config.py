@@ -700,6 +700,14 @@ def read_wsimod_config(
                 for key in load
                 if key not in pollutants.names
             )
+    # land.py:1265, :1570 (L22, Y39, D15): a growing surface overwrites its ``et0_coefficient`` at
+    # construction and every day, so the configured or overridden value is never read
+    for node in nodes:
+        unread.extend(
+            f"{node.name}.surfaces.{surface.name}.et0_coefficient"
+            for surface in node.surfaces
+            if "rooting_depth" in SURFACE_SCHEMAS[surface.cls].parameters
+        )
     # land.py:375-382, :540-581 (D15, Y21): the surface data a surface never reads. Without
     # ``nhx-dry`` in the constructor's data no deposition function is built, so every variable is
     # unread; with it, a deposition of a species that is not a run pollutant is read and dropped

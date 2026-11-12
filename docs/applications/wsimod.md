@@ -253,6 +253,66 @@ an override may be partial and merges.
 Entries for a pollutant that is not additive, for one the model does not list, and a `volume`
 `exponent` are refused: WSIMOD never reads them.
 
+### The growing surface
+
+A `GrowingSurface` is a `PerviousSurface` whose physical depth is its `rooting_depth`
+(`land.py:1192`): `field_capacity_m = field_capacity * rooting_depth` and the tank's depth is
+`rooting_depth * total_porosity`. A configured `depth`, and a `depth` override, are refused by
+name (WSIMOD raises `TypeError`, or prints an error and ignores it); `rooting_depth` is the
+override. Its constructor keywords are `rooting_depth`, `ET_depletion_factor`,
+`crop_factor_stages`, `crop_factor_stage_dates`, `sowing_day`, `harvest_day` and
+`initial_soil_storage`; the 25 attributes WSIMOD sets in `__init__` (`land.py:1186-1250`) are
+reachable through overrides only, 31 names with `rooting_depth` (`:1376-1431`). The nutrient
+processes of a growing surface (the soil pools, fertiliser, uptake, erosion and the rest) are
+the next tasks of sub-project 3c: here the surface runs the crop calendar and the cover only.
+
+`calc_crop_cover` (`land.py:1514-1572`) runs first on the surface each day. It sows on
+`sowing_day` and harvests on `harvest_day` (the raw day of the year), interpolates the crop
+factor from `crop_factor_stages` at `crop_factor_stage_dates`, interpolates the crop and ground
+cover from the sowing and harvest days (`[0, sowing_day, harvest_day, harvest_day + 1, 365]`)
+once the crop is sown, and sets the day's `et0_coefficient` to the water-stress coefficient
+`Ks` times the crop factor. `ihacres` reads that coefficient: a growing surface never reads the
+configured `et0_coefficient`, which is listed in `model.unread`. `Ks` is 1 while the root zone
+depletion is below `RAW = TAW * ET_depletion_factor`, and else
+`max(0, (TAW - depletion) / ((1 - ET_depletion_factor) * TAW))`.
+
+The calendar is arithmetic on the dates, so it is built once, when the model is built
+(`GrowingSurface.set_dates`), in WSIMOD's own arithmetic (Python's `bisect_left` and indexing).
+Its quirks are WSIMOD's, reproduced:
+
+- **Every year shifts the day of year after 28 February (L1).** WSIMOD tests
+  `if t.is_leap_year:`, and the individual-files loader (the `config.yml` + CSV format this reader
+  reads) builds dates whose `is_leap_year` is a method, which is always true: 1 March and
+  28 February interpolate at day 59 and 31 December at 364, in every year. The loader of the
+  parquet format has pandas timestamps, a property, so there the shift is for leap years only: a
+  user who compares with a parquet-loaded WSIMOD sees crop factors that differ by a day in
+  common years. The sowing and harvest tests use the raw day of the year.
+- **The sowing day has no crop.** `days_after_sow` is 0 on it, which is false at `:1550`: the
+  covers start to change the day after.
+- **The covers persist** outside the season, until the harvest resets them.
+- **An autumn calendar has no cover (L2).** With `sowing_day > harvest_day`, or the default
+  `harvest_day = 365`, the list is unsorted, and `bisect_left` returns segments whose cover is 0:
+  a crop sown on day 280 and harvested on day 200 has no cover all year.
+- **The index wraps (L23).** A day at or before the first stage date reads the last one (Python's
+  negative index): `xp = [1, 365]`, `yp = [0.3, 1]` at day 1 gives `0.30000000000000004`.
+- **The stress coefficient divides by zero (L3).** With the default `ET_depletion_factor = 1` the
+  denominator is 0 once the soil is at or below its wilting point, and WSIMOD raises
+  `ZeroDivisionError`. noodl gives `Ks = 0` (the limit of the formula, and FAO-56's value at the
+  wilting point) and records the event `"crop_water_stress_zero_denominator"`.
+
+Refused by name: `wilting_point >= field_capacity` (`TAW <= 0`; WSIMOD prints for `TAW < 0` and
+divides by zero for `TAW = 0`, L4), `crop_factor_stages` and `crop_factor_stage_dates` of
+different lengths, a stage date list on which WSIMOD's interpolation would raise on one of the
+run's dates (`IndexError` past the last stage date, or a zero-width segment such as
+`[365, 365]`: the message names the list and the first such date), a `sowing_day` or
+`harvest_day` that is not a whole day (`90.0` is accepted), and an `adsorption_nr_maxiter` that
+is not a non-negative integer. The porosity, area and soil-weight refusals of a `PerviousSurface`
+apply with `rooting_depth` as the physical depth. With `nitrate` among the pollutants a growing
+surface needs the fertiliser and manure data (`nhx-fertiliser`, `noy-fertiliser`,
+`srp-fertiliser`, `nhx-manure`, `noy-manure`, `srp-manure`, monthly, kg/m2/d) in either mode,
+as WSIMOD reads them whenever `nitrate` is in its pollutants (a quantity-only run lists them as
+ignored).
+
 ### The soil temperature
 
 With a `temperature` pollutant, a `PerviousSurface` moves its storage's temperature every day
@@ -654,7 +714,13 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `Land.push_set_sewer` lacks `self.surface`, and `Land` has no `"Sewer"` check | evident intent: ponded sewer water is forced into the first impervious surface | `test_sewer_ponding_into_land_is_forced_into_the_first_impervious_surface`; `test_case_runs_where_wsimod_crashes_land_sewer_ponding` |
 | `EnfieldFoulSewer.make_discharge` (`storm_exchange` undefined) | refused by name | `test_refusals_name_the_key[mapping7-EnfieldFoulSewer]` |
 | `NonResidentialDemand.get_demand` recurses without end | evident intent: its constant demand, as a house | `test_non_residential_demand_is_its_constant_demand_as_house` |
-| `GrowingSurface.residue` is unwired | sub-project 3c; refused as a class | `test_refusals_name_the_key[mapping8-3c]` |
+| `GrowingSurface.residue` is unwired | sub-project 3c; refused with the other unported classes | `test_refusals_name_the_key` |
+| `GrowingSurface`: `if t.is_leap_year:` tests a method, so the day of year shifts after 28 February in every year (L1) | reproduced, documented | `test_every_year_shifts_the_day_after_february` |
+| `GrowingSurface`: an autumn-sown crop (`sowing_day > harvest_day`) has no cover (L2) | reproduced | `test_an_autumn_calendar_has_no_cover_all_year` |
+| `GrowingSurface`: the stress coefficient divides by `(1 - ET_depletion_factor) * TAW`, which is 0 for the default factor at the wilting point (L3) | `Ks = 0`, event `"crop_water_stress_zero_denominator"` | `test_the_stress_zero_denominator_gives_zero` |
+| `GrowingSurface`: `TAW < 0` only prints, `TAW = 0` divides by zero (L4) | `wilting_point >= field_capacity` refused | `test_growing_refusals` |
+| `GrowingSurface`: `quick_interp` wraps to the last entry for a day at or before the first, and raises past the last (L23) | the wrap reproduced; a raising date refused with its name | `test_quick_interp_equals_wsimods`; `test_calendar_refusals` |
+| `GrowingSurface`: the configured `et0_coefficient` is overwritten (L22) | listed in `model.unread` | `test_a_growing_et0_coefficient_is_unread` |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
 | `UnlimitedDistribution` loses its leakage | refused | `test_leakage_refusals` |

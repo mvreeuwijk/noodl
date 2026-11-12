@@ -202,6 +202,20 @@ _CONSTRUCTORS: dict[str, tuple[dict[str, object], str | None]] = {
         },
         "Surface",
     ),
+    # land.py:1085-1094; ``depth`` is the rooting depth (``:1192``), so a configuration naming it
+    # is a duplicate keyword in WSIMOD (``TypeError``) and is derived here
+    "GrowingSurface": (
+        {
+            "rooting_depth": 1,
+            "ET_depletion_factor": 1,
+            "crop_factor_stages": [1, 1],
+            "crop_factor_stage_dates": [0, 365],
+            "sowing_day": 1,
+            "harvest_day": 365,
+            "initial_soil_storage": None,
+        },
+        "PerviousSurface",
+    ),
     # arcs.py
     "Arc": (
         {
@@ -324,6 +338,44 @@ _OVERRIDES: dict[str, frozenset[str]] = {
             "soil_temp_deep",
         }
     ),
+    # land.py:1376-1431: the 31 attributes of ``overwrite_params`` (``adosorption_nr_limit`` is
+    # WSIMOD's spelling) and ``rooting_depth``; ``depth`` is popped with an "ERROR" print
+    "GrowingSurface": frozenset(
+        {
+            "ET_depletion_factor",
+            "crop_cover_max",
+            "ground_cover_max",
+            "crop_factor_stages",
+            "crop_factor_stage_dates",
+            "sowing_day",
+            "harvest_day",
+            "satact",
+            "thetaupp",
+            "thetalow",
+            "thetapow",
+            "uptake1",
+            "uptake2",
+            "uptake3",
+            "uptake_PNratio",
+            "erodibility",
+            "sreroexp",
+            "cohesion",
+            "slope",
+            "srfilt",
+            "macrofilt",
+            "limpar",
+            "exppar",
+            "hsatINs",
+            "denpar",
+            "adosorption_nr_limit",
+            "adsorption_nr_maxiter",
+            "kfr",
+            "nfr",
+            "kadsdes",
+            "bulk_density",
+            "rooting_depth",
+        }
+    ),
     "Arc": frozenset({"capacity", "preference"}),  # arcs.py:87-96
 }
 
@@ -334,12 +386,17 @@ _RENAMED = {
     "ResidentialDemand": "Demand",
 }
 # land.py:627-632: ``ImperviousSurface.apply_overrides`` pops ``depth`` and ignores it (a printed
-# error), though ``Surface`` consumes ``depth``; the override is refused.
-_NOT_OVERRIDES = {"ImperviousSurface": frozenset({"depth"})}
+# error), though ``Surface`` consumes ``depth``; the override is refused. So is a growing
+# surface's (``:1412-1417``: popped with an "ERROR" print; ``rooting_depth`` is the override).
+_NOT_OVERRIDES = {
+    "ImperviousSurface": frozenset({"depth"}),
+    "GrowingSurface": frozenset({"depth"}),
+}
 _DERIVED = {
     "Surface": frozenset({"capacity", "parent"}),
     "ImperviousSurface": frozenset({"capacity", "parent", "depth"}),
     "PerviousSurface": frozenset({"capacity", "parent"}),
+    "GrowingSurface": frozenset({"capacity", "parent", "depth"}),
 }
 
 
@@ -395,7 +452,8 @@ def _schema(name: str) -> ClassSchema:
 
 NODE_SCHEMAS: dict[str, ClassSchema] = {name: _schema(name) for name in _NODE_CLASSES}
 SURFACE_SCHEMAS: dict[str, ClassSchema] = {
-    name: _schema(name) for name in ("Surface", "ImperviousSurface", "PerviousSurface")
+    name: _schema(name)
+    for name in ("Surface", "ImperviousSurface", "PerviousSurface", "GrowingSurface")
 }
 ARC_SCHEMAS: dict[str, ClassSchema] = {
     name: _schema(name)
@@ -414,7 +472,6 @@ ARC_SCHEMAS: dict[str, ClassSchema] = {
 
 # Classes WSIMOD has and this port does not, with where they go (spec, Scope).
 OUT_OF_SCOPE: dict[str, str] = {
-    "GrowingSurface": "3c",
     "IrrigationSurface": "3c",
     "GardenSurface": "3c",
     "VariableAreaSurface": "3c",
