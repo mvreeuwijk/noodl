@@ -38,7 +38,11 @@ from noodl.apps.wsimod import (  # noqa: E402
 )
 from noodl.apps.wsimod.engine import Decision  # noqa: E402
 from noodl.apps.wsimod.structure import river_order  # noqa: E402
-from tests.verification._wsimod_cases import CASES, _decay_groundwater  # noqa: E402
+from tests.verification._wsimod_cases import (  # noqa: E402
+    CASES,
+    _decay_groundwater,
+    _decay_queue_groundwater,
+)
 from tests.verification._wsimod_parity import (  # noqa: E402
     BOUND,
     Admission,
@@ -430,7 +434,8 @@ def test_the_cases_cover_every_listed_feature():
     queue_tank_time_zero wtw_zero_input impervious_only pervious_only evaporation_clamp
     temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
     batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
-    node_type_override decay_storage decay_groundwater
+    node_type_override decay_storage decay_groundwater decay_queue_groundwater
+    decay_queue_groundwater_n0
     surface_decay_nitrification land_run_twice""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
@@ -662,6 +667,18 @@ def test_case_runs_where_wsimod_crashes_decay_groundwater():
     with pytest.raises(TypeError):
         _wsimod_run_of(wsimod_model(mapping))
     with pytest.raises(ValueError, match="filename"):
+        build_model(read_wsimod_config(mapping))
+
+
+def test_case_runs_where_wsimod_crashes_decay_queue_groundwater():
+    """``decay_queue_groundwater`` without its ``filename`` override: WSIMOD loses the
+    groundwater's configured forcing (``storage.py:291-292``), so its ``DecayQueueTank``'s
+    first decay, at the first push or end of day, reads ``None`` (``core.py:485``,
+    ``TypeError``); noodl refuses by name (X11)."""
+    mapping = _decay_queue_groundwater(override=False)
+    with pytest.raises(TypeError):
+        _wsimod_run_of(wsimod_model(mapping))
+    with pytest.raises(ValueError, match="QueueGroundwater.*filename"):
         build_model(read_wsimod_config(mapping))
 
 

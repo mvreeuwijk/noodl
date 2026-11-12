@@ -246,11 +246,6 @@ def _checked_parameters(
     return parameters
 
 
-def _refuse_decays(where: str, decays: object, reason: str = "decay is sub-project 3b") -> None:
-    """A ``decays`` this task does not port yet: a ``QueueGroundwater``'s (Task 9)."""
-    raise ValueError(f"{where}: 'decays' {decays!r} is not supported ({reason})")
-
-
 def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) -> None:
     """A configured ``process_parameters`` or ``liquor_multiplier`` must name every additive
     pollutant, ``process_parameters`` with its ``constant`` and ``exponent``: WSIMOD reads them
@@ -471,14 +466,7 @@ def _read_node(
         ]
     parameters = _checked_parameters(entry, schema, where)
     decays = parameters.get("decays")
-    if decays is not None:  # storage.py:53, :300 build a DecayTank
-        if cls == "QueueGroundwater":
-            _refuse_decays(
-                where,
-                decays,
-                "a QueueGroundwater's decay reads temperature from a 'filename' override only "
-                "(storage.py:291-292), which Task 9 adds",
-            )
+    if decays is not None:  # storage.py:53, :300 build a DecayTank or a DecayQueueTank
         read_decays(where, decays, pollutants)
     if "process_parameters" in parameters:
         _refuse_partial_wtw(where, parameters, pollutants)

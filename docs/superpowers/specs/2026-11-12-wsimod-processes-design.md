@@ -276,8 +276,11 @@ Four consequences follow. All are transcribed (X13).
   a non-decaying `QueueGroundwater`, so a quantity-only run keeps this structure (X25).
 - **The merge order is swapped.** The new `queue[0]` is `sum_vqip(decay(old[1]),
   decay(old[0]))`, while `AltQueueArc` computes `sum_vqip(old[0], old[1])` (`arcs.py:660`).
-  The non-additive blend `(t2·V2 + t1·V1)/V` (`core.py:112-114`) therefore adds in the other
-  order, and noodl follows it.
+  noodl follows it. The blend `(t2·V2 + t1·V1)/V` (`core.py:112-114`) is symmetric in IEEE
+  arithmetic (`a + b == b + a`), so the order shows only where the merged volume is 0: then
+  `sum_vqip` keeps its first argument's non-additive values (`core.py:109`), `decay(old[1])`'s
+  rather than `old[0]`'s (corrected in Task 9: an earlier wording said the blend adds in the
+  other order).
 
 Order of `total_decayed` (`core.py:491`, sequential `sum_vqip`), stated as the order of the
 value that is extracted from `storage` at the end of day d + 1 (X30):

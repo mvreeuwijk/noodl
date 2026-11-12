@@ -26,6 +26,7 @@ from noodl.apps.wsimod.structure import (
     recursion_cycles,
     river_order,
 )
+from noodl.apps.wsimod.tanks import DecayQueueTank
 from tests.verification._wsimod_cases import CASES
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "wsimod"
@@ -463,6 +464,18 @@ def test_quantity_only_driver_shapes():
     nitrifying = read_wsimod_config(CASES["surface_decay_nitrification"].build())
     _, _, drivers = build_model(nitrifying, pollutants=False)
     assert not any(".decays." in key for key in drivers)  # nor a surface's
+    # X25: nor a QueueGroundwater's, while its DecayQueueTank (its one-day delay, X12, and its
+    # end of day without update_queue, X13) stays, with its total_decayed row
+    queue = read_wsimod_config(CASES["decay_queue_groundwater"].build())
+    quantity, state, drivers = build_model(queue, pollutants=False)
+    assert not any(key.startswith("wsimod.QueueGroundwater.decays.") for key in drivers)
+    tank = quantity.wsimod_day.engine.nodes["gw"].tank
+    assert isinstance(tank, DecayQueueTank) and tank.decay is None
+    assert tank.number_of_timesteps == 1 and tank.internal_arc.length == 3
+    assert quantity.wsimod_day.state_labels("wsimod.total_decayed") == [("gw", "tank.internal_arc")]
+    assert state["wsimod.total_decayed"].shape == (1, 1)
+    _, _, drivers = build_model(queue, pollutants=True)
+    assert drivers["wsimod.QueueGroundwater.decays.constant"].shape == (1, 4)
     model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=True)
     k = len(mapping["pollutants"])
     for cls in ("Storage", "Reservoir", "RiverReservoir", "River"):

@@ -1763,6 +1763,83 @@ def _decay_groundwater(*, override: bool = True) -> dict:
     return mapping
 
 
+def _decay_queue_groundwater(*, override: bool = True, number_of_timesteps: int | None = None):
+    """A ``QueueGroundwater`` with time-area ``{0: 0.5, 2: 0.5}`` and ``decays``: its tank is a
+    ``DecayQueueTank`` (``storage.py:307-315``) with WSIMOD's default ``number_of_timesteps = 1``
+    (``tanks.py:648``, X12), or the override's (``number_of_timesteps``, ``tanks.py:682-685``,
+    X28). A reservoir abstracts from it through ``pull_set_active`` (pro rata over the decayed
+    queue) and takes what it distributes; a second reservoir, distributed before the
+    groundwater, pushes all it holds into it.
+
+    - The catchment's flow is 0 on every third day, so the feeding reservoir is empty and
+      nothing is pushed that day: the water the end of the day before moved to slot 0 waits
+      there, without the flush of a push, until ``distribute``'s ``update_queue``
+      (``storage.py:352``; X13, plan Review Focus 1).
+    - ``ammonia``'s constant of 0.9 makes the cap bind on warm days; ``do`` is a non-additive
+      pollutant that decays, ``temperature`` one that only blends (the swapped merge, X13).
+    - The temperature is a ``filename`` override's: WSIMOD loses the configured
+      ``data_input_dict`` (``storage.py:291-292``, a decoy here, X11). ``override=False`` leaves
+      the override out, and WSIMOD raises ``TypeError`` at the first decay (``core.py:485``).
+    """
+    days = _DECAY_DAYS
+    source = _decay_catchment("src", days, 71)
+    for k, date in enumerate(_dates(days)):
+        if k % 3 == 2:
+            source["data_input_dict"][("flow", date)] = 0.0
+    mapping = {
+        **_DECAY_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            source,
+            _store("head", "Node"),  # a Catchment pushes to Node, River and Waste only
+            _store("feed", "Reservoir", capacity=60.0),  # a Node pushes to no Groundwater
+            _store(
+                "gw",
+                "QueueGroundwater",
+                capacity=500.0,
+                initial_storage=_stocked_do(30.0),
+                timearea={0: 0.5, 2: 0.5},
+                decays={
+                    "phosphate": {"constant": 0.05, "exponent": 1.07},
+                    "ammonia": {"constant": 0.9, "exponent": 1.08},
+                    "do": {"constant": 0.04, "exponent": 1.05},
+                },
+                data_input_dict=_decay_temperatures(days, 72),
+            ),
+            _store("res", "Reservoir", capacity=25.0),
+            _store("sink", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_head", "src", "head"),
+            _arc("head_to_feed", "head", "feed", capacity=45.0),
+            _arc("feed_to_gw", "feed", "gw"),
+            _arc("gw_to_res", "gw", "res", capacity=12.0),
+            _arc("res_to_sink", "res", "sink", capacity=8.0),
+        ],
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Reservoir": "make_abstractions"},
+            {"Reservoir": "distribute"},
+            {"QueueGroundwater": "distribute"},
+        ],
+    }
+    override_entry: dict = {"type_": "QueueGroundwater", "name": "gw"}
+    if override:
+        temperatures = _decay_temperatures(days, 73, exactly_20=5)
+        name = "decay_queue_groundwater" + ("" if number_of_timesteps is None else "_n0")
+        override_entry["filename"] = _forcing_file(name, temperatures)
+    if number_of_timesteps is not None:
+        override_entry["number_of_timesteps"] = number_of_timesteps
+    if len(override_entry) > 2:
+        mapping["overrides"] = {"nodes": {"gw": override_entry}}
+    return mapping
+
+
+def _decay_queue_groundwater_n0() -> dict:
+    """``decay_queue_groundwater`` with the override ``number_of_timesteps: 0`` (D12)."""
+    return _decay_queue_groundwater(number_of_timesteps=0)
+
+
 def _nitrifying(volume: float) -> dict:
     """An ``initial_storage`` VQIP over WSIMOD's 12 default pollutants, with ammonia, nitrite and
     nitrate to decay (every key is needed: WSIMOD sums over its pollutant list)."""
@@ -2096,6 +2173,18 @@ CASES: dict[str, Case] = {
         build=_decay_groundwater,
         days=_DECAY_DAYS,
         scale=_largest_volume(_decay_groundwater()),
+        replay=("gw",),
+    ),
+    "decay_queue_groundwater": Case(
+        build=_decay_queue_groundwater,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_queue_groundwater()),
+        replay=("gw",),
+    ),
+    "decay_queue_groundwater_n0": Case(
+        build=_decay_queue_groundwater_n0,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_queue_groundwater_n0()),
         replay=("gw",),
     ),
     "surface_decay_nitrification": Case(

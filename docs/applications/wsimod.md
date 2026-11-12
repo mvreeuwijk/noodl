@@ -35,8 +35,9 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 `ImperviousSurface` and `PerviousSurface` (IHACRES); the arcs `Arc`, `QueueArc`, `AltQueueArc`,
 `PullArc`, `PushArc`, `SewerArc` and `WeirArc`. The soil temperature of a `PerviousSurface` is
 live (below), and so are the treatment works' pollutant treatment and the first-order decay of
-the storage family's tanks (below); the other processes that change a pollutant (the decay of
-other elements, deposition) are later sub-projects and are refused unless they are neutral.
+the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces (below); the
+other processes that change a pollutant (the decay of arcs, deposition) are later sub-projects
+and are refused unless they are neutral.
 
 ### Decay in the storage family
 
@@ -63,7 +64,7 @@ Where `T` comes from:
 |---|---|
 | `Storage`, `Reservoir`, `RiverReservoir`, `River` | the node's own forcing, given as the constructor's `data_input_dict` or `filename` key (a constructor key, read relative to the configuration's directory), or replaced by a `filename` override (an override key, read relative to the working directory); a missing date is refused by name when the model is built, whatever `decays` lists (an empty dict reads it too, `core.py:484-487`) |
 | `Groundwater` | a `filename` **override** only: WSIMOD loses the constructor's `data_input_dict` and `filename` (`storage.py:202-203`), so a configured forcing is listed in `model.unread` and a `decays` dict without the override's `("temperature", date)` on every date is refused by name (X11). Use an absolute path: the override is opened relative to the working directory, as in WSIMOD |
-| `QueueGroundwater` | the same, but a `decays` dict on it is refused until a later task of this sub-project |
+| `QueueGroundwater` | the same (`storage.py:291-292`): a `filename` override only |
 | a node with `decays: None` | none |
 
 The kinks. The cap `min(factor, 1)` is a decision, `node:<name>/tank/make_decay/cap:<pollutant>`,
@@ -88,7 +89,47 @@ missing `exponent`. An override on a node built with `decays: None` is refused (
 WSIMOD's `record_all` lists only tanks whose class is exactly `Tank`, `QueueTank` or
 `ResidenceTank` (`model.py:1123`): a `DecayTank` drops out of the `tank_*` results, and a user
 who adds `decays` to a node sees its tank disappear from them. Its storage stays in the state
-(`"wsimod.storage"`) and in the mass balance.
+(`"wsimod.storage"`) and in the mass balance. The same holds for a `QueueGroundwater`'s
+`DecayQueueTank` (below), whose `QueueTank` row a user who adds `decays` sees disappear (X40).
+
+### Decay in a `QueueGroundwater`
+
+A `QueueGroundwater` with a `decays` dict owns a `DecayQueueTank` instead of a `QueueTank`
+(`storage.py:307-315`, `tanks.py:645-696`): its internal queue is a `DecayArcAlt`
+(`arcs.py:731-805`), whose water decays by the rule above on entry and at every end of day, with
+the node's temperature from its `filename` override. The cap decision is
+`node:<name>/tank/internal_arc/make_decay/cap:<pollutant>`. WSIMOD's class is transcribed as
+written (X13), which differs from a non-decaying `QueueGroundwater` in four ways:
+
+- **One day longer.** `DecayQueueTank`'s `number_of_timesteps` defaults to **1**
+  (`tanks.py:648`), against its docstring and `QueueTank`'s 0, and `QueueGroundwater` passes
+  none, so adding `decays` delays all of the node's water by one day: a time-area `{0: 0.5, 1:
+  0.5}` queues under keys 1 and 2, and nothing is active at once (X12). The override
+  `number_of_timesteps` (`DecayQueueTank.apply_overrides`, `tanks.py:682-685`) sets it, for
+  example to 0 (X28); it is refused on a node without `decays`.
+- **The decay reaches `storage` a day late.** A push adds the **undecayed** water to `storage`
+  (`tanks.py:536-538`) and the decayed water to the queue. At the end of day d, `storage` loses
+  the internal arc's `total_decayed` (`tanks.py:694`): that day's entry decay plus the end-of-day
+  decay of day d - 1; the decay of day d's end waits in `total_decayed` until the end of day d +
+  1. So `total_decayed` is carried state, row `(node, "tank.internal_arc")` of
+  `"wsimod.total_decayed"`, and what `storage` loses is the mass-balance outflow
+  `"DecayQueueTank.decayed"`. The balance counts the tank by its `storage`, so it closes every
+  day. Only the pollutant columns lag (decay changes no volume), and no pull reads them: the
+  pulls take their water from `active_storage` or, `pull_set_active`, pro rata from the queue.
+  Its order of addition is WSIMOD's: reset, slots 1 to L ascending, slot 0, then the next day's
+  entries in push order (X30).
+- **`active_storage` never decays** (the TODO at `tanks.py:692-693`): water decays only while
+  it is in the queue.
+- **No flush at the end of the day.** `QueueTank`'s end of day ends with `update_queue`;
+  `DecayQueueTank`'s does not. Water that the end of day d moves to slot 0 becomes active only at
+  the next push (every push flushes slot 0) or at `distribute`'s `update_queue`
+  (`storage.py:352`), and decays again at each end of day it waits. The new slot 0 is
+  `sum_vqip(decay(slot 1), decay(slot 0))`, the other order from `AltQueueArc`'s; the blend is
+  symmetric, so the order shows only where the two slots hold no water and the first one's
+  non-additive values are kept.
+
+Because the timing differs, a quantity-only run keeps the `DecayQueueTank` structure (X25): its
+delay, its end of day and its `total_decayed` row (all zero), with no `decays.*` driver.
 
 ### Decay on a land's surfaces and the nitrite carry-over
 
@@ -369,7 +410,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.travel_queue"`, `"wsimod.travel_queue_present"` | `(arc, i)` | the travel registers of the `QueueTank`s and `AltQueueArc`s, one row per travel time, and their key sets |
 | `"wsimod.arc_queue"`, `"wsimod.arc_queue_since"` | `(arc, direction, i, j)`, `(arc, direction)` | every `QueueArc`'s waiting requests and the days since its last delivery |
 | `"wsimod.liquor"`, `"wsimod.previous_pulled"`, `"wsimod.treated"` | node | the treatment works' liquor, an `FWTW`'s previous day's pull, a `WWTW`'s treated water |
-| `"wsimod.total_decayed"` | `(node, "surfaces.<name>")` | each surface's decayed mass of the last end of day, which the next `Surface.run` converts (rows only when `nitrite` is a pollutant; in the state layout's order) |
+| `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
 volume with no pollutants and a mapping a VQIP by name, `{"volume": 5.0, "phosphate": 0.1}`; a
@@ -401,8 +442,10 @@ Everything that cannot run is refused by name when the model is built, where WSI
 mid-run, hang or silently do something else:
 
 - out-of-scope classes and keys (by the reader);
-- River biochemistry (nitrate among the pollutants); `decays` that are not ported yet (a
-  `QueueGroundwater`'s, an arc's); a `decays` key that is not
+- River biochemistry (nitrate among the pollutants); `decays` that are not ported yet (an
+  arc's); a decaying `Groundwater` or `QueueGroundwater` without a `filename` override's
+  temperature; a `number_of_timesteps` override on a `QueueGroundwater` without `decays`; a
+  `decays` key that is not
   a configured pollutant, an entry without exactly `constant` and `exponent`, a non-numeric
   value, an `exponent` of 0 or below, and an override of `decays` on a node built without;
 - a `total_porosity` not above `field_capacity`, a residence time of 0, `leakage` outside
@@ -452,6 +495,8 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | WSIMOD's `record_all` skips a `DecayTank` | the tank drops out of `tank_*` (X40); its storage stays in the state | `test_a_decaying_storage_decays_at_the_end_of_the_day_and_closes_the_balance` |
 | the default `decays={}` of a surface is one dict shared by every surface built without one, so an override reaches all of them | per surface | `test_a_decays_override_reaches_only_its_surface` |
 | `Surface.run` converts `total_decayed` at every call | transcribed: a second `Land.run` on one day converts the same mass twice | case `land_run_twice` |
+| `QueueGroundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, refused by name without one (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; case `decay_queue_groundwater` |
+| `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; cases `decay_queue_groundwater` and `decay_queue_groundwater_n0` |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
@@ -526,10 +571,10 @@ of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad)
 ## Limitations
 
 - **Sub-projects 3b and 3c.** The processes that change a pollutant (river biochemistry, the
-  decay of groundwaters, surfaces and arcs, deposition, the land's nutrient pools,
-  `GrowingSurface`, the garden and irrigation surfaces) are refused unless neutral. The soil
-  temperature, the treatment works' pollutant treatment and the decay of the storage family's
-  tanks are ported. Until the rest of 3b, a real configuration needs `pollutants=False`.
+  decay of arcs, deposition, the land's nutrient pools, `GrowingSurface`, the garden and
+  irrigation surfaces) are refused unless neutral. The soil temperature, the treatment works'
+  pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
+  `DecayQueueTank` included) and of a land's surfaces are ported. Until the rest of 3b, a real configuration needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:

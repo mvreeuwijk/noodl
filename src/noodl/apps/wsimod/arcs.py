@@ -33,6 +33,7 @@ __all__ = [
     "ARC_CLASSES",
     "AltQueueArc",
     "Arc",
+    "DecayArcAlt",
     "PullArc",
     "PushArc",
     "QueueArc",
@@ -354,6 +355,7 @@ class AltQueueArc(Arc):
         # enter_arc (arcs.py:423-428): average_flow = V / (time + 1)
         self.flow_in = write(run, self.flow_in + entered[..., 0] / (t + 1), self.flow_in)
         self.vqip_in = write(run, sum_vqip(p, self.vqip_in, entered), self.vqip_in)
+        entered = self._on_entry(entered, run)
         # enter_queue (arcs.py:595-601): sum into an existing key, assign a new one
         row = self.register[..., t, :]
         row = torch.where(self.present[..., t, None], sum_vqip(p, row, entered), entered)
@@ -367,6 +369,10 @@ class AltQueueArc(Arc):
         ctx.event("more_backflow_than_vqip", self.owner, run & more)
         self.vqip_in = write(run, extract_vqip(p, self.vqip_in, backflow), self.vqip_in)
         return torch.where(tiny[..., None], ctx.empty(), not_pushed)
+
+    def _on_entry(self, entered: Tensor, run: Tensor) -> Tensor:
+        """The request as it enters the queue, after ``enter_arc``: unchanged here."""
+        return entered
 
     def update_queue(self, *, active: Tensor) -> Tensor:
         """``arcs.py:603-638``: push slot 0 to the out-port without a tag; the rejected part is
@@ -391,6 +397,103 @@ class AltQueueArc(Arc):
         tail = torch.zeros_like(old[..., :1, :])
         self.register = torch.cat([first[..., None, :], old[..., 2:, :], tail], dim=-2)
         here = self.present
+        self.present = torch.cat([here[..., :-1] | here[..., 1:], here[..., -1:]], dim=-1)
+
+
+class DecayArcAlt(AltQueueArc):
+    """``DecayArcAlt`` (``arcs.py:731-805``): an :class:`AltQueueArc` whose queued water decays
+    on entry and at every end of day. Here it is a ``DecayQueueTank``'s internal arc
+    (``tanks.py:663-669``); it is not yet a user arc class.
+
+    - **Entry** (``enter_queue``, ``:752-778``): ``enter_arc`` counts the request **before**
+      decay in ``vqip_in`` and ``flow_in`` (``:766``), then ``make_decay`` (``:769``), then the
+      decayed request goes into the register as in :class:`AltQueueArc`.
+    - **End of day** (``_end_timestep``, ``:780-805``): the accumulators and ``total_decayed``
+      are reset (``:787-791``); for ``i = 0 ... L - 1`` where key ``i + 1`` exists,
+      ``queue[i] = make_decay(old[i + 1])`` and ``queue[i + 1]`` is emptied (``:798-803``); then
+      ``queue[0] = sum_vqip(queue[0], make_decay(old[0]))`` (``:805``). The merge is
+      therefore ``sum_vqip(decay(old[1]), decay(old[0]))``, the other order from
+      :meth:`AltQueueArc.end_timestep`'s ``sum_vqip(old[0], old[1])`` (``:660``; X13). The blend
+    is symmetric, so the order shows only where both slots hold no water: ``sum_vqip`` then keeps
+    its first argument's non-additive values (``core.py:109``).
+
+    Every ``make_decay`` adds its ``diff`` to ``total_decayed`` (``core.py:491``), so after an
+    end of day it holds ``diff(slot 1) + ... + diff(slot L) + diff(slot 0)``, then each entry's
+    in push order (X30). An absent key adds nothing (WSIMOD skips it; its row is empty, so its
+    ``diff`` would be an exact zero). ``total_decayed`` is carried: a ``DecayQueueTank``
+    extracts it from its ``storage`` at the next end of day (``tanks.py:694``).
+
+    ``decay`` is the element's :class:`~noodl.apps.wsimod.decay.Decay`, bound once per day by
+    the owner (D5, D15), or ``None`` when nothing decays (an empty ``decays``, or a
+    quantity-only run): the water is unchanged, but ``make_decay`` still reads the parent's
+    ``("temperature", t)`` (``core.py:484-487``), so a missing one fails as WSIMOD's
+    ``KeyError`` does. ``parent`` is the node whose bound parameters hold ``"temperature"``. No
+    method here takes a decision: the cap was evaluated at bind (the end-of-day rule,
+    ``Engine.end_day``).
+    """
+
+    carried_paths: tuple[str, ...] = ("register", "present", "total_decayed")
+
+    def __init__(
+        self,
+        spec: ArcSpec,
+        in_port,
+        out_port,
+        pollutants: Pollutants,
+        *,
+        decay=None,
+        parent=None,
+        **kwargs,
+    ) -> None:
+        self.decay = decay
+        self.parent = parent
+        super().__init__(spec, in_port, out_port, pollutants, **kwargs)
+        self.total_decayed = empty(pollutants, ())  # core.py:472
+
+    def stores(self) -> dict[str, Tensor]:
+        """The register, its key set and ``total_decayed``."""
+        return {**super().stores(), "total_decayed": self.total_decayed}
+
+    def load_stores(self, stores: Mapping[str, Tensor]) -> None:
+        stores = dict(stores)
+        if "total_decayed" in stores:
+            self.total_decayed = torch.as_tensor(stores.pop("total_decayed"), dtype=torch.float64)
+        super().load_stores(stores)
+
+    def make_decay(self, vqip: Tensor) -> tuple[Tensor, Tensor]:
+        """``DecayObj.make_decay`` (``core.py:474-492``) without the accumulation: the decayed
+        VQIP and its ``diff``."""
+        if self.decay is None:
+            if "temperature" not in getattr(self.parent, "params", {}):
+                raise KeyError(f"{self.site}: the parent has no ('temperature', t) forcing")
+            return vqip, torch.zeros_like(vqip)
+        return self.decay.make_decay(vqip)
+
+    def _on_entry(self, entered: Tensor, run: Tensor) -> Tensor:
+        """``arcs.py:769``: the request decays after ``enter_arc`` counted it."""
+        decayed, diff = self.make_decay(entered)
+        self.total_decayed = write(
+            run, sum_vqip(self.p, self.total_decayed, diff), self.total_decayed
+        )
+        return decayed
+
+    def end_timestep(self) -> None:
+        """``arcs.py:780-805`` (see the class text): reset, decay and shift, swapped merge."""
+        Arc.end_timestep(self)  # :787-791 (vqip_in, vqip_out, flow_in, flow_out)
+        p = self.p
+        total = empty(p, ())  # :789
+        old, here = self.register, self.present
+        rows = list(old.unbind(-2))
+        for i in range(self.length):  # :798-803; WSIMOD's max_travel covers only existing keys
+            key = here[..., i + 1]
+            decayed, diff = self.make_decay(old[..., i + 1, :])
+            rows[i] = torch.where(key[..., None], decayed, rows[i])
+            rows[i + 1] = torch.where(key[..., None], torch.zeros_like(rows[i + 1]), rows[i + 1])
+            total = write(key, sum_vqip(p, total, diff), total)
+        decayed, diff = self.make_decay(old[..., 0, :])  # :805; key 0 always exists
+        rows[0] = sum_vqip(p, rows[0], decayed)
+        self.total_decayed = sum_vqip(p, total, diff)
+        self.register = torch.stack(rows, dim=-2)
         self.present = torch.cat([here[..., :-1] | here[..., 1:], here[..., -1:]], dim=-1)
 
 

@@ -16,7 +16,7 @@ from noodl.apps.wsimod.arcs import ARC_CLASSES, AltQueueArc
 from noodl.apps.wsimod.config import ArcSpec, NodeSpec, WsimodNetwork
 from noodl.apps.wsimod.engine import Ctx
 from noodl.apps.wsimod.node import Node, Waste
-from noodl.apps.wsimod.tanks import DecayTank, QueueTank, ResidenceTank, Tank
+from noodl.apps.wsimod.tanks import DecayQueueTank, DecayTank, QueueTank, ResidenceTank, Tank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 
 PQ = Pollutants(("phosphate", "temperature"), ("phosphate",), ("temperature",))
@@ -620,3 +620,267 @@ def test_gradients_through_the_tanks_and_the_register_are_finite():
     assert torch.isfinite(grad).all()
     assert grad[2] == 0.0  # the masked instance's stores do not depend on its inputs
     assert grad[0] != 0.0
+
+
+# --- DecayQueueTank (tanks.py:645-696) and its DecayArcAlt (arcs.py:731-805) -----------------
+QUEUE_DECAYS = {
+    "phosphate": {"constant": 0.3, "exponent": 1.07},  # capped above about 37.8 degC
+    "temperature": {"constant": 0.01, "exponent": 1.02},  # a non-additive column decays too
+}
+
+
+class Parent:
+    """What WSIMOD's ``DecayObj`` reads the temperature from (``core.py:464-470``, ``:485``)."""
+
+    def __init__(self) -> None:
+        self.t = 0
+        self.data_input_dict = {}
+
+
+def decay_queue_tank(decays=QUEUE_DECAYS, *, n=1, times=(0,), capacity=50.0, shape=()):
+    """A noodl ``DecayQueueTank`` owned by node ``N``, its ``Decay`` and that node (the parent
+    whose bound ``temperature`` an empty ``decays`` still needs)."""
+    from noodl.apps.wsimod.decay import Decay, read_decays
+
+    parent = Node(NodeSpec("N", "Node", "Node", {}), PQ)
+    spec = read_decays("node 'N'", decays, PQ)
+    decay = Decay(PQ, spec, site="node:N/tank/internal_arc") if spec.keys else None
+    tank = DecayQueueTank(
+        PQ,
+        parent=parent,
+        decay=decay,
+        number_of_timesteps=n,
+        push_times=times,
+        capacity=capacity,
+        area=1.0,
+        datum=0.0,
+        initial_storage=0.0,
+        owner="N",
+        path="tank",
+    )
+    return tank, decay, parent
+
+
+def start_day(tank, decay, temperature, *, shape=(), d=0):
+    """The day's context and the decay bound at ``temperature`` (D5: once per day)."""
+    ctx = day(tank, p=PQ, shape=shape, d=d, record=True)
+    if decay is not None:
+        decay.bind(ctx, decay.constant, decay.exponent, torch.as_tensor(temperature, dtype=F64))
+    return ctx
+
+
+F64 = torch.float64
+PHOSPHATE = PQ.column("phosphate")
+TEMPERATURE = PQ.column("temperature")
+
+
+@pytest.mark.parametrize("n", [1, 0])
+def test_decay_queue_tank_equals_wsimods_on_random_sequences(wsimod_tanks, n):
+    """A WSIMOD ``DecayQueueTank`` (its default ``number_of_timesteps=1``, ``tanks.py:648``, and
+    0) with a dummy parent, against noodl's over 60 days of pushes at times 0-2, pulls, exact
+    pulls and ends of day: after every call ``storage``, ``active_storage``, the dense register,
+    ``present`` and ``total_decayed`` are bitwise WSIMOD's (X13, X30)."""
+    g = torch.Generator().manual_seed(90 + n)
+    u = lambda: float(torch.rand((), generator=g, dtype=F64))  # noqa: E731
+    parents = [Parent() for _ in range(B)]
+    caps = [u() * 20 + 5 for _ in range(B)]
+    theirs = [
+        wsimod_tanks.DecayQueueTank(
+            decays=QUEUE_DECAYS,
+            parent=parent,
+            number_of_timesteps=n,
+            capacity=cap,
+            area=1.0,
+            datum=0.0,
+            initial_storage=0,
+        )
+        for parent, cap in zip(parents, caps, strict=True)
+    ]
+    ours, decay, _ = decay_queue_tank(n=n, times=(0, 1, 2), capacity=torch.tensor(caps, dtype=F64))
+    length = ours.internal_arc.length
+    assert length == max(1, n + 2)
+    w = Worst()
+    ops = ["push", "push", "push", "pull", "pull_exact"]
+    capped = 0
+
+    def compare(label):
+        arc = ours.internal_arc
+        stores = {
+            "storage": torch.broadcast_to(ours.storage, (B, 1 + PQ.K)),
+            "active_storage": torch.broadcast_to(ours.active_storage, (B, 1 + PQ.K)),
+            "total_decayed": torch.broadcast_to(arc.total_decayed, (B, 1 + PQ.K)),
+        }
+        register = torch.broadcast_to(arc.register, (B, length + 1, 1 + PQ.K))
+        present = torch.broadcast_to(arc.present, (B, length + 1))
+        for b, tank in enumerate(theirs):
+            w.vqip(f"{label} [{b}] storage", stores["storage"][b], tank.storage)
+            w.vqip(
+                f"{label} [{b}] active_storage", stores["active_storage"][b], tank.active_storage
+            )
+            w.vqip(
+                f"{label} [{b}] total_decayed",
+                stores["total_decayed"][b],
+                tank.internal_arc.total_decayed,
+            )
+            assert max(tank.internal_arc.queue) <= length
+            rows, keys = wsimod_register(tank.internal_arc.queue, length)
+            for i, row in enumerate(rows):
+                w.vqip(f"{label} [{b}] register[{i}]", register[b, i], row)
+            assert present[b].tolist() == keys, label
+
+    for d in range(60):
+        temperatures = [-5 + 50 * u() for _ in range(B)]
+        for parent, temperature in zip(parents, temperatures, strict=True):
+            parent.t = d
+            parent.data_input_dict[("temperature", d)] = temperature
+        ctx = start_day(ours, decay, temperatures, shape=(B,), d=d)
+        capped += int(ctx.decisions[0].outcome.sum())  # cap:phosphate, the first decision
+        for k in range(int(torch.randint(1, 6, (), generator=g))):
+            op = ops[int(torch.randint(len(ops), (), generator=g))]
+            time = int(torch.randint(3, (), generator=g))
+            active = torch.rand(B, generator=g) < 0.85
+            requests = [random_vqip(g, 6.0) for _ in range(B)]
+            req = stack(requests)
+            if op == "push":
+                got = ours.push_storage(req, active=active, time=time)
+            elif op == "pull":
+                got = ours.pull_storage(req, active=active)
+            else:
+                got = ours.pull_storage_exact(req, active=active)
+            got = torch.broadcast_to(got, (B, 1 + PQ.K))
+            for b, tank in enumerate(theirs):
+                if not active[b]:
+                    continue
+                r = dict(requests[b])
+                if op == "push":
+                    ref = tank.push_storage(r, time=time)
+                elif op == "pull":
+                    ref = tank.pull_storage(r)
+                else:
+                    ref = tank.pull_storage_exact(r)
+                w.vqip(f"n={n} day {d} call {k} {op} [{b}] reply", got[b], ref)
+            compare(f"n={n} day {d} after call {k} {op}")
+        ours.end_timestep()
+        for tank in theirs:
+            tank.end_timestep()
+        compare(f"n={n} end of day {d}")
+    assert capped > 0  # the cap bound on some hot days
+    assert w.worst == 0.0
+
+
+def test_the_decay_reaches_storage_a_day_late():
+    """X13: at the end of day d ``storage`` loses the ``total_decayed`` held before the reset,
+    day d's entry decay plus day d - 1's end-of-day decay; the queue holds 5 less every diff
+    applied so far. A factor of exactly 0.1 (``1.0 ** (T - 20)`` is 1)."""
+    tank, decay, _ = decay_queue_tank({"phosphate": {"constant": 0.1, "exponent": 1.0}})
+    arc = tank.internal_arc
+    start_day(tank, decay, 15.0)
+    tank.push_storage(PQ.to_vqip({"volume": 10.0, "phosphate": 5.0}), active=TRUE, time=0)
+    assert tank.storage[PHOSPHATE].item() == 5.0  # the undecayed push (tanks.py:536-538)
+    entry = arc.total_decayed[PHOSPHATE].item()
+    assert entry == 0.5  # decayed on entry (arcs.py:769)
+    assert arc.present.tolist() == [True, True]  # under key 1: number_of_timesteps is 1
+    end_of_day = [0.0]  # the end-of-day diffs, day -1 has none
+    applied = entry
+    for d in range(4):
+        if d:
+            start_day(tank, decay, 15.0, d=d)
+        held = arc.total_decayed[PHOSPHATE].item()
+        assert held == (entry if d == 0 else 0.0) + end_of_day[-1]
+        before = tank.storage[PHOSPHATE].item()
+        tank.end_timestep()
+        assert tank.storage[PHOSPHATE].item() == before - held  # tanks.py:694
+        end_of_day.append(arc.total_decayed[PHOSPHATE].item())
+        applied += end_of_day[-1]
+        queued = arc.register[..., PHOSPHATE].sum().item()
+        assert queued == pytest.approx(5.0 - applied, rel=1e-15, abs=0.0)
+        # the lag: storage is the queue of the day before
+        assert tank.storage[PHOSPHATE].item() == pytest.approx(queued + end_of_day[-1], rel=1e-15)
+    assert end_of_day[1:] == pytest.approx([0.45, 0.405, 0.3645, 0.32805], rel=1e-15)
+    assert tank.active_storage.tolist() == [0.0, 0.0, 0.0]  # no update_queue at the end of day
+
+
+def test_the_end_of_day_merge_is_swapped():
+    """``arcs.py:805``: the new slot 0 is ``sum_vqip(decay(old[1]), decay(old[0]))``, the other
+    order from ``AltQueueArc``'s ``sum_vqip(old[0], old[1])`` (``:660``). The blend
+    ``(t2 V2 + t1 V1) / V`` is symmetric in IEEE arithmetic, so the order shows only where the
+    merged volume is 0 and ``sum_vqip`` keeps its first argument's ``temperature``
+    (``core.py:109-114``): two drained slots (``pull_set_active`` leaves a row's
+    non-additive values behind) with different temperatures."""
+    from noodl.apps.wsimod.vqip import sum_vqip
+
+    tank, decay, _ = decay_queue_tank({"phosphate": {"constant": 0.1, "exponent": 1.07}})
+    start_day(tank, decay, 23.0)
+    arc = tank.internal_arc
+    for old0, old1 in (
+        (
+            {"volume": 0.0, "phosphate": 0.0, "temperature": 7.0},
+            {"volume": 0.0, "phosphate": 0.0, "temperature": 13.0},
+        ),
+        (
+            {"volume": 2.0, "phosphate": 0.3, "temperature": 7.1},
+            {"volume": 3.0, "phosphate": 0.7, "temperature": 13.3},
+        ),
+    ):
+        old = torch.stack([PQ.to_vqip(old0), PQ.to_vqip(old1)])
+        arc.register, arc.present = old.clone(), torch.tensor([True, True])
+        tank.end_timestep()
+        d0, d1 = decay.make_decay(old[0])[0], decay.make_decay(old[1])[0]
+        assert torch.equal(arc.register[0], sum_vqip(PQ, d1, d0))
+        assert torch.equal(arc.register[1], torch.zeros(1 + PQ.K, dtype=F64))
+        if old0["volume"] == 0:  # the test discriminates: the other order keeps 7.0
+            assert arc.register[0, TEMPERATURE].item() == 13.0
+            assert sum_vqip(PQ, d0, d1)[TEMPERATURE].item() == 7.0
+        else:  # a positive volume blends the same in either order
+            assert torch.equal(sum_vqip(PQ, d0, d1), sum_vqip(PQ, d1, d0))
+
+
+def test_water_reaching_slot_zero_waits_for_the_next_push():
+    """Plan Review Focus 1, X13: water that the end of day d moves to slot 0 is not flushed
+    (``DecayQueueTank._end_timestep`` has no ``update_queue``). With no push on day d + 1 it
+    stays there, decays again at the end of day d + 1, and joins ``active_storage`` only at the
+    owner's ``update_queue`` (``QueueGroundwater.distribute``, ``storage.py:352``)."""
+    tank, decay, _ = decay_queue_tank({"phosphate": {"constant": 0.1, "exponent": 1.0}})
+    arc = tank.internal_arc
+    start_day(tank, decay, 15.0)
+    tank.push_storage(PQ.to_vqip({"volume": 4.0, "phosphate": 2.0}), active=TRUE, time=0)
+    tank.end_timestep()  # day 0: key 1 moves to slot 0, decayed
+    assert arc.register[0].tolist() == pytest.approx([4.0, 1.62, 0.0], rel=1e-15)
+    start_day(tank, decay, 15.0, d=1)  # day 1: no push
+    tank.end_timestep()
+    slot0 = arc.register[0, PHOSPHATE].item()
+    assert slot0 == pytest.approx(1.62 * 0.9, rel=1e-15)  # decayed again in slot 0
+    assert tank.active_storage.tolist() == [0.0, 0.0, 0.0]
+    start_day(tank, decay, 15.0, d=2)
+    arc.update_queue(active=TRUE)  # distribute's (storage.py:352)
+    assert tank.active_storage.tolist() == [4.0, slot0, 0.0]
+    assert arc.register[0].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_active_storage_never_decays():
+    """The TODO at ``tanks.py:692-693``: ``end_timestep`` decays the queue only. Water that
+    entered with total time 0 (``number_of_timesteps`` 0) decayed once, on entry."""
+    tank, decay, _ = decay_queue_tank({"phosphate": {"constant": 0.1, "exponent": 1.0}}, n=0)
+    start_day(tank, decay, 15.0)
+    tank.push_storage(PQ.to_vqip({"volume": 4.0, "phosphate": 2.0}), active=TRUE, time=0)
+    active = tank.active_storage.clone()
+    assert active.tolist() == pytest.approx([4.0, 1.8, 0.0], rel=1e-15)
+    for d in range(3):
+        start_day(tank, decay, 15.0, d=d)
+        tank.end_timestep()
+        assert torch.equal(tank.active_storage, active)
+    assert torch.equal(tank.storage, active)  # the entry decay, extracted on day 0
+
+
+def test_a_decay_queue_tank_with_no_decays_needs_the_parents_temperature():
+    """``make_decay`` reads the temperature even over an empty ``decays`` (``core.py:484-487``)."""
+    tank, decay, parent = decay_queue_tank({})
+    assert decay is None
+    day(tank, p=PQ)
+    with pytest.raises(KeyError, match="temperature"):
+        tank.push_storage(PQ.to_vqip({"volume": 1.0}), active=TRUE, time=0)
+    parent.bind({"temperature": torch.tensor(10.0, dtype=F64)})
+    tank.push_storage(PQ.to_vqip({"volume": 1.0, "phosphate": 0.5}), active=TRUE, time=0)
+    tank.end_timestep()
+    assert tank.internal_arc.register[0].tolist() == [1.0, 0.5, 0.0]
+    assert tank.storage.tolist() == [1.0, 0.5, 0.0]

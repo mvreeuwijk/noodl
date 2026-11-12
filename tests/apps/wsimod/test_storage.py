@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from noodl.apps.wsimod import build_model, initial_drivers, initial_state
-from noodl.apps.wsimod.arcs import ARC_CLASSES
+from noodl.apps.wsimod.arcs import ARC_CLASSES, DecayArcAlt
 from noodl.apps.wsimod.config import ArcSpec, NodeSpec, read_wsimod_config
 from noodl.apps.wsimod.engine import Ctx, make_node
 from noodl.apps.wsimod.node import NODE_CLASSES, Waste
@@ -32,6 +32,7 @@ from noodl.apps.wsimod.storage import (
     riverrc,
 )
 from noodl.apps.wsimod.structure import forcing_readers
+from noodl.apps.wsimod.tanks import DecayQueueTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from tests.apps.wsimod._replay import ScriptedArc, StoreNode
 from tests.verification._wsimod_reference import ArcCall
@@ -211,15 +212,101 @@ def test_a_decaying_groundwater_needs_a_filename_override(tmp_path):
     assert drivers["wsimod.temperature"].shape == (3, 1)
 
 
-def test_a_decays_dict_on_a_queue_groundwater_is_refused_until_its_filename_override():
+def _queue_override(path, **values) -> dict:
+    return {"type_": "QueueGroundwater", "name": "r", "filename": str(path), **values}
+
+
+def _temperature_file(tmp_path, days=3):
+    path = tmp_path / "temperature.csv"
+    rows = "".join(f"temperature,2000-01-{k + 1:02d},15.0\n" for k in range(days))
+    path.write_text("variable,time,value\n" + rows, encoding="utf-8")
+    return path
+
+
+def test_a_decaying_queue_groundwater_needs_a_filename_override(tmp_path):
+    """As a ``Groundwater`` (X11): the configured forcing is lost (``storage.py:291-292``), so a
+    ``decays`` dict, empty or not, needs an override's temperature; with one it builds a
+    ``DecayQueueTank`` (``storage.py:307-315``)."""
     network = read_wsimod_config(_decaying("QueueGroundwater", decays=None))
     spec = network.nodes[0]
     assert NODE_CLASSES["QueueGroundwater"].validate(spec, network, pollutants=True) == []
-    spec.parameters["decays"] = DECAYS
-    with pytest.raises(ValueError, match=r"decays.*filename"):
-        NODE_CLASSES["QueueGroundwater"].validate(spec, network, pollutants=True)
-    with pytest.raises(ValueError, match=r"decays.*filename"):
-        read_wsimod_config(_decaying("QueueGroundwater", decays={}))
+    for decays in (DECAYS, {}):
+        with pytest.raises(ValueError, match=r"QueueGroundwater.*filename"):
+            build_model(read_wsimod_config(_decaying("QueueGroundwater", decays=decays)))
+    override = _queue_override(_temperature_file(tmp_path))
+    network = read_wsimod_config(_decaying("QueueGroundwater", overrides=override))
+    model, _, drivers = build_model(network)
+    assert model.unread == ["r.data_input_dict"]  # the decoy
+    assert drivers["wsimod.temperature"].shape == (3, 1)
+    tank = model.wsimod_day.engine.nodes["r"].tank
+    assert isinstance(tank, DecayQueueTank) and isinstance(tank.internal_arc, DecayArcAlt)
+    assert model.wsimod_day.state_labels("wsimod.total_decayed") == [("r", "tank.internal_arc")]
+
+
+def _bound_queue_groundwater(network):
+    spec = network.nodes[0]
+    node = make_node(spec, network, network.pollutants)
+    node.ctx = Ctx(network.pollutants, FA, torch.Size(()), day=0, node_names=["r"])
+    node.bind(node.configured_parameters(network.dates[0]))
+    return node
+
+
+def test_decaying_delays_a_queue_groundwater_by_one_day(tmp_path):
+    """X12: ``DecayQueueTank``'s default ``number_of_timesteps`` is 1 (``tanks.py:648``) and
+    ``QueueGroundwater`` passes none (``storage.py:308-315``): with time-area ``{0: 0.5, 1:
+    0.5}``, WSIMOD's queue holds the push under keys 1 and 2, and so does noodl's register;
+    without ``decays`` the half under time 0 is active at once."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    push = {"volume": 4.0, "phosphate": 0.4, "ammonia": 0.2}
+    for decays, keys in ((DECAYS, [1, 2]), (None, [1])):
+        override = _queue_override(_temperature_file(tmp_path)) if decays else None
+        mapping = _decaying(
+            "QueueGroundwater",
+            decays=decays,
+            overrides=override,
+            timearea={0: 0.5, 1: 0.5},
+            capacity=100.0,
+        )
+        model = wsimod_model(mapping)
+        theirs = model.nodes["r"]
+        theirs.t = model.dates[0]
+        theirs.push_set(dict(push))
+        queue = theirs.tank.internal_arc.queue
+        assert sorted(k for k, v in queue.items() if v["volume"] > 0) == keys
+        ours = _bound_queue_groundwater(read_wsimod_config(mapping))
+        ours.push_set(ours.p.to_vqip(push), "default", active=torch.tensor(True))
+        register = ours.tank.internal_arc.register
+        assert [t for t in range(register.shape[-2]) if register[t, 0] > 0] == keys
+        for t in keys:
+            assert ours.tank.internal_arc.present[t]
+            assert register[t, 0].item() == queue[t]["volume"]
+            assert register[t, 1].item() == queue[t]["phosphate"]
+        active = 0.0 if decays else 2.0  # the share under time 0
+        assert ours.tank.active_storage[0].item() == theirs.tank.active_storage["volume"] == active
+
+
+def test_number_of_timesteps_override(tmp_path):
+    """X28: on a decaying ``QueueGroundwater`` the override ``number_of_timesteps`` sets the
+    tank's and its internal arc's, as ``DecayQueueTank.apply_overrides`` does
+    (``tanks.py:682-685``); on a non-decaying one it is refused by name, as in 3a."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    override = _queue_override(_temperature_file(tmp_path), number_of_timesteps=0)
+    mapping = _decaying("QueueGroundwater", overrides=override, timearea={0: 0.5, 2: 0.5})
+    tank = wsimod_model(mapping).nodes["r"].tank
+    assert (tank.number_of_timesteps, tank.internal_arc.number_of_timesteps) == (0, 0)
+    ours = _bound_queue_groundwater(read_wsimod_config(mapping)).tank
+    assert (ours.number_of_timesteps, ours.internal_arc.number_of_timesteps) == (0, 0)
+    assert ours.internal_arc.length == 2  # 0 + the largest time-area key
+    plain = _decaying("QueueGroundwater", decays=None, overrides=dict(override))
+    with pytest.raises(ValueError, match="number_of_timesteps"):
+        build_model(read_wsimod_config(plain))
+    bad = _queue_override(_temperature_file(tmp_path), number_of_timesteps=1.5)
+    with pytest.raises(ValueError, match="number_of_timesteps"):
+        build_model(read_wsimod_config(_decaying("QueueGroundwater", overrides=bad)))
 
 
 @pytest.mark.parametrize("cls", ["Storage", "Reservoir", "RiverReservoir", "River"])

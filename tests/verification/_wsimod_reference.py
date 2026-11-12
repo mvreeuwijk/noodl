@@ -445,8 +445,11 @@ def _store_paths(node) -> tuple[str, ...]:
     cls = NODE_CLASSES[type(node).__qualname__]
     if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
         return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
-    if type(getattr(node, "tank", None)).__name__ == "DecayTank":  # D8: a per-day store
+    tank = type(getattr(node, "tank", None)).__name__
+    if tank == "DecayTank":  # D8: a per-day store
         return (*cls.store_paths, "tank.total_decayed")
+    if tank == "DecayQueueTank":  # D8: carried, extracted at the next end of day
+        return (*cls.store_paths, "tank.internal_arc.total_decayed")
     return cls.store_paths
 
 

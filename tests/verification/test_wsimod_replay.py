@@ -114,6 +114,39 @@ def test_decay_storage_reaches_the_cap_and_a_factor_of_exactly_one():
     assert "node:pond/tank/make_decay/cap:ammonia" not in capped
 
 
+@pytest.mark.parametrize("case", ["decay_queue_groundwater", "decay_queue_groundwater_n0"])
+def test_decay_queue_groundwater_water_waits_in_slot_zero_for_distribute(case):
+    """Plan Review Focus 1, X13 (from WSIMOD's captured queue): on the days nothing is pushed
+    into ``gw`` the water the last end of day moved to slot 0 is still there when
+    ``distribute`` starts, and its ``update_queue`` (``storage.py:352``) moves it into
+    ``active_storage``; ``DecayQueueTank``'s end of day does not flush it. The internal arc's
+    cap binds on some days (``ammonia``) and the queue keys show ``number_of_timesteps``
+    (X12: 1, X28: 0)."""
+    fa = 1e-11  # WSIMOD's FLOAT_ACCURACY: a smaller push returns before the queue
+    calls = captured(case)["gw"]
+    flushed = {c.day for c in calls if c.method == "push_set" and c.vqip["volume"] >= fa}
+    waiting = []
+    for c in calls:
+        if c.method != "distribute":
+            continue
+        slot0 = c.pre["tank.internal_arc.register"][0]["volume"]
+        if slot0 > 0:
+            waiting.append(c.day)
+            assert c.post["tank.internal_arc.register"][0]["volume"] == 0.0  # update_queue
+    assert waiting and set(waiting).isdisjoint(flushed)
+    keys = {k for c in calls if c.method == "push_set" for k in c.post["tank.internal_arc.present"]}
+    assert keys == ({0, 1, 2, 3} if case == "decay_queue_groundwater" else {0, 1, 2})
+    day = WsimodDay(read_wsimod_config(CASES[case].build()), pollutants=True)
+    day.record_decisions = True
+    capped = [
+        bool(d.outcome)
+        for _, ctx, _ in day.run_days(days=CASES[case].days)
+        for d in ctx.decisions
+        if d.site == "node:gw/tank/internal_arc/make_decay/cap:ammonia"
+    ]
+    assert any(capped) and not all(capped)
+
+
 def test_the_replay_notices_a_difference():
     """A reply moved by 1e-11 x scale, or a reordered arc script, fails the replay."""
     spec = CASES["three_out_arcs"]

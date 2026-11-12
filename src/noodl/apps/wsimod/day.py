@@ -44,11 +44,13 @@ State layout (D10; spec, State). Every key has a leading batch shape; the rows a
   anchors ``(arc, direction)``.
 - ``"wsimod.liquor"`` (every ``WWTW`` and ``FWTW``), ``"wsimod.previous_pulled"`` (``FWTW``)
   and ``"wsimod.treated"`` (``WWTW``), ``(..., n, 1+K)`` by node.
-- ``"wsimod.total_decayed"`` ``(..., n_rows, 1+K)``: the decayed mass of the last end of day of
-  each ``Land`` surface, ``(node, "surfaces.<name>")`` (X35: the attribute path, where
-  ``"wsimod.storage"`` has ``"surface:<name>"``), in the state layout's order (D7). The rows
-  exist when ``nitrite`` is a pollutant: the next day's ``Surface.run`` converts them
-  (``land.py:427-439``).
+- ``"wsimod.total_decayed"`` ``(..., n_rows, 1+K)``: the ``total_decayed`` of each decaying
+  ``QueueGroundwater``'s ``DecayQueueTank`` internal arc, ``(node, "tank.internal_arc")``
+  (extracted from the tank's ``storage`` at the next end of day, ``tanks.py:694``), and the
+  decayed mass of the last end of day of each ``Land`` surface, ``(node, "surfaces.<name>")``
+  (X35: the attribute path, where ``"wsimod.storage"`` has ``"surface:<name>"``), in the state
+  layout's order (D7). A surface's rows exist when ``nitrite`` is a pollutant: the next day's
+  ``Surface.run`` converts them (``land.py:427-439``).
 
 Units (W20): volumes ``m3``, flows and capacities ``m3/d``, additive pollutants ``kg``,
 non-additive ones by name (``temperature`` ``degC``); never converted.
@@ -74,7 +76,7 @@ from noodl.apps.wsimod.structure import (
     orchestration_plan,
     river_order,
 )
-from noodl.apps.wsimod.tanks import DecayTank
+from noodl.apps.wsimod.tanks import DecayQueueTank, DecayTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from noodl.refs import Field
 
@@ -105,7 +107,8 @@ STATE_KEYS = (
 # keys that are not water held: a QueueTank's active storage is inside its storage, and an
 # FWTW's previous_pulled is the quality of yesterday's pulled water (W75)
 # a surface's total_decayed is mass that left the storage at the end of the day and returns
-# through the next day's carry-over (land.py:427-439), so it is not held either
+# through the next day's carry-over (land.py:427-439), and a DecayQueueTank's is decay its
+# storage has not lost yet (tanks.py:694), so neither is held
 _NOT_HELD = ("wsimod.active_storage", "wsimod.previous_pulled", "wsimod.total_decayed")
 # keys of one value per row, not a VQIP
 _FLAT_KEYS = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
@@ -123,7 +126,10 @@ _STATE_TEXT = {
     "wsimod.liquor": "every WWTW's and FWTW's liquor (VQIP)",
     "wsimod.previous_pulled": "every FWTW's previous day's pulled water (VQIP)",
     "wsimod.treated": "every WWTW's treated water (VQIP)",
-    "wsimod.total_decayed": "every Land surface's decayed mass of the last end of day (VQIP)",
+    "wsimod.total_decayed": (
+        "every DecayQueueTank internal arc's total_decayed and every Land surface's decayed "
+        "mass of the last end of day (VQIP)"
+    ),
 }
 
 # D6 parameter units (W20); a parameter not listed has none declared
@@ -372,12 +378,13 @@ class WsimodDay:
 
     def _recorded_tank(self, node: str, attribute: str) -> bool:
         """Whether ``record_all`` reports the tank: it lists ``Tank``, ``QueueTank`` and
-        ``ResidenceTank`` by their exact class (``model.py:1123``), so a ``DecayTank`` drops out
-        of the ``tank_*`` results while its storage stays in the state (X40)."""
+        ``ResidenceTank`` by their exact class (``model.py:1123``), so a ``DecayTank`` or a
+        ``DecayQueueTank`` drops out of the ``tank_*`` results while its storage stays in the
+        state (X40)."""
         tank = self.engine.nodes[node]
         for part in attribute.split("."):
             tank = getattr(tank, part)
-        return not isinstance(tank, DecayTank)
+        return not isinstance(tank, (DecayTank, DecayQueueTank))
 
     def to(self, device=None, dtype: torch.dtype | None = None) -> WsimodDay:
         """``Model.to`` hook: the port is float64 on the CPU only (bitwise equality with
@@ -634,6 +641,9 @@ class WsimodDay:
                     put("wsimod.travel_queue_present", node, present, rows, (length,))
                 elif path in ("liquor", "previous_pulled", "treated"):
                     put(f"wsimod.{path}", node, path, [spec.name], (width,))
+                elif path.endswith(".internal_arc.total_decayed"):
+                    # X35: the attribute path of the internal arc (D7)
+                    put("wsimod.total_decayed", node, path, [(spec.name, head)], (width,))
                 elif path.startswith("surfaces.") and last == "total_decayed":
                     # X35: the attribute path, not "surface:<name>" (D7)
                     surface = path.split(".")[1]

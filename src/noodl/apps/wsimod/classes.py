@@ -249,7 +249,10 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     "Groundwater": frozenset(  # storage.py:205-220
         {"residence_time", "infiltration_threshold", "infiltration_pct"}
     ),
-    "QueueGroundwater": frozenset({"timearea"}),  # storage.py:317-328
+    # storage.py:317-328 (``timearea``); ``decays`` comes from Storage's chain, and
+    # ``number_of_timesteps`` reaches the tank's apply_overrides (tanks.py:682-685, X28), which
+    # QueueGroundwater.validate accepts only with ``decays`` (a DecayQueueTank's)
+    "QueueGroundwater": frozenset({"timearea", "decays", "number_of_timesteps"}),
     # storage.py:610-658; the biochemistry parameters it also sets belong to the refused
     # nitrate River (3b)
     "River": frozenset({"length", "width", "velocity", "damp", "mrf"}),

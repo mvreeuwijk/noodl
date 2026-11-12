@@ -468,7 +468,8 @@ REFUSALS = [
         "depth",
     ),
     (_node(type_="Groundwater", decays={"phosphate": {"constant": 1}}), "exponent"),
-    (_node(type_="QueueGroundwater", decays={}), "filename"),
+    # a DecayQueueTank's number_of_timesteps is an override only (tanks.py:682-685, X28)
+    (_node(type_="QueueGroundwater", decays={}, number_of_timesteps=0), "number_of_timesteps"),
     # read_decays at node level (Task 5's refusals)
     (_node(type_="Storage", decays=[1]), "decays must be a mapping"),
     (_node(type_="Storage", decays={"unobtainium": {"constant": 1, "exponent": 1}}), "unobtainium"),

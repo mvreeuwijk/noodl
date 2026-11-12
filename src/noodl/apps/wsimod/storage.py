@@ -18,9 +18,10 @@ events (D13).
 ``decays.exponent`` and the day's ``temperature`` (D15), and refuses a changed inert entry on a
 node whose ``decays`` does not list the pollutant (X9). A ``Groundwater`` and a
 ``QueueGroundwater`` lose their configured forcing and read their temperature only from a
-``filename`` override (``storage.py:202-203``, ``:291-292``, X11). A ``Groundwater``'s ``decays``
-needs such an override (:meth:`Groundwater.validate`); a ``QueueGroundwater``'s is refused until
-a later task of sub-project 3b.
+``filename`` override (``storage.py:202-203``, ``:291-292``, X11), so a decaying one needs such
+an override (:meth:`Groundwater.validate`, :meth:`QueueGroundwater.validate`). A decaying
+``QueueGroundwater``'s tank is a :class:`~noodl.apps.wsimod.tanks.DecayQueueTank`
+(``storage.py:307-315``).
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
 from noodl.apps.wsimod.decay import Decay, DecaySpec, check_inert, read_decays
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
-from noodl.apps.wsimod.tanks import DecayTank, QueueTank, Tank, bind_timearea
+from noodl.apps.wsimod.tanks import DecayQueueTank, DecayTank, QueueTank, Tank, bind_timearea
 from noodl.apps.wsimod.vqip import (
     Pollutants,
     extract_vqip,
@@ -165,9 +166,6 @@ class Storage(Node):
     # storage.py:76: the storage change is the engine's, from the stores (D11); a DecayTank's
     # decayed mass leaves the system (tanks.py:449-457)
     mass_balance: ClassVar[dict[str, str]] = {"DecayTank.decayed": "out"}
-    # whether a ``decays`` dict is accepted (a QueueGroundwater's temperature comes from a
-    # ``filename`` override only, X11: a later task)
-    supports_decays: ClassVar[bool] = True
     # parameter name -> WSIMOD default, the node's own numeric parameters (bind replaces them)
     parameter_defaults: ClassVar[dict[str, float]] = {}
 
@@ -355,12 +353,6 @@ class Storage(Node):
         decays = spec.parameters.get("decays")
         where = f"node {spec.name!r}"
         if decays is not None:
-            if not cls.supports_decays:
-                raise ValueError(
-                    f"{where}: 'decays' {decays!r} is not supported on a {cls.__name__} yet: "
-                    "its temperature comes from a 'filename' override only (storage.py:202-203, "
-                    ":291-292), which sub-project 3b adds later"
-                )
             read_decays(where, decays, network.pollutants)
             for date, label in zip(network.dates, network.date_labels, strict=True):
                 if ("temperature", date) not in spec.data:
@@ -427,22 +419,30 @@ class Groundwater(Storage):
     def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
         """``residence_time`` divides the volume (``storage.py:224``) and the root's argument
         must not be negative (``:236``: a negative base to ``0.5`` is a complex number)."""
-        if spec.parameters.get("decays") is not None:
-            # storage.py:202-203: the configured forcing is lost, so the temperature the
-            # DecayTank reads (core.py:484-487) is the ``filename`` override's (X11)
-            for date, label in zip(network.dates, network.date_labels, strict=True):
-                if ("temperature", date) not in spec.data:
-                    raise ValueError(
-                        f"node {spec.name!r}: a Groundwater with 'decays' needs a ('temperature', "
-                        f"t) forcing on {label} from a 'filename' override: WSIMOD loses its "
-                        "configured data_input_dict (storage.py:202-203)"
-                    )
+        _needs_filename_temperature(spec, network, "Groundwater", "storage.py:202-203")
         ignored = super().validate(spec, network, pollutants=pollutants)
         if float(spec.parameters.get("residence_time", 200)) == 0:
             raise ValueError(f"node {spec.name!r}: residence_time is 0 (storage.py:224 divides)")
         if float(spec.parameters.get("infiltration_pct", 0)) < 0:
             raise ValueError(f"node {spec.name!r}: infiltration_pct is negative (storage.py:236)")
         return ignored
+
+
+def _needs_filename_temperature(
+    spec: NodeSpec, network: WsimodNetwork, cls: str, lines: str
+) -> None:
+    """A decaying ``Groundwater`` or ``QueueGroundwater`` loses its configured forcing, so the
+    temperature its decay reads (``core.py:484-487``) is a ``filename`` override's (X11); a
+    missing date is refused by name."""
+    if spec.parameters.get("decays") is None:
+        return
+    for date, label in zip(network.dates, network.date_labels, strict=True):
+        if ("temperature", date) not in spec.data:
+            raise ValueError(
+                f"node {spec.name!r}: a {cls} with 'decays' needs a ('temperature', t) forcing "
+                f"on {label} from a 'filename' override: WSIMOD loses its configured "
+                f"data_input_dict ({lines})"
+            )
 
 
 class QueueGroundwater(Storage):
@@ -454,10 +454,23 @@ class QueueGroundwater(Storage):
     then replaces ``self.tank`` by the ``QueueTank`` (``:301``) without rebinding it. The check
     therefore reports ``max(capacity - initial storage, 0)`` for ever, which ``check_tank``
     reproduces (it is never pushed into). The pull handlers are rebound (``:297-298``).
+
+    With ``decays`` (a dict) the tank is a :class:`~noodl.apps.wsimod.tanks.DecayQueueTank`
+    (``:307-315``), whose internal arc decays the queued water and whose end of day extracts
+    the previous day's decay from ``storage`` and does not flush slot 0 (X13). Its
+    ``number_of_timesteps`` is WSIMOD's default 1 (``tanks.py:648``, X12); the override
+    ``number_of_timesteps``, which ``DecayQueueTank.apply_overrides`` consumes
+    (``tanks.py:682-685``), sets it (X28) and is refused on a non-decaying node. The internal
+    arc's ``total_decayed`` is carried (``"tank.internal_arc.total_decayed"``, D8). The
+    temperature is a ``filename`` override's (``:291-292``, X11).
     """
 
     wsimod_type: ClassVar[str] = "Groundwater"
-    supports_decays: ClassVar[bool] = False  # its temperature needs a filename override (X11)
+    # the DecayQueueTank's lagged extraction leaves the system (tanks.py:694)
+    mass_balance: ClassVar[dict[str, str]] = {
+        **Storage.mass_balance,
+        "DecayQueueTank.decayed": "out",
+    }
     store_paths: ClassVar[tuple[str, ...]] = (
         "tank.storage",
         "tank.active_storage",
@@ -486,11 +499,14 @@ class QueueGroundwater(Storage):
             path="check_tank",
         )
         self.push_check_handler["default"] = self._push_check_frozen
+        if isinstance(self.tank, DecayQueueTank):  # D8: carried, extracted a day later
+            self.store_paths = (*type(self).store_paths, "tank.internal_arc.total_decayed")
+            self.carried_paths = self.store_paths
 
     def _make_tank(self, values: Mapping) -> QueueTank:
-        return QueueTank(
-            self.p,
-            number_of_timesteps=0,
+        """``storage.py:300-315``: a ``QueueTank`` (``number_of_timesteps`` 0) for ``decays``
+        ``None``, a ``DecayQueueTank`` (default 1, or the override's) for a dict."""
+        kwargs = dict(
             push_times=tuple(self.timearea),
             capacity=_f64(values.get("capacity", 0)),
             area=_f64(values.get("area", 0)),
@@ -498,6 +514,18 @@ class QueueGroundwater(Storage):
             initial_storage=self._initial_storage(values),
             owner=self.name,
             path="tank",
+        )
+        if values.get("decays") is None:
+            return QueueTank(self.p, number_of_timesteps=0, **kwargs)
+        spec = self.decay_spec
+        site = f"node:{self.name}/tank/internal_arc"
+        decay = Decay(self.p, spec, site=site) if spec.keys else None
+        return DecayQueueTank(
+            self.p,
+            parent=self,
+            decay=decay,
+            number_of_timesteps=values.get("number_of_timesteps", 1),  # tanks.py:648, :682-685
+            **kwargs,
         )
 
     def _set_handlers(self) -> None:
@@ -624,10 +652,21 @@ class QueueGroundwater(Storage):
 
     @classmethod
     def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
-        """Every time-area key and the tank's ``number_of_timesteps`` (0 here) are whole numbers
-        of days >= 0 (W50; an ``AltQueueArc`` shifts integer keys only, ``arcs.py:653-660``)."""
-        ignored = super().validate(spec, network, pollutants=pollutants)
+        """Every time-area key and the tank's ``number_of_timesteps`` are whole numbers of days
+        >= 0 (W50; an ``AltQueueArc`` shifts integer keys only, ``arcs.py:653-660``). The
+        ``number_of_timesteps`` override is a ``DecayQueueTank``'s (``tanks.py:682-685``, X28):
+        on a node without ``decays`` it is refused, as in 3a. A decaying node's temperature is a
+        ``filename`` override's (X11)."""
         where = f"node {spec.name!r}"
+        _needs_filename_temperature(spec, network, "QueueGroundwater", "storage.py:291-292")
+        ignored = super().validate(spec, network, pollutants=pollutants)
+        if "number_of_timesteps" in spec.parameters:
+            if spec.parameters.get("decays") is None:
+                raise ValueError(
+                    f"{where}: the override 'number_of_timesteps' is accepted only on a "
+                    "QueueGroundwater with 'decays' (its DecayQueueTank's, tanks.py:682-685)"
+                )
+            check_travel_time(where, "number_of_timesteps", spec.parameters["number_of_timesteps"])
         timearea = spec.parameters.get("timearea", {0: 1})
         if not isinstance(timearea, Mapping) or not timearea:
             raise ValueError(f"{where}: timearea {timearea!r} is not a non-empty mapping")

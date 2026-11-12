@@ -101,8 +101,8 @@ refused by name.
   `Reservoir`, `RiverReservoir` and `River`: a key per decaying pollutant, each with exactly
   `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
   forcing on every date. A `Groundwater` loses its configured forcing (`storage.py:202-203`), so
-  its dict needs a `filename` override that gives `temperature` on every date. On a
-  `QueueGroundwater` a dict is refused until a later task of sub-project 3b. A surface takes
+  its dict needs a `filename` override that gives `temperature` on every date, and so does a
+  `QueueGroundwater`'s (`storage.py:291-292`), which builds a `DecayQueueTank`. A surface takes
   `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
   air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
@@ -148,8 +148,11 @@ compute derived quantities.
   `soil_temp_w_deep`, `soil_temp_deep`) are state attributes in WSIMOD, not constructor keywords.
   They are stored in `SurfaceSpec.parameters` all the same, which is where the model builder
   reads them.
-- A `QueueGroundwater` override of `number_of_timesteps` (a key of its `QueueTank`, not a
-  constructor keyword of the node) is refused.
+- A `QueueGroundwater` override of `number_of_timesteps` (a key of its tank, not a
+  constructor keyword of the node) is accepted on a node with `decays`: it sets the
+  `DecayQueueTank`'s and its internal arc's (`tanks.py:682-685`), for example to 0 instead of
+  WSIMOD's default 1. On a node without `decays` it is refused, and so is a configured
+  (non-override) `number_of_timesteps` on either.
 - An override of `decays` on the Storage family merges per pollutant, as `dict.update` does
   (an entry replaces the pollutant's whole dict, so it needs both keys); it is refused on a node
   built with `decays: None` (`storage.py:96-100`). On a surface it merges per surface
