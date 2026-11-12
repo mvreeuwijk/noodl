@@ -78,8 +78,12 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   path ``surfaces.<name>`` and add ``node:N/surfaces.<name>/precipitation_evaporation/dry``
   (``:660``) and ``node:N/surfaces.<name>/ihacres/{infiltration,excess,evaporation_kink,
   outflow_kink,moisture,through_soil}`` (``:927``, ``:928``, ``:935``, ``:948``, ``:957``,
-  ``:985``); its event is ``"inaccurate_evaporation"`` (``:1003-1021``). Later classes extend
-  the same pattern.
+  ``:985``); its event is ``"inaccurate_evaporation"`` (``:1003-1021``). A growing surface's
+  ``NutrientPool`` (``nutrient_pool.py``) has the path ``surfaces.<name>.nutrient_pool`` and
+  adds ``node:N/surfaces.<name>.nutrient_pool.<pool>/extract/clip:<N|P>`` (``np.py:553``;
+  ``call`` that pool's extract count) for the pools ``fast_pool``, ``humus_pool``,
+  ``dissolved_inorganic_pool``, ``dissolved_organic_pool`` and ``adsorbed_inorganic_pool``.
+  Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every
