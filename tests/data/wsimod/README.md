@@ -2,9 +2,14 @@
 
 `quickstart/` and `oxford/` are WSIMOD 0.8.1's two demo models in WSIMOD's own save format
 (`Model.save(dir, "config.yml", compress=True)`): `config.yml`, one `<node>-inputs.csv.gz`
-per node with forcing, and `config_neutral.yml`, the same configuration plus an `overrides`
-section that makes the water quality neutral (WTW process parameters and liquor
-multipliers, surface `pollutant_load` zero, soil-temperature weights `(1, 0, 0)`).
+per node with forcing, and `config_no_deposition.yml`, the same configuration plus an `overrides`
+section that neutralises only the surfaces' `pollutant_load` (surface deposition, which
+sub-project 3c ports). The WTW processes and the soil temperature stay WSIMOD's defaults. The
+script writes the file:
+
+```bash
+python scripts/regenerate_wsimod_fixtures.py --no-deposition-only
+```
 
 ## Forcing and licence
 

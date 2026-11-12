@@ -1,35 +1,204 @@
 nodes:
-  my_sewer:
-    capacity: 0.04
+  thames_above_abingdon:
+    name: thames_above_abingdon
+    node_type_override: Waste
+    type_: Waste
+  evenlode:
+    filename: evenlode-inputs.csv.gz
+    name: evenlode
+    node_type_override: Catchment
+    type_: Catchment
+  thames:
+    filename: thames-inputs.csv.gz
+    name: thames
+    node_type_override: Catchment
+    type_: Catchment
+  ray:
+    filename: ray-inputs.csv.gz
+    name: ray
+    node_type_override: Catchment
+    type_: Catchment
+  cherwell:
+    filename: cherwell-inputs.csv.gz
+    name: cherwell
+    node_type_override: Catchment
+    type_: Catchment
+  oxford:
+    constant_demand: 0
+    constant_temp: 30
+    constant_weighting: 0.2
+    filename: oxford-inputs.csv.gz
+    gardening_efficiency: 0.42
+    name: oxford
+    node_type_override: ResidentialDemand
+    per_capita: 0.15
+    pollutant_load:
+      boron: 7.5e-05
+      calcium: 0.0225
+      chloride: 0.027
+      fluoride: 6.0e-05
+      magnesium: 0.0045
+      nitrate: 0.009
+      nitrogen: 0.0075
+      potassium: 0.0045
+      silicon: 0.003
+      sodium: 0.03
+      sulphate: 0.0375
+      temperature: 14
+    population: 200000.0
+    type_: Demand
+  oxford_distribution:
+    name: oxford_distribution
+    node_type_override: Node
+    type_: Node
+  farmoor:
+    area: 1500000.0
+    capacity: 10000000.0
+    datum: 62
+    decays: null
+    initial_storage: 10000000.0
+    name: farmoor
+    node_type_override: Reservoir
+    type_: Reservoir
+  oxford_fwtw:
+    liquor_multiplier:
+      boron: 0.7
+      calcium: 0.7
+      chloride: 0.7
+      fluoride: 0.7
+      magnesium: 0.7
+      nitrate: 0.7
+      nitrogen: 0.7
+      potassium: 0.7
+      silicon: 0.7
+      sodium: 0.7
+      sulphate: 0.7
+      volume: 0.03
+    name: oxford_fwtw
+    node_type_override: FWTW
+    percent_solids: 0.0002
+    process_parameters:
+      boron:
+        constant: 0.01
+        exponent: 1.001
+      calcium:
+        constant: 0.01
+        exponent: 1.001
+      chloride:
+        constant: 0.01
+        exponent: 1.001
+      fluoride:
+        constant: 0.01
+        exponent: 1.001
+      magnesium:
+        constant: 0.01
+        exponent: 1.001
+      nitrate:
+        constant: 0.01
+        exponent: 1.001
+      nitrogen:
+        constant: 0.01
+        exponent: 1.001
+      potassium:
+        constant: 0.01
+        exponent: 1.001
+      silicon:
+        constant: 0.01
+        exponent: 1.001
+      sodium:
+        constant: 0.01
+        exponent: 1.001
+      sulphate:
+        constant: 0.01
+        exponent: 1.001
+      volume:
+        constant: 0.9698
+    service_reservoir_initial_storage: 90000.0
+    service_reservoir_storage_area: 20000.0
+    service_reservoir_storage_capacity: 100000.0
+    service_reservoir_storage_elevation: 10
+    treatment_throughput_capacity: 45000.0
+    type_: FWTW
+  oxford_wwtw:
+    liquor_multiplier:
+      boron: 0.7
+      calcium: 0.7
+      chloride: 0.7
+      fluoride: 0.7
+      magnesium: 0.7
+      nitrate: 0.7
+      nitrogen: 0.7
+      potassium: 0.7
+      silicon: 0.7
+      sodium: 0.7
+      sulphate: 0.7
+      volume: 0.03
+    name: oxford_wwtw
+    node_type_override: WWTW
+    percent_solids: 0.0002
+    process_parameters:
+      boron:
+        constant: 0.01
+        exponent: 1.001
+      calcium:
+        constant: 0.01
+        exponent: 1.001
+      chloride:
+        constant: 0.01
+        exponent: 1.001
+      fluoride:
+        constant: 0.01
+        exponent: 1.001
+      magnesium:
+        constant: 0.01
+        exponent: 1.001
+      nitrate:
+        constant: 0.01
+        exponent: 1.001
+      nitrogen:
+        constant: 0.01
+        exponent: 1.001
+      potassium:
+        constant: 0.01
+        exponent: 1.001
+      silicon:
+        constant: 0.01
+        exponent: 1.001
+      sodium:
+        constant: 0.01
+        exponent: 1.001
+      sulphate:
+        constant: 0.01
+        exponent: 1.001
+      volume:
+        constant: 0.9698
+    stormwater_storage_area: 20000.0
+    stormwater_storage_capacity: 20000.0
+    stormwater_storage_elevation: 10
+    treatment_throughput_capacity: 50000.0
+    type_: WWTW
+  combined_sewer:
+    capacity: 4000000.0
     chamber_area: 1
     chamber_floor: 10
-    name: my_sewer
+    name: combined_sewer
     node_type_override: Sewer
     pipe_time: 0
     pipe_timearea:
-      0: 1
+      0: 0.8
+      1: 0.15
+      2: 0.05
     type_: Sewer
-  my_land:
-    filename: my_land-inputs.csv.gz
-    name: my_land
+  oxford_land:
+    filename: oxford_land-inputs.csv.gz
+    name: oxford_land
     node_type_override: Land
     percolation_residence_time: 50
     subsurface_residence_time: 5
     surface_residence_time: 1
     surfaces:
-      urban:
-        area: 10
-        datum: 10
-        decays: {}
-        et0_to_e: 1
-        initial_storage: 0
-        pollutant_load:
-          phosphate: 1.0e-07
-        pore_depth: 0
-        surface: urban
-        type_: ImperviousSurface
       rural:
-        area: 100
+        area: 20000000.0
         datum: 10
         decays: {}
         depth: 0.5
@@ -37,77 +206,225 @@ nodes:
         field_capacity: 0.3
         ihacres_p: 10
         infiltration_capacity: 0.5
-        initial_storage: 0
+        initial_storage: 4000000.0
         percolation_coefficient: 0.75
         pollutant_load:
-          phosphate: 1.0e-07
+          boron: 1.0e-08
+          calcium: 7.0e-06
+          chloride: 6.0e-09
+          fluoride: 2.0e-08
+          magnesium: 6.0e-07
+          nitrate: 2.0e-09
+          nitrogen: 4.0e-07
+          potassium: 7.0e-07
+          silicon: 7.0e-09
+          sodium: 3.0e-08
+          sulphate: 7.0e-06
         surface: rural
         surface_coefficient: 0.05
         total_porosity: 0.4
         type_: PerviousSurface
         wilting_point: 0.12
+      urban:
+        area: 10000000.0
+        datum: 10
+        decays: {}
+        et0_to_e: 1
+        initial_storage: 5000000.0
+        pollutant_load:
+          boron: 1.0e-08
+          calcium: 7.0e-06
+          chloride: 6.0e-09
+          fluoride: 2.0e-08
+          magnesium: 6.0e-07
+          nitrate: 2.0e-09
+          nitrogen: 4.0e-07
+          potassium: 7.0e-07
+          silicon: 7.0e-09
+          sodium: 3.0e-08
+          sulphate: 7.0e-06
+        pore_depth: 0
+        surface: urban
+        type_: ImperviousSurface
     type_: Land
-  my_groundwater:
-    area: 100
-    capacity: 100
+  gw:
+    area: 320000000.0
+    capacity: 3200000000.0
     datum: 0
     decays: null
     infiltration_pct: 0
     infiltration_threshold: 1
     initial_storage: 0
-    name: my_groundwater
+    name: gw
     node_type_override: Groundwater
-    residence_time: 200
+    residence_time: 20
     type_: Groundwater
-  my_river:
-    name: my_river
+  farmoor_abstraction:
+    name: farmoor_abstraction
     node_type_override: Node
     type_: Node
-  my_outlet:
-    name: my_outlet
-    node_type_override: Waste
-    type_: Waste
+  evenlode_thames:
+    name: evenlode_thames
+    node_type_override: Node
+    type_: Node
+  cherwell_ray:
+    name: cherwell_ray
+    node_type_override: Node
+    type_: Node
+  cherwell_thames:
+    name: cherwell_thames
+    node_type_override: Node
+    type_: Node
+  thames_mixer:
+    name: thames_mixer
+    node_type_override: Node
+    type_: Node
 arcs:
-  urban_drainage:
+  evenlode_to_thames:
     capacity: 1000000000000000.0
-    in_port: my_land
-    name: urban_drainage
-    out_port: my_sewer
+    in_port: evenlode
+    name: evenlode_to_thames
+    out_port: evenlode_thames
     preference: 1
     type_: Arc
-  percolation:
+  thames_to_thames:
     capacity: 1000000000000000.0
-    in_port: my_land
-    name: percolation
-    out_port: my_groundwater
+    in_port: thames
+    name: thames_to_thames
+    out_port: evenlode_thames
     preference: 1
     type_: Arc
-  runoff:
+  ray_to_cherwell:
     capacity: 1000000000000000.0
-    in_port: my_land
-    name: runoff
-    out_port: my_river
+    in_port: ray
+    name: ray_to_cherwell
+    out_port: cherwell_ray
     preference: 1
     type_: Arc
-  storm_outflow:
+  cherwell_to_cherwell:
     capacity: 1000000000000000.0
-    in_port: my_sewer
-    name: storm_outflow
-    out_port: my_river
+    in_port: cherwell
+    name: cherwell_to_cherwell
+    out_port: cherwell_ray
     preference: 1
     type_: Arc
-  baseflow:
+  thames_to_farmoor:
     capacity: 1000000000000000.0
-    in_port: my_groundwater
-    name: baseflow
-    out_port: my_river
+    in_port: evenlode_thames
+    name: thames_to_farmoor
+    out_port: farmoor_abstraction
     preference: 1
     type_: Arc
-  catchment_outflow:
+  mixer_to_waste:
     capacity: 1000000000000000.0
-    in_port: my_river
-    name: catchment_outflow
-    out_port: my_outlet
+    in_port: thames_mixer
+    name: mixer_to_waste
+    out_port: thames_above_abingdon
+    preference: 1
+    type_: Arc
+  abstraction_to_farmoor:
+    capacity: 50000.0
+    in_port: farmoor_abstraction
+    name: abstraction_to_farmoor
+    out_port: farmoor
+    preference: 1
+    type_: Arc
+  distribution_to_demand:
+    capacity: 1000000000000000.0
+    in_port: oxford_distribution
+    name: distribution_to_demand
+    out_port: oxford
+    preference: 1
+    type_: Arc
+  sewer_to_wwtw:
+    capacity: 1000000000000000.0
+    in_port: combined_sewer
+    name: sewer_to_wwtw
+    out_port: oxford_wwtw
+    preference: 10000000000.0
+    type_: Arc
+  sewer_overflow:
+    capacity: 1000000000000000.0
+    in_port: combined_sewer
+    name: sewer_overflow
+    out_port: thames_mixer
+    preference: 1.0e-10
+    type_: Arc
+  farmoor_to_mixer:
+    capacity: 1000000000000000.0
+    in_port: farmoor_abstraction
+    name: farmoor_to_mixer
+    out_port: thames_mixer
+    preference: 1
+    type_: Arc
+  cherwell_to_mixer:
+    capacity: 1000000000000000.0
+    in_port: cherwell_ray
+    name: cherwell_to_mixer
+    out_port: thames_mixer
+    preference: 1
+    type_: Arc
+  wwtw_to_mixer:
+    capacity: 1000000000000000.0
+    in_port: oxford_wwtw
+    name: wwtw_to_mixer
+    out_port: thames_mixer
+    preference: 1
+    type_: Arc
+  fwtw_to_distribution:
+    capacity: 1000000000000000.0
+    in_port: oxford_fwtw
+    name: fwtw_to_distribution
+    out_port: oxford_distribution
+    preference: 1
+    type_: Arc
+  fwtw_to_sewer:
+    capacity: 1000000000000000.0
+    in_port: oxford_fwtw
+    name: fwtw_to_sewer
+    out_port: combined_sewer
+    preference: 1
+    type_: Arc
+  demand_to_sewer:
+    capacity: 1000000000000000.0
+    in_port: oxford
+    name: demand_to_sewer
+    out_port: combined_sewer
+    preference: 1
+    type_: Arc
+  land_to_sewer:
+    capacity: 1000000000000000.0
+    in_port: oxford_land
+    name: land_to_sewer
+    out_port: combined_sewer
+    preference: 1
+    type_: Arc
+  reservoir_to_fwtw:
+    capacity: 1000000000000000.0
+    in_port: farmoor
+    name: reservoir_to_fwtw
+    out_port: oxford_fwtw
+    preference: 1
+    type_: Arc
+  land_to_gw:
+    capacity: 1000000000000000.0
+    in_port: oxford_land
+    name: land_to_gw
+    out_port: gw
+    preference: 1
+    type_: Arc
+  garden_to_gw:
+    capacity: 1000000000000000.0
+    in_port: oxford
+    name: garden_to_gw
+    out_port: gw
+    preference: 1
+    type_: Arc
+  gw_to_mixer:
+    capacity: 1000000000000000.0
+    in_port: gw
+    name: gw_to_mixer
+    out_port: thames_mixer
     preference: 1
     type_: Arc
 orchestration:
@@ -125,33 +442,33 @@ orchestration:
 - WWTW: make_discharge
 - Catchment: route
 pollutants:
-- do
-- org-phosphorus
-- phosphate
-- ammonia
-- solids
-- bod
-- cod
-- ph
 - temperature
+- silicon
+- fluoride
+- chloride
 - nitrate
-- nitrite
-- org-nitrogen
+- sulphate
+- nitrogen
+- sodium
+- potassium
+- calcium
+- magnesium
+- boron
 additive_pollutants:
-- org-phosphorus
-- phosphate
-- ammonia
-- solids
-- bod
-- cod
+- silicon
+- fluoride
+- chloride
 - nitrate
-- nitrite
-- org-nitrogen
+- sulphate
+- nitrogen
+- sodium
+- potassium
+- calcium
+- magnesium
+- boron
 non_additive_pollutants:
-- do
 - temperature
-- ph
-float_accuracy: 1.0e-11
+float_accuracy: 1.0e-08
 extensions: []
 river_discharge_order: []
 dates:
@@ -1613,16 +1930,33 @@ dates:
 - '2013-02-25 00:00:00'
 overrides:
   nodes:
-    my_land:
+    oxford_land:
       type_: Land
-      name: my_land
+      name: oxford_land
       surfaces:
-        urban:
-          pollutant_load:
-            phosphate: 0.0
         rural:
           pollutant_load:
-            phosphate: 0.0
-          soil_temp_w_prev: 1
-          soil_temp_w_air: 0
-          soil_temp_w_deep: 0
+            boron: 0.0
+            calcium: 0.0
+            chloride: 0.0
+            fluoride: 0.0
+            magnesium: 0.0
+            nitrate: 0.0
+            nitrogen: 0.0
+            potassium: 0.0
+            silicon: 0.0
+            sodium: 0.0
+            sulphate: 0.0
+        urban:
+          pollutant_load:
+            boron: 0.0
+            calcium: 0.0
+            chloride: 0.0
+            fluoride: 0.0
+            magnesium: 0.0
+            nitrate: 0.0
+            nitrogen: 0.0
+            potassium: 0.0
+            silicon: 0.0
+            sodium: 0.0
+            sulphate: 0.0

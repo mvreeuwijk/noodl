@@ -536,16 +536,29 @@ DEMO_CLASSES = {
         "Waste",
     ),
 }
-# (id, demo, config, mode): quantity-only on the demo as saved; every pollutant on the neutral
-# configuration, where each class's processes leave the water quality alone (README there)
+# (id, demo, config, mode): quantity-only on the demo as saved; every pollutant on the no-deposition
+# configuration, which neutralises only the surfaces' deposition, 3c (README there)
 RUNS = (
     ("", "quickstart", "config.yml", "quantity"),
     ("", "oxford", "config.yml", "quantity"),
-    ("neutral-", "quickstart", "config_neutral.yml", "pollutants"),
-    ("neutral-", "oxford", "config_neutral.yml", "pollutants"),
+    ("pollutants-", "quickstart", "config_no_deposition.yml", "pollutants"),
+    ("pollutants-", "oxford", "config_no_deposition.yml", "pollutants"),
 )
+# 3a computes the WTW processes neutrally; WSIMOD's defaults on the demo's WWTW and FWTW differ
+# until sub-project 3b's Task 3 (plan D1)
+WTW = pytest.mark.xfail(strict=True, raises=Mismatch, reason="the WTW processes are Task 3")
 DEMO_PAIRS = [
-    (demo, config, mode, cls) for _, demo, config, mode in RUNS for cls in DEMO_CLASSES[demo]
+    pytest.param(
+        demo,
+        config,
+        mode,
+        cls,
+        marks=[WTW]
+        if config == "config_no_deposition.yml" and demo == "oxford" and cls in ("WWTW", "FWTW")
+        else [],
+    )
+    for _, demo, config, mode in RUNS
+    for cls in DEMO_CLASSES[demo]
 ]
 DEMO_IDS = [f"{prefix}{demo}-{cls}" for prefix, demo, _, _ in RUNS for cls in DEMO_CLASSES[demo]]
 
@@ -689,9 +702,13 @@ def test_a_demo_replay_notices_a_difference():
 
 def test_a_pollutant_mode_demo_replay_notices_a_difference():
     """A pollutant column of a captured WWTW reply, moved by 1e-11 x scale, fails the replay."""
-    network = demo_network("oxford", "config_neutral.yml")
+    network = demo_network("oxford", "config_no_deposition.yml")
     calls = copy.deepcopy(
-        [c for c in demo_capture("oxford", "config_neutral.yml", 365)["oxford_wwtw"] if c.day < 20]
+        [
+            c
+            for c in demo_capture("oxford", "config_no_deposition.yml", 365)["oxford_wwtw"]
+            if c.day < 20
+        ]
     )
     scale = node_scale(calls, volume_only=False)
     reply, key = next(

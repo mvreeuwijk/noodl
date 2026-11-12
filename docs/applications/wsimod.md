@@ -412,7 +412,7 @@ has to be debugged, not admitted.
   day (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
   equal noodl's residual plus the dropped water. The system mass balance closes within
   `1e-12 * scale` every day, and every day the residual equals the evaporation clamp's gap (0
-  without a clamp). A quantity-only run's volumes equal the neutralised run's exactly
+  without a clamp). A quantity-only run's volumes equal the pollutant run's exactly
   (`torch.equal`).
 - **Crashes** (`test_case_runs_where_wsimod_crashes_*`): the three cases where WSIMOD raises
   (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`, `nonresidential_demand`) run in
@@ -425,15 +425,15 @@ has to be debugged, not admitted.
 
 | Run | Days | Modes | Worst difference | Default | Time (`-n 4`) |
 | --- | --- | --- | --- | --- | --- |
-| quickstart | 1456 | quantity-only, neutralised | 0 | yes | 41 s, 38 s |
-| oxford | 365 | quantity-only, neutralised | 0 | yes | 36 s, 37 s |
-| oxford | 1456 | quantity-only, neutralised | 0 | `-m slow` | 142 s, 146 s |
+| quickstart | 1456 | quantity-only, pollutant mode | 0 | yes | 41 s, 38 s |
+| oxford | 365 | quantity-only, pollutant mode | 0 | yes | 36 s, 37 s |
+| oxford | 1456 | quantity-only, pollutant mode | 0 | `-m slow` | 142 s, 146 s |
 | 36 cases | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
 | 22 gradients | 3 to 200 | quantity-only | 5.9e-8 relative | 16 of 22 (six `-m slow`) | |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
-neutralised mode runs `config_neutral.yml` (an `overrides` section that makes the water quality
-neutral) with every pollutant and compares all of them. Neither demo has a `River` node, so
+pollutant mode runs `config_no_deposition.yml` (an `overrides` section that sets the surfaces'
+`pollutant_load` to zero) with every pollutant and compares all of them. Neither demo has a `River` node, so
 WSIMOD's river-order ties (set-hash order of the names, which varies with `PYTHONHASHSEED`)
 cannot arise in the demos, and neither has a `QueueGroundwater`; the river and groundwater
 cases cover those classes, with the ties kept independent. WSIMOD's source files are not

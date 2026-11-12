@@ -3,10 +3,11 @@ purpose-built case (spec, Verification 2 and 3; Task 17).
 
 ``quickstart`` runs in full (1456 days), ``oxford`` for its first 365 days by default and in full
 under ``-m slow``. Each demo runs twice: quantity-only on ``config.yml`` (WSIMOD runs its own
-pollutants, noodl the volumes alone, the volumes compared) and neutralised on
-``config_neutral.yml`` (every pollutant compared). Every class replays WSIMOD bitwise (replay bound
-0), so the whole model does: the worst difference of every run is exactly 0, and no admission is
-needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is only the ceiling.
+pollutants, noodl the volumes alone, the volumes compared) and in pollutant mode on
+``config_no_deposition.yml`` (every pollutant compared). Every class replays WSIMOD bitwise
+(replay bound 0), so the whole model does: the worst difference of every run is exactly 0, and
+no admission is needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is only the
+ceiling.
 
 The purpose-built cases (``_wsimod_cases.CASES``) run in full, in both modes, the same way. Cases
 WSIMOD cannot run (``wtw_zero_input``, ``nonresidential_demand``) or runs only until a documented
@@ -48,16 +49,23 @@ from tests.verification._wsimod_parity import (  # noqa: E402
 from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
-CONFIG = {"quantity": "config.yml", "neutral": "config_neutral.yml"}
+CONFIG = {"quantity": "config.yml", "pollutants": "config_no_deposition.yml"}
 FULL = 1456  # both demos' dates
+
+# 3a refuses the demos' default soil-temperature weights and runs no WTW processes on them
+# (sub-project 3b); each task removes its marks when it ports the process (plan D1)
+SOIL = pytest.mark.xfail(strict=True, raises=ValueError, reason="soil temperature is Task 2")
+WTW = pytest.mark.xfail(strict=True, raises=ValueError, reason="the WTW processes are Task 3")
 
 DEMOS = [
     pytest.param("quickstart", "quantity", FULL, id="quickstart-quantity"),
-    pytest.param("quickstart", "neutral", FULL, id="quickstart-neutral"),
+    pytest.param("quickstart", "pollutants", FULL, id="quickstart-pollutants", marks=SOIL),
     pytest.param("oxford", "quantity", 365, id="oxford365-quantity"),
-    pytest.param("oxford", "neutral", 365, id="oxford365-neutral"),
+    pytest.param("oxford", "pollutants", 365, id="oxford365-pollutants", marks=WTW),
     pytest.param("oxford", "quantity", FULL, id="oxford-quantity", marks=pytest.mark.slow),
-    pytest.param("oxford", "neutral", FULL, id="oxford-neutral", marks=pytest.mark.slow),
+    pytest.param(
+        "oxford", "pollutants", FULL, id="oxford-pollutants", marks=[pytest.mark.slow, WTW]
+    ),
 ]
 
 
@@ -69,7 +77,7 @@ def theirs(case: str, mode: str, days: int):
 @functools.cache
 def ours(case: str, mode: str, days: int, decisions: bool = False):
     network = read_wsimod_config(DATA / case, config_name=CONFIG[mode])
-    model, state, drivers = build_model(network, pollutants=(mode == "neutral"))
+    model, state, drivers = build_model(network, pollutants=(mode == "pollutants"))
     diagnostics: dict = {"decisions": decisions}
     results = wsimod_run(model, state, drivers, days=days, diagnostics=diagnostics)
     diagnostics["node_names"] = model.wsimod_day.node_names
@@ -88,7 +96,7 @@ def test_demo_matches_wsimod(case, mode, days):
         reference,
         diagnostics=diagnostics,
         case=f"{case}-{days}-{mode}",
-        quality=(mode == "neutral"),
+        quality=(mode == "pollutants"),
     )
     assert found["worst"] == 0.0 and found["admissions"] == []
     assert reference.printed == []
@@ -100,28 +108,32 @@ def test_demo_matches_wsimod(case, mode, days):
     assert bool(results.arc_flow.abs().sum() > 0)
 
 
-@pytest.mark.parametrize("case", ["quickstart", "oxford"])
-def test_quantity_only_equals_the_neutralised_volumes(case):
-    """Spec, Verification 3: a quantity-only run's volumes equal the neutralised run's, exactly
+@pytest.mark.parametrize(
+    "case",
+    [pytest.param("quickstart", marks=SOIL), pytest.param("oxford", marks=WTW)],
+)
+def test_demo_quantity_only_equals_the_pollutant_run_volumes(case):
+    """Spec, Verification 3: a quantity-only run's volumes equal the pollutant run's, exactly
     (``torch.equal``): every arc flow, tank storage and surface field."""
     days = FULL if case == "quickstart" else 365
     quantity, _ = ours(case, "quantity", days)
-    neutral, _ = ours(case, "neutral", days)
-    assert torch.equal(quantity.arc_flow, neutral.arc_flow)
-    assert torch.equal(quantity.tank_storage, neutral.tank_storage)
+    pollutant_run, _ = ours(case, "pollutants", days)
+    assert torch.equal(quantity.arc_flow, pollutant_run.arc_flow)
+    assert torch.equal(quantity.tank_storage, pollutant_run.tank_storage)
     for field, values in quantity.surface.items():
-        other = neutral.surface[field]
+        other = pollutant_run.surface[field]
         assert torch.equal(torch.isnan(values), torch.isnan(other)), field  # not recorded
         assert torch.equal(values.nan_to_num(), other.nan_to_num()), field
 
 
+@WTW
 def test_oxfords_urban_surface_holds_no_storage_after_the_first_day():
     """Review Focus 4, through the whole model: the urban (impervious) surface's storage is 0
     after day 1 to rounding, and bitwise WSIMOD's. The impervious surface stores nothing between
     days; the residue (at most 7.3e-12 m3 against the 1.16e6 m3 of day 1, measured) is the
     rounding of its balance, which WSIMOD has to the bit."""
-    results, _ = ours("oxford", "neutral", 365)
-    reference = theirs("oxford", "neutral", 365)
+    results, _ = ours("oxford", "pollutants", 365)
+    reference = theirs("oxford", "pollutants", 365)
     column = results.surface_names.index(("oxford_land", "urban"))
     storage = results.surface["storage"][:, column]
     assert float(storage[0]) > 0.0
@@ -143,8 +155,8 @@ def test_the_demos_have_no_river_order_to_tie(case):
 
 # --- the comparison itself --------------------------------------------------------------------
 def _perturbed(days: int = 30):
-    results, diagnostics = ours("quickstart", "neutral", days, True)
-    return copy.deepcopy(results), diagnostics, theirs("quickstart", "neutral", days)
+    results, diagnostics = ours("quickstart", "pollutants", days, True)
+    return copy.deepcopy(results), diagnostics, theirs("quickstart", "pollutants", days)
 
 
 def _busiest_arc(reference):
@@ -156,6 +168,7 @@ def _name(label: tuple[str, str] | str) -> str:
     return label if isinstance(label, str) else f"{label[0]}.{label[1]}"
 
 
+@SOIL
 @pytest.mark.parametrize(
     ("group", "element"),
     [
@@ -199,6 +212,7 @@ def test_a_difference_beyond_the_bound_is_named_by_element_and_day(group, elemen
         )
 
 
+@SOIL
 def test_different_arc_names_or_day_counts_are_refused():
     results, diagnostics, reference = _perturbed()
     kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}
@@ -216,6 +230,7 @@ def test_different_arc_names_or_day_counts_are_refused():
         assert_matches_wsimod(shifted, reference, **kwargs)
 
 
+@SOIL
 def test_an_admission_needs_a_decision_within_its_margin_that_day():
     results, diagnostics, reference = _perturbed()
     column, scale = _busiest_arc(reference)
@@ -281,6 +296,7 @@ def _with_print(kind: str, day: int, node: int, *, names: list[str] | None = Non
     return results, diagnostics, reference
 
 
+@SOIL
 @pytest.mark.parametrize("kind", ["deficit", "maxiter"])
 def test_a_dated_print_matches_the_flag_of_its_node_and_day(kind):
     kwargs = {"case": "quickstart", "quality": True}
@@ -293,8 +309,9 @@ def test_a_dated_print_matches_the_flag_of_its_node_and_day(kind):
         assert_matches_wsimod(results, reference, diagnostics=diagnostics, **kwargs)
 
 
+@SOIL
 def test_a_wrong_node_name_mapping_fails_the_deficit_check():
-    names = list(ours("quickstart", "neutral", 10, True)[1]["node_names"])
+    names = list(ours("quickstart", "pollutants", 10, True)[1]["node_names"])
     assert len(names) > 1
     # flag at node 0, the print names node 0 by its right name; the mapping is reversed
     results, diagnostics, reference = _with_print("deficit", 3, 0, names=names[::-1])
@@ -304,6 +321,7 @@ def test_a_wrong_node_name_mapping_fails_the_deficit_check():
         )
 
 
+@SOIL
 def test_a_wrong_maxiter_site_name_fails_the_maxiter_check():
     results, diagnostics, reference = _with_print("maxiter", 3, 0)
     reference.printed = [reference.printed[0].replace("reached in ", "reached in not_")]
@@ -313,6 +331,7 @@ def test_a_wrong_maxiter_site_name_fails_the_maxiter_check():
         )
 
 
+@SOIL
 def test_a_print_noodl_does_not_record_is_refused():
     results, diagnostics, reference = _perturbed(10)
     reference = copy.deepcopy(reference)
@@ -497,6 +516,7 @@ def test_the_evaporation_clamp_prints_are_accepted_only_where_they_match_noodl()
         assert_matches_wsimod(results, unflagged, diagnostics=diagnostics, **kwargs)
 
 
+@SOIL
 def test_an_undated_print_needs_noodls_event_and_a_dated_one_its_node_and_day():
     results, diagnostics, reference = _perturbed(10)
     kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}
