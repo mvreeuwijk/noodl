@@ -872,8 +872,8 @@ def test_the_decay_arcs_cases_hold_the_order_precondition(case, arc):
     assert all(precondition_holds(day, n) for day in days)
     assert not any(event_on(ctx, arc) for ctx in contexts)
     if case == "decay_arc_mixed":
-        directions = {r["direction"] for day in days for r in day.queue_at_end}
-        assert directions == {"push", "pull"}
+        for day in days:
+            assert {r["direction"] for r in day.queue_at_end} == {"push", "pull"}, day.day
 
 
 def test_the_precondition_check_sees_a_due_request_in_both_directions():
@@ -968,3 +968,27 @@ def test_the_arc_replay_notices_a_difference(where):
     replay_arc(network, arc, captured_arcs(case)[arc], scale=scale)  # the capture itself passes
     with pytest.raises(Mismatch, match=expected):
         replay_arc(network, arc, days, scale=scale)
+
+
+def test_capturing_does_not_perturb_wsimods_run():
+    """The same run with and without the capture gives the same ``record_wsimod_run`` output,
+    for an arc capture (``decay_arc``) and a node capture (``three_out_arcs``)."""
+
+    def run(case, capture=None, names=()):
+        spec = CASES[case]
+        model = wsimod_model(spec.build())
+        if capture is None:
+            return record_wsimod_run(model, days=spec.days)
+        with capture(model, names):
+            return record_wsimod_run(model, days=spec.days)
+
+    for case, capture, names in (
+        ("decay_arc", capture_arc_calls, CASES["decay_arc"].replay_arcs),
+        ("three_out_arcs", capture_node_calls, CASES["three_out_arcs"].replay),
+    ):
+        plain, captured_run = run(case), run(case, capture, names)
+        assert plain.printed == captured_run.printed
+        for name in ("arc_flow", "arc_quality", "tank_storage", "tank_quality", "surface_quality"):
+            assert torch.allclose(
+                getattr(plain, name), getattr(captured_run, name), rtol=0, atol=0, equal_nan=True
+            )

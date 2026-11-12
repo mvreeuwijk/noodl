@@ -468,7 +468,7 @@ def precondition_holds(day: ArcDay, n: int) -> bool:
     direction, so it always holds."""
     if n == 0:
         return True
-    waiting = {r["direction"] for r in day.queue_at_end if r.get("time") == 0}
+    waiting = {r["direction"] for r in day.queue_at_end if "direction" in r and r["time"] == 0}
     return waiting != set(_DIRECTIONS)
 
 
@@ -661,7 +661,16 @@ class _ArcReplay:
 
     def end_day(self, label: str, day: ArcDay, place_of: dict[int, int]) -> None:
         arc, compare = self.arc, self.compare
-        entries = {place: diff for phase, place, diff in self.decays if phase == "entry"}
+        entry_list = [(place, diff) for phase, place, diff in self.decays if phase == "entry"]
+        entries = dict(entry_list)
+        if len(entries) != len(entry_list):  # one entry decay per call: none overwrites another
+            raise Mismatch(
+                f"{label}: noodl decayed {len(entry_list)} entries on {len(entries)} calls"
+            )
+        if len(entry_list) < len(day.entry_diffs):
+            raise Mismatch(
+                f"{label}: noodl made {len(entry_list)} entry decays, WSIMOD {len(day.entry_diffs)}"
+            )
         for index, diff in day.entry_diffs:
             compare.vqip(f"{label} entry call {index}", entries[place_of[index]], diff)
         before = {r["slot"]: r["vqip"] for r in day.queue_at_end} if self.alt else day.queue_at_end
@@ -671,6 +680,13 @@ class _ArcReplay:
         arc.end_timestep()
         self.phase = "entry"
         ends = [diff for _, _, diff in self.decays]
+        # noodl decays every slot (an absent one is empty); WSIMOD only the present ones
+        slots = (arc.length + 1) if self.alt else (2 * self.n * arc.rows.shape[-2] if self.n else 0)
+        if len(ends) != slots or len(day.end_diffs) > slots:
+            raise Mismatch(
+                f"{label}: noodl made {len(ends)} end-of-day decays ({slots} slots), "
+                f"WSIMOD {len(day.end_diffs)}"
+            )
         width = 0 if self.alt else arc.rows.shape[-2]
         for row, diff in day.end_diffs:
             if self.alt:

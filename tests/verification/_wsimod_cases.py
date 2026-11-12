@@ -1888,8 +1888,9 @@ def _decay_arc_mixed() -> dict:
     (``Reservoir: distribute``), and then ``basin`` pulls from ``well`` through it
     (``Abstraction: make_abstractions``), so the two directions meet in one arc in the same
     order every day. The pull calls reach ``update_queue`` every day, so the end of the day
-    never finds a due request waiting in both directions: the case stays inside the precondition
-    of D21 (X41), and the arc's term is bitwise."""
+    never finds a due request waiting in both directions. No request is ever due at the end of a
+    day here, so the case covers the merged push and pull order of the term, but not X41's
+    due-and-waiting case."""
     mapping = _decay_arc()
     well = next(node for node in mapping["nodes"] if node["name"] == "well")
     well["type_"] = "Reservoir"
