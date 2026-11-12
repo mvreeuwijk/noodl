@@ -2,7 +2,9 @@
 
 Status: designed 2026-11-12 under the user's standing instruction ("do not wait for me and make
 sensible decisions"). Rulings Y1–Y8 are the brainstorming rulings, which stand in for the user's
-approval. Y9–Y40 are made here (Rulings made in this spec). This document covers sub-project 3c
+approval. Y9–Y40 are made here (Rulings made in this spec). The Fable spec review approved it
+after fixes (2 Important, 12 Minor findings); this revision applies them and the coordinator's
+rulings on them as Y41–Y50, and amends Y13, Y14, Y17, Y27, Y34, Y35 and Y38 to match. This document covers sub-project 3c
 of 3 of the WSIMOD port (W1), the last one. It builds on 3a (`2026-11-11-wsimod-core-design.md`,
 PR #41) and 3b (`2026-11-12-wsimod-processes-design.md`, PR #42, main `13b997d`). Rulings
 W1–W95 and X1–X40 still bind and are cited by number.
@@ -142,7 +144,10 @@ per-instance Python transcendentals. 3c adds six rules.
 6. **Python's integer zeros.** WSIMOD assigns the integers `0` and `1` in several branches
    (`land.py:1562`, `:1829`, `:1846`, `:1956`, `:1970`, `:2108`, `:2115`). `0 * x` with a float
    `x` is `0.0` with `x`'s sign rule, exactly as torch's `0.0 * x`, so noodl's float constants
-   give the same values, the sign of zero included.
+   give the same values. The sign of a zero can differ: WSIMOD's pools start as the integer `0`
+   (`np.py:185`), so `-increase` is the integer `0` (giving `+0.0`) on a pool never touched and
+   `-0.0` on a float one, where noodl gives `-0.0`. The harness compares with `torch.equal`, for
+   which `-0.0 == 0.0`, so "bitwise" in this spec means equal under that comparison (Y50).
 
 ## The equations, transcribed
 
@@ -246,7 +251,9 @@ TAW = field_capacity_m - wilting_point_m                                        
 RAW = TAW * ET_depletion_factor                                                 # :1363
 ```
 
-`TAW < 0` only prints `"warning: TAW < 0..."` (`:1361-1362`); noodl refuses it (Y27).
+`TAW < 0` only prints `"warning: TAW < 0..."` (`:1361-1362`), and `TAW = 0` crashes on day 0
+(the stress division below); noodl refuses `wilting_point ≥ field_capacity`, that is `TAW ≤ 0`
+(Y27, Y44).
 
 **State after construction** (`:1261-1270`): `days_after_sow = None`, `crop_cover = 0`,
 `ground_cover = 0`, `crop_factor = 0`, `et0_coefficient = 1`. The configured
@@ -344,14 +351,20 @@ y = yp[i - 1] + (yp[i] - yp[i - 1]) * dif / (x_right - x_left)      # ((Δy · d
 
 Quirks, all transcribed:
 
-- **The leap test is always true.** `Model.load` builds dates with WSIMOD's own `to_datetime`
-  (`model.py:345`, `:39-170`), whose `is_leap_year` is a **method** (`:114-121`), not a
-  property. `if t.is_leap_year:` tests the bound method, which is truthy. So every year, not
-  only leap years, shifts the day of year down by one after 28 February: in a common year
-  1 March and 28 February both interpolate at 59, and 31 December at 364 (run while writing this
-  spec: `bool(to_datetime("2001-03-01").is_leap_year)` is `True`). A model built in Python with
-  pandas timestamps behaves differently, but noodl reads configurations, which go through
-  `Model.load`. Reproduced (Y13; defect table).
+- **The leap test is always true on the individual-files loader.** `Model.load` has two data
+  loaders. `_load_individual_files`, which reads the `config.yml` + CSV format that noodl reads,
+  builds the dates with WSIMOD's own `to_datetime` (`model.py:347-348`, `:39-170`), whose
+  `is_leap_year` is a **method** (`:114-121`), not a property. `if t.is_leap_year:` tests the
+  bound method, which is truthy. So every year, not only leap years, shifts the day of year down
+  by one after 28 February: in a common year 1 March and 28 February both interpolate at 59, and
+  31 December at 364 (run while writing this spec: `bool(to_datetime("2001-03-01").is_leap_year)`
+  is `True`). The unified-data loader (`_load_unified_data`, `model.py:276-322`, the parquet
+  format) sets `self.dates = pd.to_datetime(...)`: pandas timestamps, whose `is_leap_year` is a
+  property, so there the shift happens only in leap years, as intended. noodl reproduces the
+  individual-files loader, the format it reads, and the test harness builds `model.dates` with
+  `to_datetime` too (`_wsimod_reference.py:318-319`). A user comparing with a parquet-loaded
+  WSIMOD sees crop factors that differ by a day in common years; the application page's L1 row
+  says so (Y13, Y42).
 - **Raw and adjusted days.** The sowing and harvest tests use the raw `t.dayofyear`; the
   interpolations use the adjusted `doy`; erosion's `sin` uses the raw one (`:1948`).
 - **The sowing day itself has no crop.** `days_after_sow = 0` is false at `:1550` (and at
@@ -360,7 +373,10 @@ Quirks, all transcribed:
   until harvest sets them to 0; they are carried state (State).
 - **Dead store.** The harvest branch's `crop_factor = crop_factor_stages[0]` (`:1539`) is
   overwritten at `:1547`; it is not ported (no observable effect).
-- **The autumn calendar is unsorted.** With `sowing_day > harvest_day` the calendar is, for
+- **The calendar is unsorted** whenever `sowing_day > harvest_day` or `harvest_day = 365`.
+  The default (`harvest_day = 365`) gives `[0, 1, 365, 366, 365]`, which is benign: the adjusted
+  day of year never exceeds 365, and `bisect_left` returns 2 on every in-season day; the
+  default-calendar unit test covers it. With `sowing_day > harvest_day` the calendar is, for
   example, `[0, 280, 200, 201, 365]`. `bisect_left` on it returns indices whose segments all
   have `y = 0`, so an autumn-sown crop has `crop_cover = ground_cover = 0` all year (run while
   writing this spec: the maximum over days 1–365 is 0.0 for sowing 280 and harvest 200, and 0.9
@@ -369,12 +385,17 @@ Quirks, all transcribed:
   (Python's negative index); for `xp = [1, 365]`, `yp = [0.3, 1]` at `x = 1` this gives
   `0.30000000000000004` (run while writing this spec). Reproduced. `x > xp[-1]` raises
   `IndexError` and `x_right = x_left` divides by zero: both are known at build time, and noodl
-  refuses the configuration by name, naming the first date (Y14). `len(crop_factor_stages) ≠
+  refuses the configuration by name, naming the first date (Y14). The dates checked are the
+  run's `dates`, since WSIMOD only crashes on those (`[0, 300]` with a run ending in October
+  runs in WSIMOD). A `model.step` on a date past them is checked when that step is taken, and
+  refused by name there (Y47). `len(crop_factor_stages) ≠
   len(crop_factor_stage_dates)` is refused (an `IndexError` on some day, or unread entries).
 - **The stress coefficient divides by zero** when `(1 − ET_depletion_factor) · TAW = 0`, and it
   reaches that branch when `root_zone_depletion ≥ RAW`. With the **default**
-  `ET_depletion_factor = 1` that is any soil at or below its wilting point, and with `TAW = 0`
-  any day at all. WSIMOD raises `ZeroDivisionError` (run while writing this spec: a default
+  `ET_depletion_factor = 1` that is any soil at or below its wilting point. (With `TAW = 0` it
+  would be every day, and the guard below would make the soil never evaporate; `wilting_point ≥
+  field_capacity` is therefore refused, Y44, and the guard covers `ET_depletion_factor = 1`
+  only.) WSIMOD raises `ZeroDivisionError` (run while writing this spec: a default
   growing surface drying under `et0 = 0.01` crashed at `land.py:1566`). noodl does the evident
   intent: `Ks = 0`. That is the value of the formula's limit, and FAO-56's `Ks` at the wilting
   point. Python's `max(0, ·)` gives the same for IEEE's `−inf` and `nan`. noodl records the
@@ -411,11 +432,15 @@ changes.
   table).
 - **`din = 0`** with `V > 0` raises `ZeroDivisionError` (run while writing this spec: a growing
   surface whose initial storage held no inorganic N, with rain on day 0 and no fertiliser,
-  crashed at `land.py:1460`). Fertiliser, the main N source, enters only after `ihacres`
-  (call order 7), so a day-0 flow through an N-free soil is enough. noodl does the evident
-  intent: the three species get 0, because the tank has none to give. The pool has still lost
-  its share, as WSIMOD's other pool–tank gaps lose it. Event
-  `"nutrient_split_zero_denominator"` (Y18).
+  crashed at `land.py:1460`). The trigger is ordinary: any growing surface started from a tank
+  with no inorganic N, with zero fertiliser, manure and deposition in its first month (a winter
+  start), crashes on the first day with net flow through the soil. Fertiliser, the main N
+  source, enters only after `ihacres` (call order 7). Deposition data mask the day-0 crash,
+  because dry and wet deposition add N to the tank before `ihacres` (call orders 2-3). WSIMOD
+  therefore needs initial inorganic N or a non-zero first-month input; the application page
+  says so. noodl does the evident intent: the three species get 0, because the tank has none to
+  give. The pool has still lost its share, as WSIMOD's other pool–tank gaps lose it. Event
+  `"pull_storage_no_din"` (Y18, Y46).
 
 ### Effective precipitation flushing, fertiliser and manure (`land.py:1605-1710`)
 
@@ -534,11 +559,13 @@ at this site and at the three below (Y16).
 
 - `nitrate_proportion` ignores nitrite. When `nitrate + ammonia = 0`, WSIMOD raises
   `ZeroDivisionError` (run while writing this spec: a growing surface holding only nitrite, with
-  no fertiliser, crashed at `land.py:1758`). noodl uses proportion 0, which sends the change to
-  ammonia, the product of mineralisation, and records `"nutrient_split_zero_denominator"`
-  (Y18).
-- An increase of exactly 0 takes the `else` branches: `out_` gets `−0.0`, and the clamp
-  `min(storage, −0.0)` returns `storage` when that is `+0.0`, so the result is Python's.
+  no fertiliser, crashed at `land.py:1758`; the review reproduced it on **day 0** with a plain
+  zero-N tank and zero first-month inputs, no nitrite needed). This, too, is every growing
+  surface started from an empty tank in winter. noodl uses proportion 0, which sends the change
+  to ammonia, the product of mineralisation, and records `"transformation_no_din"` (Y18, Y46).
+- An increase of exactly 0 takes the `else` branches: `out_` gets `−0.0` (or `+0.0`, rule 6),
+  and the clamp `min(storage, −0.0)` returns `storage` when that is `+0.0`; the result equals
+  Python's under `torch.equal`.
 
 ### The soil factors (`land.py:1813-1856`)
 
@@ -595,6 +622,9 @@ return (empty, empty)
   table). The event `"nutrient_pool_not_tracking"` applies.
 - **`V = 0`** with a crop present raises `ZeroDivisionError` (run while writing this spec: a
   growing surface with `initial_storage = 0`, no rain and crops sown crashed at `land.py:1899`).
+  It is reachable only with `ET_depletion_factor < 1`: with the default 1 an empty soil crashes
+  first at `:1566` (L3) on day 0 (the review reproduced `:1899` at `p = 0.5`,
+  `days_after_sow = 1`).
   noodl does the evident intent: no water, no available uptake, so `N_max = P_max = 0`. Event
   `"crop_uptake_dry_soil"` (Y18).
 
@@ -804,8 +834,9 @@ P = precipitation;  E = et0 * et0_coefficient                       # :2455-2456
 P *= current_surface_area / area;  E *= current_surface_area / area # :2458-2459
 ```
 
-- `current_surface_area` defaults to 0 and has no override route, so a default variable-area
-  surface receives no rain and no evaporation (run while writing this spec: its precipitation
+- `current_surface_area` is configured in the constructor (`:2443`), default 0, and is a
+  driver; it is refused as an override (no `apply_overrides` consumes it). A default
+  variable-area surface receives no rain and no evaporation (run while writing this spec: its precipitation
   volume was 0.0).
 - Erosion still reads the unscaled precipitation (`:1940`). Transcribed.
 
@@ -845,6 +876,10 @@ rows in the state layout's order, `Land`s in configuration order and surfaces in
   - A run can be warm-started from another run's state.
 - The pools and the crop and climate registers are not water held, so the mass balance skips
   them and they join `_FLAT_KEYS` where flat (Y11).
+- **3c adds nothing to `end_timestep`.** The engine's rule is that `end_timestep` calls no
+  `ctx.decide` or `ctx.call` (`day.py:1216`). Every new register is written during `Land.run`,
+  `apply_irrigation` or the garden handlers (the harvest's reset of `days_after_sow` included,
+  in `calc_crop_cover`); the only end-of-day work on a growing surface is 3b's decay (Y50).
 
 ## Inputs
 
@@ -874,7 +909,10 @@ monthly table, so every day of a month gets that month's value (Y23). The variab
 - `nhx-dry`, `noy-dry`, `srp-dry`, `nhx-wet`, `noy-wet`, `srp-wet`: read by every surface whose
   constructor data has `nhx-dry`;
 - `nhx-fertiliser`, `noy-fertiliser`, `srp-fertiliser`, `nhx-manure`, `noy-manure`,
-  `srp-manure`: read by every growing surface when `nitrate` is a configured pollutant.
+  `srp-manure`: read by every growing surface when `nitrate` is in the network's pollutant
+  list. The check uses the network's list in both modes: a quantity-only run of a network that
+  lists `nitrate` must carry complete fertiliser and manure data, because the equivalent WSIMOD
+  run's `POLLUTANTS` holds `nitrate` and reads them (Y49).
 
 All are in `kg/m2/d` (WSIMOD's docstrings, `land.py:354-359`, `:1167-1172`, "kg/m2/timestep").
 The build-time forcing check refuses a missing `(variable, first of the month)` by name. As in
@@ -980,7 +1018,11 @@ New refusals, each by name with a test:
     `org-phosphorus`, `solids` and `temperature`. WSIMOD raises `KeyError` without them
     (`:1294-1307`, `:1465`, `:2088`, `:1822`). Its docstring names five of them and omits
     `solids` (`:1119-1121`).
-  - `ammonia`, `nitrate` or `phosphate` non-additive with deposition configured.
+  - A non-additive `ammonia`, `nitrate` or `phosphate` with deposition configured is **not**
+    refused: WSIMOD runs it. The value blends into the tank at volume 0, which changes it only by
+    rounding, as Y38's non-additive `pollutant_load` does (`core.py:104-114`), while on a growing
+    surface the pool still receives the N and P (a pool–tank gap by construction). Transcribed
+    and documented (Y43).
 - **Surface data.**
   - The accepted variables are the six deposition ones on every surface class, plus, on a growing
     surface, the six fertiliser and manure ones. Any other variable is refused (3a's D21
@@ -991,11 +1033,12 @@ New refusals, each by name with a test:
   - Its configuration may not carry `depth` (`TypeError`), a float `initial_soil_storage`
     (`TypeError`), or an `initial_soil_storage` mapping that lacks a key (`KeyError`).
   - `crop_factor_stages` and `crop_factor_stage_dates` must have the same length. Any date whose
-    interpolation would raise `IndexError` or divide by zero is refused.
+    interpolation would raise `IndexError` or divide by zero is refused: the run's dates at
+    build, any later date when `model.step` reaches it (Y47).
   - `sowing_day` and `harvest_day` must be integral.
   - `adsorption_nr_maxiter` must be a non-negative integer.
-  - `wilting_point > field_capacity` (`TAW < 0`) is refused, which is stricter than WSIMOD's
-    print (Y27).
+  - `wilting_point ≥ field_capacity` (`TAW ≤ 0`) is refused by name. `TAW < 0` is stricter
+    than WSIMOD's print; `TAW = 0` crashes WSIMOD on day 0 (Y27, Y44).
   - The domain refusals below are checked at build and again at `bind`. With `nitrate`, each
     stands for a WSIMOD crash:
     - `rooting_depth ≤ 0`, `bulk_density ≤ 0`, `kfr ≤ 0` and `nfr ≤ 0` (adsorption and erosion
@@ -1004,8 +1047,8 @@ New refusals, each by name with a test:
     - `hsatINs ≤ 0` (`din_conc + hsatINs` can be 0);
     - `limpar < 0`, with which a dry soil reaches `DI.N / 0`;
     - `field_capacity ≤ 0` (`smc / field_capacity_m`).
-  - In both modes, the `(1 − p)·TAW = 0` stress case is not refused: it is the evident intent
-    (Y17).
+  - In both modes, the `ET_depletion_factor = 1` stress case is not refused: it is the evident
+    intent (Y17).
 - **`IrrigationSurface`:** none beyond its parent's. The missing-pollutant crash is avoided
   (Y20).
 - **Override refusals:**
@@ -1073,11 +1116,11 @@ In the list below, `S` is `node:N/surfaces.<s>`.
 
   The leap, sowing and harvest tests are structural and record nothing.
 - **`pull_storage`:** `S/pull_storage/empty` (`:1446`), `S/pull_storage/clip` (`:1450`) and
-  `S/pull_storage/no_din` (noodl's guard, Y18).
+  `S/pull_storage/no_din` (noodl's guard, Y18; event `"pull_storage_no_din"`).
 - **`adjust_vqip_to_liquid`:** `S/adjust_vqip_to_liquid/N` and `…/P` (`:1595`, `:1599`), with
   `call` counting the fertiliser, manure, dry and wet calls in call order.
 - **`soil_pool_transformation`:**
-  - `S/soil_pool_transformation/no_din` (Y18);
+  - `S/soil_pool_transformation/no_din` (Y18; event `"transformation_no_din"`);
   - `S/soil_pool_transformation/inorganic_N`, `…/organic_N`, `…/inorganic_P` and `…/organic_P`
     (`:1770`, `:1783`, `:1790`, `:1797`).
 - **`calc_temperature_dependence_factor`:** `S/calc_temperature_dependence_factor/warm` and
@@ -1121,17 +1164,30 @@ Every branch after a guard is evaluated under the mask that the guard leaves.
 | `"nutrient_pool_not_tracking"` | a `pull_pollutants` clamp removes more than `FA` (`:1806`, `:1920`, `:2148`, `:2250`) | its check is dead (defect table) |
 | `"freundlich_flow_adjusted"` | `request − extracted > FA` (`:2241`, `:2256`) | its test is reversed, never prints |
 | `"crop_water_stress_zero_denominator"` | Y17 | `ZeroDivisionError` |
-| `"nutrient_split_zero_denominator"` | Y18 (`:1459-1485`, `:1758`) | `ZeroDivisionError` |
+| `"pull_storage_no_din"` | Y18 (`:1459-1485`): the species set to 0 | `ZeroDivisionError` |
+| `"transformation_no_din"` | Y18 (`:1758`): the proportion set to 0 | `ZeroDivisionError` |
 | `"crop_uptake_dry_soil"` | Y18 (`:1898-1907`) | `ZeroDivisionError` |
 
 The print check (W90/W91) maps the first two events one to one onto WSIMOD's prints.
 "warning: TAW < 0" and the `depth` "ERROR" are never printed, because noodl refuses those
-configurations. One named admission is measured and asserted (Y35): WSIMOD's own node check
-prints round-off "mass balance error for <additive> of x in <land>" lines on lands with growing
-surfaces (run while writing this spec: |x| ≈ 1e-17). The plan measures the largest
-|x| / magnitude over the cases (`magnitude = 10**int(log10(largest))`, `core.py:405-411`) and
-asserts that every such line stays below the measured bound, which is expected at round-off
-(≤ 1e-10 relative). noodl's residual closes within 1e-12 × scale.
+configurations. One named admission is measured and asserted (Y35, Y41): WSIMOD's own node
+check prints round-off lines of exactly the form "mass balance error for <additive> of x in
+<land>" on lands that hold a growing surface (run while writing this spec: |x| ≈ 1e-17). They
+print when a tank holds a large organic store and the day's flows are small, because WSIMOD's
+`ds_` is a difference of two large stores while its normaliser `magnitude =
+10**int(log10(largest))` (`core.py:405-411`) is the flow scale. `|x| / magnitude` therefore has
+no useful bound (the review measured 1.7e-9). The admission is bounded by the store instead:
+
+- per case and per pollutant, `|x| ≤ c · ε · S`, where `ε = 2.220446049250313e-16` and `S` is
+  the largest store of that pollutant on the land's surface tanks that day (start or end);
+- `c` is measured in the plan and stated in the test. The review measured `|x| ≈ 3e-16 × S`
+  (1.6e-16 at 0.5 kg, 1.7e-13 at 500 kg), so `c ≈ 1.4` there; the plan sets `c` to the
+  measured maximum over the cases, rounded up to the next integer;
+- a case where no such line is measured asserts **zero** such lines (the review's 420-day
+  draining case without `initial_soil_storage` printed none);
+- every other print stays a failure.
+
+noodl's residual closes within 1e-12 × scale.
 
 ### The replay harness
 
@@ -1188,15 +1244,15 @@ none of these is in them. 26 rows.
 
 | # | Defect | WSIMOD | noodl | Test |
 |---|---|---|---|---|
-| L1 | `to_datetime.is_leap_year` is a method; `if t.is_leap_year:` tests the bound method (`land.py:1526`, `model.py:114-121`) | every year's day of year after 28 February is shifted by one; run while writing this spec | reproduced: `Model.load`'s path (Y13) | `test_every_year_shifts_the_day_after_february`; `growing_spring` spans 2003–2005 |
-| L2 | The autumn calendar `[0, sow, harvest, harvest+1, 365]` is unsorted when `sowing_day > harvest_day` (`:1335-1341`), and `bisect_left` needs a sorted list | autumn-sown crops have zero crop and ground cover all year; run while writing this spec | reproduced exactly (rule 2); documented (Y15) | `growing_autumn`; unit test over days 1–365 against `quick_interp` |
+| L1 | `to_datetime.is_leap_year` is a method; `if t.is_leap_year:` tests the bound method (`land.py:1526`, `model.py:114-121`) | every year's day of year after 28 February is shifted by one; run while writing this spec | reproduced: the individual-files loader's path (`model.py:347-348`), the format noodl reads; the unified-data (parquet) loader uses pandas dates and shifts only in leap years (Y13, Y42) | `test_every_year_shifts_the_day_after_february`; `growing_spring` spans 2003–2005 |
+| L2 | The calendar `[0, sow, harvest, harvest+1, 365]` is unsorted when `sowing_day > harvest_day` or `harvest_day = 365` (`:1335-1341`), and `bisect_left` needs a sorted list | autumn-sown crops have zero crop and ground cover all year; run while writing this spec. The default calendar is unsorted too, but benign | reproduced exactly (rule 2); documented (Y15) | `growing_autumn`; unit test over days 1–365 against `quick_interp` |
 | L3 | `(1 − ET_depletion_factor) · TAW` divides (`:1564-1568`); the default `ET_depletion_factor = 1` makes it 0 | `ZeroDivisionError` once the soil reaches its wilting point; run while writing this spec (`:1566`) | evident intent `Ks = 0`; event (Y17) | `growing_default_depletion` (crash case) |
-| L4 | `TAW < 0` only prints (`:1361-1362`) | `Ks` can exceed 1 | refused (Y27) | refusal test |
-| L5 | `pull_storage` divides by the tank's DIN (`:1459-1485`) | `ZeroDivisionError` when the tank has no inorganic N and water flows; run while writing this spec (`:1460`) | species 0; event (Y18) | `growing_no_din` (crash case) |
-| L6 | `soil_pool_transformation` divides by `nitrate + ammonia` (`:1758-1760`) | `ZeroDivisionError` with neither; run while writing this spec (`:1758`) | proportion 0; event (Y18) | `growing_nitrite_only` (crash case) |
-| L7 | `calc_crop_uptake` divides by the tank volume (`:1898-1907`) | `ZeroDivisionError` with crops and an empty soil; run while writing this spec (`:1899`) | available uptake 0; event (Y18) | `growing_empty_soil` (crash case) |
-| L8 | `effective_precipitation_flushing` extracts the outflows' nutrients from the pools that `pull_storage` already extracted them from (`:1458`, `:1605-1645`) | the dissolved pools lose them twice; after 120 days tank P 1.158 against pool P 0.052, and equal without the flushing; run while writing this spec | reproduced (Y16): every growing-surface result depends on it, and the fix has two forms (drop the flushing, or the extraction in `pull_storage`); documented | `growing_spring`; `test_the_pools_are_flushed_twice` (noodl's pool gap equals WSIMOD's) |
-| L9 | Uptake and denitrification take all N as nitrate (`:1917`, `:2145`); `simple_deposition`, the tank's decay (3b) and irrigated nitrite bypass the pool | the tank and the pool diverge further. With flushing off, DIN after 120 days was tank 15.5 against pool 0.18; run while writing this spec. Where the pool exceeds the tank, `pull_storage` can make a tank column negative | reproduced; event `"nutrient_pool_not_tracking"` where the tank clamps | `growing_spring`, `growing_decay` |
+| L4 | `TAW < 0` only prints (`:1361-1362`); `TAW = 0` divides by zero | `Ks` can exceed 1; `ZeroDivisionError` on day 0 | `wilting_point ≥ field_capacity` refused by name (Y27, Y44) | refusal tests (`>` and `=`) |
+| L5 | `pull_storage` divides by the tank's DIN (`:1459-1485`) | `ZeroDivisionError` when the tank has no inorganic N and water flows: any growing surface started from a zero-N tank with zero first-month inputs; run while writing this spec (`:1460`) | species 0; event `"pull_storage_no_din"` (Y18) | `growing_no_din` (crash case) |
+| L6 | `soil_pool_transformation` divides by `nitrate + ammonia` (`:1758-1760`) | `ZeroDivisionError` with neither, on day 0 for a plain zero-N tank with zero first-month inputs; run while writing this spec (`:1758`) | proportion 0; event `"transformation_no_din"` (Y18) | `growing_zero_n` and `growing_nitrite_only` (crash cases) |
+| L7 | `calc_crop_uptake` divides by the tank volume (`:1898-1907`) | `ZeroDivisionError` with crops and an empty soil, reachable only with `ET_depletion_factor < 1` (with 1, L3 crashes first); run while writing this spec (`:1899`) | available uptake 0; event (Y18) | `growing_empty_soil` (crash case) |
+| L8 | `effective_precipitation_flushing` extracts the outflows' nutrients from the pools that `pull_storage` already extracted them from (`:1458`, `:1605-1645`) | the dissolved pools lose them twice; after 120 days tank P 1.158 against pool P 0.052, and equal without the flushing; run while writing this spec (the review: 0.2406 against 0.0506, both 0.05560 without the flushing) | reproduced, no switch (Y16, Y45): every growing-surface result depends on it, and the two fix forms differ (Y45); documented | `growing_spring`; `test_the_pools_are_flushed_twice` asserts that noodl's tank–pool gap equals WSIMOD's, not a hard-coded ratio |
+| L9 | Uptake and denitrification take all N as nitrate (`:1917`, `:2145`); `simple_deposition`, the tank's decay (3b) and irrigated nitrite bypass the pool | the tank and the pool diverge further. With flushing off, DIN after 120 days was tank 15.5 against pool 0.18; run while writing this spec. Where the pool exceeds the tank, `pull_storage` can make a tank column negative (the mechanism is real; neither the review's 420-day case nor this spec's runs produced one) | reproduced; event `"nutrient_pool_not_tracking"` where the tank clamps | `growing_spring`, `growing_decay`; the test checks the sign of every tank column and states whether a negative one occurred |
 | L10 | `Tank.pull_pollutants` mutates and returns its argument (`tanks.py:261-266`), so `compare_vqip(out_, out2_)` compares an object with itself (`:1808`, `:1921`, `:2149`, `:2251`) | "nutrient pool not tracking soil tank" can never print; run while writing this spec | the clamp is transcribed; the check's evident intent is the event (Y16) | `test_a_clamped_pull_records_the_event` |
 | L11 | The Freundlich warnings test `extracted − request > FA` (`:2242`, `:2257`), which `min` makes ≤ 0 | never prints | the evident test `request − extracted > FA`; event (Y16) | unit test with a short pool |
 | L12 | The soil temperature factor is `T/5` on `(0, 5]` (`:1826-1827`), not HYPE's `2^((T−20)/10) · T/5`, which WSIMOD's River uses (`storage.py:775-777`) | jumps from 1 to 0.354 at 5 °C, and is larger at 4.9 °C than at 15 °C | reproduced; documented (Y19) | unit test either side of 5 °C; `growing_spring` (cold spells) |
@@ -1320,7 +1376,8 @@ cases in `tests/verification/_wsimod_cases.py`. The bounds are W19's: 0 (bitwise
 - The quantity-only run of `config.yml` stays. A test asserts that the quantity-only volumes
   equal the live volumes exactly, on both demos and on every purpose-built case.
 - WSIMOD's prints are checked (W90/W91) with the event mapping and the one named admission
-  above (Y35).
+  above (Y35, Y41): bounded by the store per case and pollutant, and zero lines asserted where
+  zero is measured.
 - noodl's balance closes within 1e-12 × scale on every case and day (X8's contiguous window),
   and the parts sum to the aggregates.
 
@@ -1352,9 +1409,10 @@ season. Each case pins what is listed.
 - **`growing_autumn`.** Sowing 280 and harvest 200, which pins the unsorted calendar (L2), the
   autumn uptake temperature function and `days_after_sow − 25`, and a season crossing the new
   year.
-- **`growing_quantity`.** The same surface with pollutants `phosphate` and `temperature` only (no
+- **`growing_no_nitrate`.** The same surface with pollutants `phosphate` and `temperature` only (no
   `nitrate`), which pins the structural switch: calendar and IHACRES only, deposition straight
-  into the tank, and no pool state.
+  into the tank, and no pool state. It runs with pollutants on; noodl's quantity-only mode runs
+  on every case separately (Y49).
 - **`growing_decay`.** The full 12 pollutants and `decays` on ammonia and nitrite. It pins:
   - 3b's decay and nitrite carry-over on a growing tank;
   - the pool that ignores them (L9);
@@ -1383,9 +1441,11 @@ season. Each case pins what is listed.
 - **Crash cases.** WSIMOD raises; noodl runs, with the evident intent and the event, at value
   parity up to WSIMOD's crash day:
   - `growing_default_depletion` (L3);
-  - `growing_no_din` (L5);
-  - `growing_nitrite_only` (L6);
-  - `growing_empty_soil` (L7);
+  - `growing_no_din` (L5): a zero-N tank, no deposition, rain on day 0;
+  - `growing_zero_n` (L6): a plain zero-N tank with zero first-month inputs, crashing on day 0;
+  - `growing_nitrite_only` (L6): the nitrite-only variant;
+  - `growing_empty_soil` (L7): `ET_depletion_factor = 0.5`, an empty soil and a sown crop, so
+    that `:1899` and not `:1566` is reached;
   - `irrigation_without_nutrients` (L13).
 
 Default-suite time is measured as W15 requires, and no case may be among the default suite's
@@ -1498,12 +1558,14 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   `"wsimod.crop_cover"`, `"wsimod.ground_cover"` and `"wsimod.surface_climate"`, as tabled.
   - Why: Y5; one tensor per concept, and −1 keeps `days_after_sow` a single float register.
   - Cost if wrong: a state-format change before release.
-- **Y13, the leap test is reproduced (L1).**
-  - Why: every configuration-loaded WSIMOD run does it, and parity needs it.
+- **Y13 (amended by Y42), the leap test is reproduced (L1).**
+  - Why: WSIMOD's individual-files loader, which reads the format noodl reads, does it, and
+    parity needs it.
   - Cost if wrong: crop factors shifted by one day; documented.
 - **Y14, the calendar arithmetic is done at build time.** That covers `bisect_left`, Python
   indexing (the wrap included) and the `sin` of the date. Configurations whose interpolation
-  would raise are refused by date.
+  would raise are refused by date: the run's dates at build, later dates when `model.step`
+  reaches them (Y47).
   - Why: the inputs are structural, so the result is Python's by construction, and the gradients
     follow the piecewise-linear segments (Y2).
   - Cost if wrong: none for values; a refusal names the first failing date.
@@ -1518,7 +1580,8 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   - Why: every growing-surface value depends on these behaviours, the fix has two candidate
     forms, and X14's precedent is to reproduce and document. The events make the gap visible.
   - Cost if wrong: noodl inherits a modelling error, which is documented and visible.
-- **Y17, the stress coefficient's zero denominator gives `Ks = 0` (L3).**
+- **Y17 (amended by Y44), the stress coefficient's zero denominator gives `Ks = 0` (L3).** It
+  applies to `ET_depletion_factor = 1` only, since `TAW ≤ 0` is refused.
   - Why: WSIMOD crashes there; 0 is the formula's limit and FAO's value at the wilting point.
   - Cost if wrong: dry-soil evaporation of default growing surfaces differs from a future WSIMOD
     fix; recorded by the event.
@@ -1565,8 +1628,8 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   new `log_python`, `log10_python` and `sin_python`, and date-only values are computed at build.
   - Why: the measured last-bit differences (Approach rule 1).
   - Cost if wrong: speed at large batches.
-- **Y27, stricter refusals.** These are `wilting_point > field_capacity` (L4), `depth` (L17), and
-  the parameter-domain zeros listed under Validation.
+- **Y27 (amended by Y44), stricter refusals.** These are `wilting_point ≥ field_capacity` (L4),
+  `depth` (L17), and the parameter-domain zeros listed under Validation.
   - Why: each is a WSIMOD crash, or a print followed by meaningless results.
   - Cost if wrong: a configuration that WSIMOD runs must be edited; the `TAW < 0` one is the
     stricter case.
@@ -1590,12 +1653,13 @@ Each ruling states what was decided, why, and the cost if it is wrong.
 - **Y33, `crop_factor_stages` is dense per class with inert padding.**
   - Why: 3a's one-layout-per-class rule (X34) and X9's inert pattern.
   - Cost if wrong: a driver-shape change.
-- **Y34, the seven events** of the events table.
-  - Why: two mirror WSIMOD prints (W90/W91), two give dead checks their intent, and three record
+- **Y34 (amended by Y46), the eight events** of the events table.
+  - Why: two mirror WSIMOD prints (W90/W91), two give dead checks their intent, and four record
     evident-intent guards (D13).
   - Cost if wrong: more diagnostic keys.
-- **Y35, one print-check admission:** WSIMOD's round-off "mass balance error" lines on growing
-  lands, with a measured, asserted bound.
+- **Y35 (amended by Y41), one print-check admission:** WSIMOD's round-off "mass balance error"
+  lines on growing lands, bounded by the store (`|x| ≤ c · ε · S`, per case and pollutant), with
+  zero lines asserted wherever zero is measured.
   - Why: run while writing this spec; they are WSIMOD's own summation rounding, while noodl's
     residual closes.
   - Cost if wrong: a real WSIMOD balance error below the bound would go unflagged; noodl's own
@@ -1607,7 +1671,8 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   with `nitrate`.
   - Why: WSIMOD's code, against its docstring.
   - Cost if wrong: none, since a float crashes WSIMOD.
-- **Y38, `pollutant_load` keys.** A non-additive entry is accepted and transcribed. A key that is
+- **Y38, `pollutant_load` keys.** A non-additive entry is accepted and transcribed, and so is a
+  non-additive deposition species (Y43). A key that is
   not a pollutant is listed in `model.unread`.
   - Why: WSIMOD runs both; 3a's refusals were placeholders until 3c.
   - Cost if wrong: a typo goes unnoticed except in `model.unread`.
@@ -1619,13 +1684,76 @@ Each ruling states what was decided, why, and the cost if it is wrong.
     nothing decays the pool.
   - Cost if wrong: a pool–tank gap, reproduced and visible (L9).
 
+### Rulings after the review (Y41–Y50)
+
+These record the coordinator's rulings on the Fable spec review (findings 1–14).
+
+- **Y41, the Y35 admission is bounded by the store (finding 1).** Per case and per pollutant,
+  `|x| ≤ c · ε · S`, with `S` the largest store of that pollutant on the land's surface tanks
+  that day and `c` measured and stated in the test. Zero printed lines are asserted wherever
+  zero is measured, and the admitted text is exactly "mass balance error for <additive> of x in
+  <land>" on lands holding a growing surface.
+  - Why: WSIMOD's normaliser is the flow scale, so `|x| / magnitude` is unbounded as the flows
+    shrink (the review measured 1.7e-9, seventeen times the first draft's bound), while the
+    rounding scales with the store.
+  - Cost if wrong: a case with a larger store-relative rounding fails, and its `c` is
+    re-measured.
+- **Y42, L1 names its loader (finding 2).** The decision stands. The claim is corrected to the
+  individual-files loader (`model.py:347-348`), and the unified-data loader's pandas dates (a
+  shift in leap years only) are named, here and on the application page.
+  - Why: the first draft called the quirk universal, which it is not.
+  - Cost if wrong: none for values; a user comparing with a parquet-loaded WSIMOD is told why.
+- **Y43, non-additive deposition species are transcribed, not refused (finding 5).**
+  - Why: WSIMOD runs them, with no crash and no print, as it runs Y38's non-additive load.
+  - Cost if wrong: a configuration error goes unflagged; the effect is rounding in the tank and
+    a pool–tank gap on a growing surface, documented.
+- **Y44, `wilting_point ≥ field_capacity` is refused by name (finding 6).** Y17's guard then
+  covers only `ET_depletion_factor = 1`.
+  - Why: `TAW = 0` crashes WSIMOD on day 0, and under Y17 it would run a soil that never
+    evaporates; nothing WSIMOD can run is lost.
+  - Cost if wrong: none for runnable configurations; `TAW < 0` remains the stricter case (Y27).
+- **Y45, L8 is closed: reproduced, no switch (finding 14).** The two fix forms differ. Dropping
+  the flushing leaves `pull_storage`'s two sequential extractions, which remove `DI₀·(p₁ + p₂ −
+  p₁p₂)`. Dropping the extraction in `pull_storage` and keeping the flushing removes `DI₀·(p₁ +
+  p₂)`, and the reply's species split then needs a pool read that WSIMOD does not have. Neither
+  is evident. `test_the_pools_are_flushed_twice` asserts that noodl's tank–pool gap on
+  `growing_spring` equals WSIMOD's, not a hard-coded ratio. Whether L8 and the other defects go
+  upstream is the user's decision, which is pending (Y4).
+  - Why: parity, X14's precedent, and no single evident fix.
+  - Cost if wrong: noodl inherits a large modelling error, documented and visible in the state.
+- **Y46, two events for the two zero-DIN guards (finding 13).** `"pull_storage_no_din"` (species
+  set to 0, `:1459-1485`) and `"transformation_no_din"` (proportion set to 0, `:1758`) replace
+  `"nutrient_split_zero_denominator"`.
+  - Why: the remedies differ, and a reader should tell them apart by name.
+  - Cost if wrong: one more event key.
+- **Y47, the interpolation refusal checks the run's dates (finding 11).** A `model.step` past
+  them is checked, and refused by name, when the step is taken.
+  - Why: parity with WSIMOD, which only crashes on dates it runs.
+  - Cost if wrong: a warm-started step can fail late, with a named refusal.
+- **Y48, the crash triggers are named as ordinary (findings 3, 4).** L5 and L6 hit any growing
+  surface started from a zero-N tank with zero first-month inputs (deposition masks the day-0
+  `:1460` crash); L7 needs `ET_depletion_factor < 1`. The new case `growing_zero_n` and
+  `growing_empty_soil` (at `p = 0.5`) pin them, and the application page says that WSIMOD needs
+  initial inorganic N or a non-zero first-month input.
+  - Why: the first draft's triggers read as exotic, and `growing_empty_soil` could have
+    duplicated L3.
+  - Cost if wrong: one more crash case.
+- **Y49, `growing_no_nitrate`, and the forcing check uses the network's pollutant list (finding
+  9).** The case formerly named `growing_quantity` runs with pollutants on. The fertiliser and
+  manure check applies in both modes whenever the network lists `nitrate`.
+  - Why: the old name suggested noodl's quantity-only mode, and the forcing rule was ambiguous
+    across modes; WSIMOD reads the data whenever its `POLLUTANTS` holds `nitrate`.
+  - Cost if wrong: a quantity-only run must carry fertiliser data it does not use.
+- **Y50, textual corrections (findings 7, 8, 10, 12).**
+  - The sign of zero is qualified to the `torch.equal` comparison (rule 6).
+  - 3c adds nothing to `end_timestep` (`day.py:1216`).
+  - The default calendar is unsorted too, and benign.
+  - `current_surface_area` is a constructor keyword and a driver, refused only as an override.
+  - Why: each sentence could be read two ways.
+  - Cost if wrong: none.
+
 ## Open questions
 
-- **Upstream filing (Y4).** The user decides whether L1–L25 go upstream as a third issue after
-  #258 and #259. Provisional: nothing is filed. The spec review lists the candidates, with the
-  crash and mass-loss rows (L3, L5–L10, L13, L14) as the strongest.
-- **L8 reproduce or fix (Y16).** The double flush is the largest behavioural defect here: the
-  pools fall to a few percent of the tank within months. Provisional ruling: reproduce for
-  parity, document, and make the gap visible. The review may prefer an opt-in noodl switch that
-  drops the flushing (`effective_precipitation_flushing` removed), off by default. This spec does
-  not add one, because no WSIMOD run could verify it.
+- **Upstream filing (Y4).** Whether L1–L25 go upstream as a third issue after #258 and #259 is
+  the user's decision, which is pending. Nothing is filed until then. The crash and mass-loss
+  rows (L3, L5–L10, L13, L14) are the strongest candidates.
