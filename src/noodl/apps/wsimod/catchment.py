@@ -34,6 +34,12 @@ class Catchment(Node):
     :meth:`bind` takes ``"flow"`` ``(...)`` and ``"concentration"`` ``(..., K)``, the day's
     forcing in the pollutant order. ``unrouted_water`` accumulates over the day's ``route``
     calls and resets at ``end_timestep`` (``:136-138``).
+
+    A catchment that is the ``in_port`` of a user ``DecayArc`` or ``DecayArcAlt`` is also bound
+    ``"temperature"`` ``(...)``, its own ``"wsimod.temperature"`` row, which only the arc's
+    decay reads (X29). The outflow reads ``"concentration"`` alone, so the two drivers are
+    independent: where ``temperature`` is a pollutant its value is in both, and changing one
+    leaves the other as it was.
     """
 
     wsimod_type: ClassVar[str] = "Catchment"

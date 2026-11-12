@@ -1840,6 +1840,92 @@ def _decay_queue_groundwater_n0() -> dict:
     return _decay_queue_groundwater(number_of_timesteps=0)
 
 
+def _arc_temperatures(days: int, seed: int) -> dict:
+    """An in-port's air temperatures in [12, 28] (``_decay_temperatures``) for its arcs' decay."""
+    return _decay_temperatures(days, seed)
+
+
+_ARC_DECAYS = {
+    "phosphate": {"constant": 0.06, "exponent": 1.07},
+    "temperature": {"constant": 0.02, "exponent": 1.03},  # a non-additive column decays
+}
+
+
+def _decay_arc() -> dict:
+    """W21's ``queue_arc`` with its arcs made user ``DecayArc``s (``arcs.py:668-728``):
+
+    - ``q`` (``n = 2``) pushes into the reservoir ``res`` of capacity 6, which rejects a due
+      request on day 7: the backflow is the decayed water (``:399-405``);
+    - ``q_pull`` (``n = 1``) is the reservoir ``basin``'s abstraction from ``well``: the pulled
+      water decays after it left the sender, and is handed over the next day;
+    - ``b_to_sink`` (``n = 0``) decays each push once, on entry, and delivers it at once;
+    - ``src2_to_j`` (``n = 0``) leaves a catchment: it decays at the catchment's
+      ``"wsimod.temperature"`` row (X29).
+
+    Each in-port (``a``, ``well``, ``b``) has a temperature forcing that crosses 20 degC. Every
+    arc carries requests of one direction, so no end of day finds due-and-waiting rows in both
+    (the precondition of D21): noodl's ``"decay_arc_order_unknown"`` is false on every day."""
+    mapping = _queue_arc()
+    days = _QUEUE_ARC_DAYS
+    for seed, node in enumerate(mapping["nodes"]):
+        if node["name"] in ("a", "well", "b"):
+            node["data_input_dict"] = _arc_temperatures(days, 80 + seed)
+    phosphate = {"phosphate": _ARC_DECAYS["phosphate"]}
+    for arc in mapping["arcs"]:
+        if arc["name"] == "q":
+            arc.update(type_="DecayArc", decays=dict(_ARC_DECAYS))
+        elif arc["name"] == "q_pull":
+            arc.update(type_="DecayArc", decays=dict(phosphate))
+        elif arc["name"] in ("b_to_sink", "src2_to_j"):
+            arc.update(type_="DecayArc", number_of_timesteps=0, decays=dict(_ARC_DECAYS))
+    return mapping
+
+
+_DECAY_ARC_ALT_DAYS = 40
+
+
+def _decay_arc_alt() -> dict:
+    """A user ``DecayArcAlt`` (``arcs.py:731-805``, ``n = 2``) from the node ``head`` into a
+    reservoir (a ``Node`` pushes to Node, River, Waste and Reservoir only, ``nodes.py:62-65``).
+    The catchment's flow is 0 on irregular days, so ``head`` pushes on some days and
+    not on others: on a day without a push the arc's slot 0 is not delivered, and the end of
+    day merges it with slot 1 (the swapped merge, X13). ``temperature`` blends where a push
+    sums into a queued key, and ``phosphate`` and ``ammonia`` decay at ``head``'s temperature
+    (the in-port's, ``core.py:464-470``)."""
+    days = _DECAY_ARC_ALT_DAYS
+    source = _catchment("src", days, 91)
+    rng = random.Random(92)
+    for date in _dates(days):
+        if rng.random() < 0.35:
+            source["data_input_dict"][("flow", date)] = 0.0
+    decays = {
+        "phosphate": {"constant": 0.07, "exponent": 1.06},
+        "ammonia": {"constant": 0.12, "exponent": 1.08},
+    }
+    return _storage_case(
+        [
+            source,
+            _store("head", "Node", data_input_dict=_arc_temperatures(days, 93)),
+            _store("b", "Reservoir", capacity=300.0),
+            _store("sink", "Waste"),
+        ],
+        [
+            _arc("src_to_head", "src", "head"),
+            _arc(
+                "head_to_b",
+                "head",
+                "b",
+                type_="DecayArcAlt",
+                number_of_timesteps=2,
+                capacity=30.0,
+                decays=decays,
+            ),
+            _arc("b_to_sink", "b", "sink", capacity=9.0),
+        ],
+        [{"Catchment": "route"}, {"Reservoir": "distribute"}],
+    )
+
+
 def _nitrifying(volume: float) -> dict:
     """An ``initial_storage`` VQIP over WSIMOD's 12 default pollutants, with ammonia, nitrite and
     nitrate to decay (every key is needed: WSIMOD sums over its pollutant list)."""
@@ -2186,6 +2272,18 @@ CASES: dict[str, Case] = {
         days=_DECAY_DAYS,
         scale=_largest_volume(_decay_queue_groundwater_n0()),
         replay=("gw",),
+    ),
+    "decay_arc": Case(
+        build=_decay_arc,
+        days=_QUEUE_ARC_DAYS,
+        scale=_largest_volume(_decay_arc()),
+        replay=("a", "b", "res", "basin"),
+    ),
+    "decay_arc_alt": Case(
+        build=_decay_arc_alt,
+        days=_DECAY_ARC_ALT_DAYS,
+        scale=_largest_volume(_decay_arc_alt()),
+        replay=("b",),
     ),
     "surface_decay_nitrification": Case(
         build=_surface_decay_nitrification,

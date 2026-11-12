@@ -219,6 +219,10 @@ _CONSTRUCTORS: dict[str, tuple[dict[str, object], str | None]] = {
     "PushArc": ({}, "Arc"),
     "SewerArc": ({}, "Arc"),  # no __init__ of its own
     "WeirArc": ({}, "SewerArc"),  # no __init__ of its own
+    # arcs.py:671 and :734 (``decays={}``); neither has an apply_overrides of its own, so
+    # ``decays`` is no override
+    "DecayArc": ({"decays": {}}, "QueueArc"),
+    "DecayArcAlt": ({"decays": {}}, "AltQueueArc"),
 }
 
 # --- override chains -------------------------------------------------------------------------
@@ -382,13 +386,13 @@ ARC_SCHEMAS: dict[str, ClassSchema] = {
         "PushArc",
         "SewerArc",
         "WeirArc",
+        "DecayArc",
+        "DecayArcAlt",
     )
 }
 
 # Classes WSIMOD has and this port does not, with where they go (spec, Scope).
 OUT_OF_SCOPE: dict[str, str] = {
-    "DecayArc": "3b",
-    "DecayArcAlt": "3b",
     "GrowingSurface": "3c",
     "IrrigationSurface": "3c",
     "GardenSurface": "3c",

@@ -106,16 +106,31 @@ refused by name.
   `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
   air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
-  `DecayArc` and `DecayArcAlt` (sub-project 3b), `GrowingSurface`, `IrrigationSurface`,
-  `GardenSurface` and `VariableAreaSurface` (3c), and `EnfieldFoulSewer`, whose
-  `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
+  `GrowingSurface`, `IrrigationSurface`, `GardenSurface` and `VariableAreaSurface` (3c), and
+  `EnfieldFoulSewer`, whose `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
 
 ### Arcs
 
 `name`, `type_`, `in_port`, `out_port` (node names), `capacity`, `preference` and, for the queue
-arcs (`QueueArc`, `AltQueueArc`), `number_of_timesteps`. `decays` is refused (it belongs to the
-`Decay*` arcs of sub-project 3b). WSIMOD's `Arc` accepts any extra keyword silently; the reader
-refuses it by name.
+arcs (`QueueArc`, `AltQueueArc`, `DecayArc`, `DecayArcAlt`), `number_of_timesteps`. WSIMOD's
+`Arc` accepts any extra keyword silently; the reader refuses it by name.
+
+- `decays` is read on the user decay arcs `DecayArc` (a `QueueArc`, `arcs.py:668-728`) and
+  `DecayArcAlt` (an `AltQueueArc`, `arcs.py:731-805`) only, with the storage family's form (a
+  key per decaying pollutant, each with exactly `constant` and `exponent`, `exponent > 0`) and
+  WSIMOD's default `{}`; `decays: None` is refused (WSIMOD iterates it). On every other arc
+  class `decays` is refused: WSIMOD would store it unread (`arcs.py:52`). An arc override of
+  `decays` is refused too: an arc's `apply_overrides` takes `capacity` and `preference` only
+  (`arcs.py:87-96`).
+- A decay arc decays at its **in-port's** temperature (`core.py:464-470`), for either
+  direction, so that node needs a `temperature` forcing on every date, in both modes; a missing
+  date is refused when the model is built, naming the arc and the node. A plain `Node` takes the
+  forcing as `data_input_dict` or a `filename` override (which is then read, not listed in
+  `unread`). A `Catchment` in-port reads its `temperature` series, whether or not `temperature`
+  is a pollutant.
+- `parent` is refused on every arc: a decay object reads its temperature from a `parent`
+  attribute when it has one (`core.py:465-468`), and a configured value would be read as a
+  node.
 
 ### Dates
 

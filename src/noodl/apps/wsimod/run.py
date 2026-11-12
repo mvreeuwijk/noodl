@@ -13,7 +13,9 @@ Diagnostics. ``diagnostics``, a dict, receives:
 - ``"maxiter"``: ``{(node, method, call index): (..., T) bool}``, whether that distribute loop
   ended at ``MAXITER`` (WSIMOD prints "Maxiter reached ... at <date>");
 - ``"events"``: ``{name: (..., T, n_nodes) bool}`` for every name in :data:`EVENT_NAMES` (D13;
-  a condition that never fired is all False);
+  a condition that never fired is all False); an event recorded at an arc,
+  ``"decay_arc_order_unknown"`` (D21), is ``(..., T, n_arcs)`` in ``WsimodDay.arc_names``'
+  order;
 - ``"decisions"``, only when ``diagnostics["decisions"]`` is ``True`` on entry: a list over the
   days of that day's :class:`~noodl.apps.wsimod.engine.Decision` records, in call order;
 - ``"mass_balance"``: the :class:`WsimodMassBalance`, also ``WsimodResults.mass_balance``.
@@ -78,6 +80,7 @@ EVENT_NAMES = (
     "wtw_liquor_zero_denominator",
     "inaccurate_evaporation",
     "wtw_negative_solids",
+    "decay_arc_order_unknown",
 )
 """The warning conditions a run reports (D13): WSIMOD's prints and noodl's own."""
 
@@ -126,15 +129,14 @@ class WsimodResults:
 
 
 def _requires_grad(*groups) -> bool:
-    return any(
-        isinstance(v, Tensor) and v.requires_grad for g in groups if g for v in g.values()
-    )
+    return any(isinstance(v, Tensor) and v.requires_grad for g in groups if g for v in g.values())
 
 
 def _stack(records: list[Tensor], shape: torch.Size) -> Tensor:
     """The days' ``(..., X)`` values as ``(..., T, X)``."""
-    return torch.stack([torch.broadcast_to(r, (*shape, *r.shape[len(shape) :])) for r in records],
-                       dim=len(shape))
+    return torch.stack(
+        [torch.broadcast_to(r, (*shape, *r.shape[len(shape) :])) for r in records], dim=len(shape)
+    )
 
 
 def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBalance:
@@ -247,13 +249,21 @@ def wsimod_run(
         mass_balance=_balance(day, records, shape),
     )
     if diagnostics is not None:
-        off = torch.zeros((*shape, len(day.node_names)), dtype=torch.bool)
         names = [*EVENT_NAMES, *(k for r in records for k in r.events if k not in EVENT_NAMES)]
         diagnostics["maxiter"] = {
             site: _stack([r.maxiter[site] for r in records], shape) for site in records[0].maxiter
         }
         diagnostics["events"] = {
-            name: _stack([r.events.get(name, off) for r in records], shape)
+            name: _stack(
+                [
+                    r.events.get(
+                        name,
+                        torch.zeros((*shape, len(day.event_columns(name))), dtype=torch.bool),
+                    )
+                    for r in records
+                ],
+                shape,
+            )
             for name in dict.fromkeys(names)
         }
         diagnostics["mass_balance"] = results.mass_balance
@@ -262,4 +272,3 @@ def wsimod_run(
         else:
             diagnostics.pop("decisions", None)
     return results
-

@@ -977,3 +977,106 @@ def test_a_decay_queue_tank_with_no_decays_needs_the_parents_temperature():
     tank.end_timestep()
     assert tank.internal_arc.register[0].tolist() == [1.0, 0.5, 0.0]
     assert tank.storage.tolist() == [1.0, 0.5, 0.0]
+
+
+# --- the user DecayArcAlt (arcs.py:731-805) ---------------------------------------------------
+def test_decay_arc_alt_matches_wsimod_on_irregular_pushes(wsimod_tanks):
+    """A user ``DecayArcAlt`` (``n = 2``) out of a node whose temperature it reads
+    (``core.py:464-470``): irregular pushes at travel times 0-2, tiny and forced ones among them,
+    ``temperature`` a blended pollutant that decays too. Every reply, the register, ``present``,
+    ``vqip_out`` and ``total_decayed`` are WSIMOD's bitwise every day, and each day's
+    ``"DecayArcAlt.decayed"`` term is WSIMOD's ``diff``s of the day (its pushes, then its end of
+    day) summed from empty."""
+    from wsimod.arcs.arcs import DecayArcAlt as WDecayArcAlt
+    from wsimod.nodes.nodes import Node as WNode
+    from wsimod.nodes.waste import Waste as WWaste
+
+    from noodl.apps.wsimod.arcs import DecayArcAlt
+    from noodl.apps.wsimod.decay import read_decays
+
+    n = 2
+    g = torch.Generator().manual_seed(171)
+    u = lambda: float(torch.rand((), generator=g, dtype=F64))  # noqa: E731
+    theirs, diffs = [], [[] for _ in range(B)]
+    for b in range(B):
+        src = WNode(name=f"src{b}", data_input_dict={})
+        arc = WDecayArcAlt(
+            name="q",
+            in_port=src,
+            out_port=WWaste(name=f"out{b}"),
+            number_of_timesteps=n,
+            decays={k: dict(v) for k, v in QUEUE_DECAYS.items()},
+        )
+        original = arc.generic_temperature_decay
+
+        def capture(t, d, temperature, _original=original, _b=b):
+            out, diff = _original(t, d, temperature)
+            diffs[_b].append(diff)
+            return out, diff
+
+        arc.generic_temperature_decay = capture
+        theirs.append((src, arc))
+    src = Node(NodeSpec("src", "Node", "Node", {}), PQ)
+    out = Waste(NodeSpec("out", "Waste", "Waste", {}), PQ)
+    spec = ArcSpec(
+        "q",
+        "DecayArcAlt",
+        "src",
+        "out",
+        number_of_timesteps=n,
+        decays=read_decays("arc 'q'", QUEUE_DECAYS, PQ),
+    )
+    ours = DecayArcAlt(spec, src, out, PQ, length=n + 2)
+    assert ours.user and ours.decay is not None and ours.site == "arc:q"
+    length = ours.length
+    w = Worst()
+    blended = 0  # pushes into a key that already held water: the temperature blends
+    for d in range(50):
+        temperatures = [-5 + 50 * u() for _ in range(B)]
+        ctx = day(src, out, ours, p=PQ, shape=(B,), d=d)
+        src.bind({"temperature": torch.tensor(temperatures, dtype=F64)})
+        ours.bind_decay(ours.defaults["decays.constant"], ours.defaults["decays.exponent"])
+        for b, (w_src, _) in enumerate(theirs):
+            w_src.t = d
+            w_src.data_input_dict[("temperature", d)] = temperatures[b]
+            diffs[b].clear()
+        for k in range(int(torch.randint(0, 4, (), generator=g))):
+            kind = ["push", "push", "force", "tiny"][int(torch.randint(4, (), generator=g))]
+            time = int(torch.randint(3, (), generator=g))
+            active = torch.rand(B, generator=g) < 0.85
+            requests = [random_vqip(g, 6.0) for _ in range(B)]
+            if kind == "tiny":
+                for r in requests:
+                    r["volume"] = 1e-12
+            present = torch.broadcast_to(ours.present, (B, length + 1))[:, time + n]
+            blended += int((present & active).sum())
+            got = ours.send_push_request(
+                stack(requests), active=active, force=kind == "force", time=time
+            )
+            for b, (_, arc) in enumerate(theirs):
+                if active[b]:
+                    ref = arc.send_push_request(dict(requests[b]), force=kind == "force", time=time)
+                    w.vqip(f"day {d} call {k} {kind} [{b}]", got[b], ref)
+        vqip_out = torch.broadcast_to(ours.vqip_out, (B, 1 + PQ.K))
+        for b, (_, arc) in enumerate(theirs):
+            w.vqip(f"day {d} [{b}] vqip_out", vqip_out[b], arc.vqip_out)
+        ours.end_timestep()
+        for _, arc in theirs:
+            arc.end_timestep()
+        register = torch.broadcast_to(ours.register, (B, length + 1, 1 + PQ.K))
+        present = torch.broadcast_to(ours.present, (B, length + 1))
+        total = torch.broadcast_to(ours.total_decayed, (B, 1 + PQ.K))
+        term = torch.broadcast_to(ctx.terms["DecayArcAlt.decayed"], (B, 1 + PQ.K))
+        for b, (_, arc) in enumerate(theirs):
+            label = f"end of day {d} [{b}]"
+            rows, keys = wsimod_register(arc.queue, length)
+            for i, row in enumerate(rows):
+                w.vqip(f"{label} register[{i}]", register[b, i], row)
+            assert present[b].tolist() == keys, label
+            w.vqip(f"{label} total_decayed", total[b], arc.total_decayed)
+            reference = 0.0
+            for diff in diffs[b]:
+                reference = reference + diff["phosphate"]
+            w.value(f"{label} term", term[b, PHOSPHATE], reference)
+    assert blended > 0
+    assert w.worst == 0.0

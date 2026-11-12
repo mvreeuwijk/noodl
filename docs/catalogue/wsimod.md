@@ -65,4 +65,4 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
-| `EVENT_NAMES` | 20 names: `storage_unable_to_push`, `demand_deficit`, `reservoir_spill`, `wwtw_couldnt_push`, `service_reservoirs_not_filled`, `sludge_nowhere`, `river_cant_push`, `ponded_water_cant_reenter`, ... |
+| `EVENT_NAMES` | 21 names: `storage_unable_to_push`, `demand_deficit`, `reservoir_spill`, `wwtw_couldnt_push`, `service_reservoirs_not_filled`, `sludge_nowhere`, `river_cant_push`, `ponded_water_cant_reenter`, ... |

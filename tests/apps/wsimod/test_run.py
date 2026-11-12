@@ -243,7 +243,11 @@ def test_wsimod_is_never_imported():
     # not whichever noodl the interpreter has installed (another worktree's, say).
     path = os.pathsep.join(p for p in (str(ROOT / "src"), os.environ.get("PYTHONPATH")) if p)
     done = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, timeout=300,
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=300,
         env={**os.environ, "PYTHONPATH": path},
     )
     assert done.returncode == 0, done.stderr
@@ -276,7 +280,10 @@ def test_diagnostics_record_maxiter_events_and_decisions():
     assert "decisions" not in diagnostics
     assert set(diagnostics["events"]) >= set(EVENT_NAMES)
     n_nodes = len(model.wsimod_day.node_names)
-    assert all(v.shape == (40, n_nodes) for v in diagnostics["events"].values())
+    n_arcs = len(model.wsimod_day.arc_names)
+    for name, flags in diagnostics["events"].items():
+        # D21: an event recorded at an arc has one column per arc
+        assert flags.shape == (40, n_arcs if name == "decay_arc_order_unknown" else n_nodes)
     assert all(v.dtype == torch.bool for v in diagnostics["events"].values())
     flags = diagnostics["maxiter"]
     assert flags and all(v.shape == (40,) for v in flags.values())
@@ -331,9 +338,10 @@ def test_the_mass_balance_closes_on_every_case(name, mode):
     assert float(residual.max()) <= 1e-12 * CASES[name].scale
     # the balance is not trivially zero: something moves
     balance = results.mass_balance
-    assert float(balance.outflow.abs().sum() + balance.inflow.abs().sum()) > 0.0 or float(
-        balance.storage_change.abs().sum()
-    ) > 0.0
+    assert (
+        float(balance.outflow.abs().sum() + balance.inflow.abs().sum()) > 0.0
+        or float(balance.storage_change.abs().sum()) > 0.0
+    )
 
 
 def test_drops_are_recorded_where_waters_are_dropped():

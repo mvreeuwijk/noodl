@@ -420,8 +420,14 @@ REFUSALS = [
     (_node(type_="Waste", filename="x.csv"), "data_input_dict"),  # a constructor key
     (_node(type_="Catchment", filename="missing.csv"), "missing.csv"),
     (_node(type_="Waste", name="a"), "'a'"),
-    (_arc(type_="DecayArc"), "3b"),
     (_arc(type_="Arc", decays={}), "decays"),
+    (_arc(type_="QueueArc", decays={}), "read only by DecayArc and DecayArcAlt"),
+    (_arc(type_="DecayArc", parent="x"), "parent"),
+    (_arc(type_="DecayArcAlt", parent="x"), "parent"),
+    (_arc(type_="Arc", parent="x"), "parent"),
+    (_arc(type_="DecayArc", decays=None), "decays must be a mapping"),
+    (_arc(type_="DecayArc", decays={"phosphate": {"constant": 1}}), "exponent"),
+    (_arc(type_="DecayArcAlt", decays={"unobtainium": {"constant": 1, "exponent": 1}}), "unob"),
     (_arc(type_="Arc", diameter=1), "diameter"),
     (_arc(type_="Arc", number_of_timesteps=2), "number_of_timesteps"),
     (_arc(type_="QueueArc", number_of_timesteps=1.5), "number_of_timesteps"),
@@ -484,6 +490,76 @@ REFUSALS = [
     (_override(arc={"name": "nowhere", "type_": "Arc"}), "nowhere"),
     (_override(arc={"name": "ab", "type_": "Arc", "diameter": 1}), "diameter"),
 ]
+
+
+def _decay_arc_mapping(type_: str, **arc) -> dict:
+    """``_base()`` with a ``type_`` arc ``x`` out of the catchment ``a``."""
+    mapping = _arc(type_=type_, number_of_timesteps=1, **arc)
+    mapping["overrides"] = {"nodes": [], "arcs": []}
+    return mapping
+
+
+@pytest.mark.parametrize("type_", ["DecayArc", "DecayArcAlt"])
+def test_the_decay_arcs_are_read_with_their_decays(type_):
+    """A ``Decay*`` arc is a configured class now (it was refused as 3b's); its ``decays``
+    defaults to ``{}`` (``arcs.py:671``, ``:734``), and the reader's checks of a node's
+    ``decays`` apply. A ``decays`` override is refused (an arc's ``apply_overrides`` takes
+    ``capacity`` and ``preference`` only, ``arcs.py:87-96``), and so is a 3b message."""
+    assert "DecayArc" not in OUT_OF_SCOPE and "DecayArcAlt" not in OUT_OF_SCOPE
+    plain = read_wsimod_config(_decay_arc_mapping(type_)).arcs[-1]
+    assert (plain.cls, plain.number_of_timesteps, plain.decays.keys) == (type_, 1, ())
+    decays = {"phosphate": {"constant": 0.1, "exponent": 1.05}}
+    spec = read_wsimod_config(_decay_arc_mapping(type_, decays=decays)).arcs[-1]
+    assert spec.decays.keys == ("phosphate",) and spec.decays.constant == {"phosphate": 0.1}
+    assert read_wsimod_config(_base()).arcs[0].decays is None  # a plain arc has none
+    mapping = _decay_arc_mapping(type_, decays=decays)
+    mapping["overrides"]["arcs"] = [{"name": "x", "decays": {"phosphate": decays["phosphate"]}}]
+    with pytest.raises(ValueError, match="decays") as refused:
+        read_wsimod_config(mapping)
+    assert "3b" not in str(refused.value)
+    with pytest.raises(ValueError, match="decays") as refused:
+        read_wsimod_config(_arc(type_="Arc", decays={}))
+    assert "3b" not in str(refused.value)
+
+
+@pytest.mark.parametrize("type_", ["DecayArc", "DecayArcAlt"])
+def test_a_decay_arc_needs_its_in_ports_temperature(type_):
+    """``core.py:484-487``: a ``Decay*`` arc reads its in-port's ``("temperature", t)`` at every
+    decay, in both modes; a missing date is refused at build time, naming the arc and the
+    node. A ``filename`` override of that node is read, so it is not listed unread."""
+    mapping = {
+        "dates": ["2000-01-01", "2000-01-02"],
+        "nodes": [
+            {
+                "name": "a",
+                "type_": "Node",
+                "data_input_dict": {("temperature", "2000-01-01"): 12.0},
+            },
+            {"name": "b", "type_": "Waste"},
+        ],
+        "arcs": [{"name": "x", "type_": type_, "in_port": "a", "out_port": "b"}],
+    }
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match=r"arc 'x'.*node 'a'.*temperature.*2000-01-02"):
+            build_model(read_wsimod_config(mapping), pollutants=pollutants)
+    mapping["nodes"][0]["data_input_dict"][("temperature", "2000-01-02")] = 13.0
+    build_model(read_wsimod_config(mapping), pollutants=False)
+
+
+def test_a_decay_arcs_in_port_filename_override_is_read(tmp_path):
+    """D10: the ``filename`` of a node that reads no forcing is listed unread, unless a
+    ``Decay*`` arc leaves it, whose decay reads it (``core.py:464-470``)."""
+    path = tmp_path / "a.csv"
+    path.write_text("variable,time,value\ntemperature,2000-01-01,11.0\n", encoding="utf-8")
+    mapping = {
+        "dates": ["2000-01-01"],
+        "nodes": [{"name": "a", "type_": "Node"}, {"name": "b", "type_": "Waste"}],
+        "arcs": [{"name": "x", "type_": "Arc", "in_port": "a", "out_port": "b"}],
+        "overrides": {"nodes": [{"type_": "Node", "name": "a", "filename": str(path)}]},
+    }
+    assert read_wsimod_config(copy.deepcopy(mapping)).unread == ["a.filename"]
+    mapping["arcs"][0]["type_"] = "DecayArc"
+    assert read_wsimod_config(mapping).unread == []
 
 
 def _forcing_csv(path: Path, rows: dict[str, float]) -> str:

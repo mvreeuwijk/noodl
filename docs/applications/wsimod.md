@@ -131,6 +131,42 @@ written (X13), which differs from a non-decaying `QueueGroundwater` in four ways
 Because the timing differs, a quantity-only run keeps the `DecayQueueTank` structure (X25): its
 delay, its end of day and its `total_decayed` row (all zero), with no `decays.*` driver.
 
+### The user decay arcs `DecayArc` and `DecayArcAlt`
+
+A `DecayArc` (`arcs.py:668-728`) is a `QueueArc` whose requests decay; a user `DecayArcAlt`
+(`arcs.py:731-805`) is an `AltQueueArc` with the `DecayQueueTank` internal arc's entry and end of
+day (above). Both decay by the storage family's rule with their own `decays`, at the
+temperature of their **in-port** (`core.py:464-470`; a WSIMOD TODO, `arcs.py:700-702`, notes it
+is not the water's own), for pushes and pulls alike. Their drivers are
+`"wsimod.DecayArc.decays.constant"`/`".exponent"` and `"wsimod.DecayArcAlt.decays.*"`,
+`(..., n_arcs_of_class, K)`, one row per arc in configuration order, inert `(0, 1)` where
+`decays` lists no pollutant (absent in a quantity-only run). They are bound after every node,
+so the factor is the in-port's temperature of the same day (D15). The cap decision is
+`arc:<name>/make_decay/cap:<pollutant>`.
+
+- **Entry.** The request passes `enter_arc` undecayed, so `vqip_in` and `flow_in` count it as
+  sent, then decays, then waits. A pulled request decays after it left the sender, which loses
+  the undecayed water. A push's backflow is the decayed water, returned to the sender and taken
+  off `vqip_in` (`arcs.py:399-405`). With `number_of_timesteps: 0` a request decays once and is
+  delivered at once.
+- **End of the day.** Every waiting request decays in place, in both directions; a
+  `DecayArcAlt` shifts its register as above (slots 1 to L, then slot 0).
+- **Mass balance.** Each decayed mass is the outflow `"DecayArc.decayed"` or
+  `"DecayArcAlt.decayed"`: the day's entries in call order, then the end of the day, in
+  WSIMOD's order. For a `DecayArc` that order is WSIMOD's list order, entry age descending and
+  then the call order of the entry day. noodl's rows know a request's age only while it is not
+  yet due and waiting (the days-since counter of a direction saturates at
+  `number_of_timesteps`), so the term's order of addition is exact while no end of day finds
+  due-and-waiting rows in both directions. Where one does, the event
+  `"decay_arc_order_unknown"` is recorded at the arc, and only the term's last bit may differ;
+  the delivered water and the queued requests are WSIMOD's in every case.
+- **A catchment in-port** (X29). A catchment that a decay arc leaves has its own
+  `"wsimod.temperature"` row, which the arc's decay reads; the catchment's outflow reads its
+  `"wsimod.concentration"` columns. Where `temperature` is a pollutant the same value is in
+  both drivers: changing one does not change the other, so a user who changes the catchment's
+  temperature changes both. The arc also runs where `temperature` is not a pollutant, and in a
+  quantity-only run.
+
 ### Decay on a land's surfaces and the nitrite carry-over
 
 A `Surface` is a `DecayTank`: with a `decays` dict it decays its storage at the end of every
@@ -324,7 +360,7 @@ print(round(float(balance.inflow[0, 0]), 4), round(float(balance.storage_change[
 [('river', 'tank')] [0.1389, 0.1275, 0.1101, 0.1043, 0.2316]
 ['Catchment.flow', 'Catchment.unrouted', 'Waste.total_in', 'dropped']
 True
-['demand_deficit', 'demand_not_able_to_push', 'environmental_not_able_to_push'] (5, 3)
+['decay_arc_order_unknown', 'demand_deficit', 'demand_not_able_to_push'] (5, 3)
 120.0 0.1389
 ```
 
@@ -349,7 +385,8 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
 
 - `"maxiter"`: for every distribute loop `(node, method, call index)` a `(..., T)` bool, true on
   the days the loop ended at `MAXITER` (WSIMOD prints "Maxiter reached in <node> at <date>");
-- `"events"`: for every name in `EVENT_NAMES` a `(..., T, n_nodes)` bool, WSIMOD's warning
+- `"events"`: for every name in `EVENT_NAMES` a `(..., T, n_nodes)` bool (`(..., T, n_arcs)`
+  for `"decay_arc_order_unknown"`, which is recorded at an arc), WSIMOD's warning
   prints as recorded facts: `"storage_unable_to_push"`, `"demand_deficit"` ("demand deficit of
   ... at <node> on <date>"), `"reservoir_spill"`, `"wwtw_couldnt_push"`,
   `"service_reservoirs_not_filled"`, `"sludge_nowhere"`, `"river_cant_push"`,
@@ -359,7 +396,10 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   `"more_treated_than_input"`, `"excess_treated_water"` and `"more_backflow_than_vqip"`, and
   noodl's own `"zero_priority"` (a distribute round with priority 0 where WSIMOD divides by
   zero), `"wtw_liquor_zero_denominator"`, `"inaccurate_evaporation"` and
-  `"wtw_negative_solids"` (an additive solids column of a treatment works is negative);
+  `"wtw_negative_solids"` (an additive solids column of a treatment works is negative) and
+  `"decay_arc_order_unknown"` (an end of day of a `DecayArc` found due-and-waiting rows in both
+  directions, so its decayed term's order of addition may differ from WSIMOD's in the last
+  bit, D21);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
   that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
   order, per instance. The gradient tests and the parity admission rule use it;

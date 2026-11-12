@@ -67,7 +67,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.arcs import AltQueueArc, Arc, QueueArc
+from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, DecayArcAlt, QueueArc
 from noodl.apps.wsimod.config import WsimodNetwork
 from noodl.apps.wsimod.engine import Ctx, Engine
 from noodl.apps.wsimod.structure import (
@@ -232,7 +232,8 @@ class DayRecord:
       ``FLOAT_ACCURACY`` stays in the tank's storage, so it is not in ``dropped`` (W49); water
       pushed into a ``WWTW`` after its ``calculate_discharge`` is the term
       ``"WWTW.unprocessed_input"`` (W69).
-    - ``events``: ``{condition: (..., n_nodes) bool}`` (D13); ``maxiter``: ``{(node, method,
+    - ``events``: ``{condition: (..., n_nodes) bool}`` (D13), ``(..., n_arcs)`` for an event
+      recorded at an arc (``"decay_arc_order_unknown"``, D21); ``maxiter``: ``{(node, method,
       call index): (...) bool}``; ``decisions``: the branch records (D12) when
       ``WsimodDay.record_decisions``, else ``None``.
     """
@@ -491,6 +492,12 @@ class WsimodDay:
                         value,
                         pollutant_columns if value.ndim == 1 else None,
                     )
+        if p.K:  # a user Decay* arc's decays (X34): absent in a quantity-only run
+            for spec in network.arcs:
+                arc = self.engine.arcs[spec.name]
+                if isinstance(arc, DECAY_ARCS):
+                    for name, value in arc.defaults.items():
+                        add(f"wsimod.{spec.cls}.{name}", spec.name, arc, name, value, p.names)
         for key, d in drivers.items():
             if d.columns == "time":  # time-area dicts, (n, L+1), absent keys 0 (D6)
                 width = 1 + max(max(fractions) for fractions in values[key])
@@ -517,12 +524,19 @@ class WsimodDay:
             )
         dates = network.dates
         readers = forcing_readers(network)
+        # the in_ports of the user Decay* arcs, whose temperature row a catchment has too (X29)
+        decay_ports = {
+            a.in_port.name for a in self.engine.arcs.values() if isinstance(a, DECAY_ARCS)
+        }
         for variable in _FORCING_UNITS:
-            # a catchment's pollutant series (temperature among them) are its concentrations
+            # a catchment's pollutant series (temperature among them) are its concentrations;
+            # a catchment a Decay* arc leaves also has a temperature row, the decay's (X29)
             names = [
                 n
                 for n in readers.get(variable, [])
-                if variable == "flow" or nodes[n].spec.cls != "Catchment"
+                if variable == "flow"
+                or nodes[n].spec.cls != "Catchment"
+                or (variable == "temperature" and n in decay_ports)
             ]
             if not names:
                 continue
@@ -788,6 +802,9 @@ class WsimodDay:
             }
             if fresh:
                 node.load_stores(fresh)
+        for arc in self.engine.arcs.values():
+            if isinstance(arc, DecayArcAlt):  # a user arc's total_decayed is not carried
+                arc.total_decayed = torch.zeros((*shape, 1 + self.p.K), dtype=F64)
         for arc in [*self.engine.arcs.values(), *self._internal_arcs]:
             Arc.end_timestep(arc)
             if hasattr(arc, "_seen"):
@@ -845,8 +862,12 @@ class WsimodDay:
         return out
 
     def _bind(self, drivers: Mapping, k: int) -> None:
+        """Day ``k``'s slice of every driver: the arcs' capacity and preference, then every node
+        in configuration order, then every user ``Decay*`` arc's decay (D15: an arc's
+        temperature is its ``in_port``'s bound one, so it binds after the nodes)."""
         nodes, p = self.engine.nodes, self.p
         bound: dict[str, dict[str, Tensor]] = {name: {} for name in nodes}
+        arc_bound: dict[str, dict[str, Tensor]] = {name: {} for name in self.engine.arcs}
         for key, d in self._drivers.items():
             value = _f64(drivers[key]) if key in drivers else d.template
             if d.forcing:
@@ -854,6 +875,7 @@ class WsimodDay:
             for i, (element, name) in enumerate(d.targets):
                 row = value[..., i] if d.columns is None else value[..., i, :]
                 if isinstance(element, Arc):
+                    arc_bound[element.name][name] = row
                     continue
                 bound[element.name][name] = row
         if "wsimod.Arc.capacity" in self._drivers:
@@ -872,6 +894,13 @@ class WsimodDay:
             if node.spec.cls == "Catchment" and "concentration" not in parameters:
                 parameters["concentration"] = torch.zeros(p.K, dtype=F64)
             node.bind(parameters)
+        for name, arc in self.engine.arcs.items():  # D15: after the node loop
+            if isinstance(arc, DECAY_ARCS):
+                values = arc_bound[name]
+                arc.bind_decay(
+                    values.get("decays.constant", arc.defaults["decays.constant"]),
+                    values.get("decays.exponent", arc.defaults["decays.exponent"]),
+                )
 
     def _run_plan(self, active: Tensor) -> None:
         nodes = self.engine.nodes
@@ -1103,12 +1132,21 @@ class WsimodDay:
         p = self.p
         return torch.broadcast_to(vqip, (*shape, 1 + p.K))[..., p.volume_or_additive_mask]
 
+    def event_columns(self, condition: str) -> list[str]:
+        """The elements an event's columns stand for: the nodes, or the arcs for an event
+        recorded at an arc (``arcs.ARC_EVENTS``, D21)."""
+        return self.arc_names if condition in ARC_EVENTS else self.node_names
+
     def _events(self, ctx: Ctx) -> dict[str, Tensor]:
-        """``ctx.events`` as ``{condition: (..., n_nodes) bool}``."""
+        """``ctx.events`` as ``{condition: (..., n_nodes) bool}``, or ``(..., n_arcs)`` for an
+        event recorded at an arc (:meth:`event_columns`)."""
         off = torch.zeros((), dtype=torch.bool)
         return {
             condition: torch.stack(
-                [torch.broadcast_to(table.get(n, off), ctx.shape) for n in self.node_names],
+                [
+                    torch.broadcast_to(table.get(n, off), ctx.shape)
+                    for n in self.event_columns(condition)
+                ],
                 dim=-1,
             )
             for condition, table in ctx.events.items()

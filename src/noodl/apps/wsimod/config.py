@@ -34,7 +34,7 @@ from noodl.apps.wsimod.constants import (
     POLLUTANTS,
     UNBOUNDED_CAPACITY,
 )
-from noodl.apps.wsimod.decay import read_decays
+from noodl.apps.wsimod.decay import DecaySpec, read_decays
 from noodl.apps.wsimod.vqip import Pollutants
 
 __all__ = [
@@ -116,6 +116,13 @@ class ArcSpec:
     capacity: float = UNBOUNDED_CAPACITY
     preference: float = 1.0
     number_of_timesteps: int = 0
+    # a DecayArc's or DecayArcAlt's ``decays`` (``arcs.py:671``, ``:734``; default ``{}``),
+    # ``None`` on every other class
+    decays: DecaySpec | None = None
+
+
+# the arc classes that take ``decays`` (arcs.py:668-805)
+_DECAY_ARCS = ("DecayArc", "DecayArcAlt")
 
 
 @dataclass
@@ -488,13 +495,26 @@ def _read_surface(
     return SurfaceSpec(name, type_, parameters, data)
 
 
-def _read_arc(entry: dict, node_names: set[str]) -> ArcSpec:
+def _read_arc(entry: dict, node_names: set[str], pollutants: Pollutants) -> ArcSpec:
+    """One arc. ``decays`` is read on a ``DecayArc`` or ``DecayArcAlt`` only (default ``{}``,
+    ``arcs.py:671``, ``:734``); every other class never reads the key (``Arc.__init__`` stores
+    it unread, ``arcs.py:52``), so it is refused. ``parent`` is refused on every arc: a
+    ``DecayObj`` reads its temperature from a ``parent`` attribute when there is one
+    (``core.py:465-468``), and a configured string would be read as a node and crash."""
     name = _need(entry, "name", "an arc")
     where = f"arc {name!r}"
     type_ = _need(entry, "type_", where)
     _refuse_class(type_, "arc", ARC_SCHEMAS)
-    if "decays" in entry:
-        raise ValueError(f"{where}: 'decays' belongs to the Decay* arcs of sub-project 3b")
+    if "parent" in entry:
+        raise ValueError(
+            f"{where}: 'parent' is refused: WSIMOD would read the decay temperature from it "
+            "(core.py:465-468) and fail on a configured value"
+        )
+    if "decays" in entry and type_ not in _DECAY_ARCS:
+        raise ValueError(
+            f"{where}: 'decays' is read only by DecayArc and DecayArcAlt, not {type_} "
+            "(Arc.__init__ would store it unread, arcs.py:52)"
+        )
     in_port, out_port = _need(entry, "in_port", where), _need(entry, "out_port", where)
     for port in (in_port, out_port):
         if port not in node_names:
@@ -504,8 +524,14 @@ def _read_arc(entry: dict, node_names: set[str]) -> ArcSpec:
         if key not in accepted:
             raise ValueError(f"{where}: {key!r} is not a keyword of {type_}")
     spec = ArcSpec(name, type_, in_port, out_port)
+    if type_ in _DECAY_ARCS:
+        decays = entry.get("decays", {})
+        if decays is None:  # generic_temperature_decay iterates it (core.py:510)
+            raise ValueError(f"{where}: decays must be a mapping, got None")
+        spec.decays = read_decays(where, decays, pollutants)
     for key, value in entry.items():
-        _set_arc_value(spec, key, value, where)
+        if key != "decays":
+            _set_arc_value(spec, key, value, where)
     return spec
 
 
@@ -583,7 +609,7 @@ def read_wsimod_config(
             raise ValueError(f"node {node.name!r} is listed twice")
         seen.add(node.name)
     names = {n.name for n in nodes}
-    arcs = [_read_arc(e, names) for e in _items(data.get("arcs"), "arcs")]
+    arcs = [_read_arc(e, names, pollutants) for e in _items(data.get("arcs"), "arcs")]
     seen = set()
     for arc in arcs:
         if arc.name in seen:
@@ -621,6 +647,9 @@ def read_wsimod_config(
                 )
         for key, value in entry.items():
             _set_arc_value(arc, key, value, f"override of arc {name!r}")
+    # a Decay* arc reads its in_port's forcing (core.py:464-470), so that file is read
+    ports = {f"{a.in_port}.filename" for a in arcs if a.cls in _DECAY_ARCS}
+    unread[:] = [item for item in unread if item not in ports]
 
     return WsimodNetwork(
         pollutants=pollutants,

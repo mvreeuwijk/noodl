@@ -24,7 +24,9 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   a ``QueueArc``'s ``arc:A/send_push_request/below_fa`` and, in ``update_queue``, one
   ``arc:A/update_queue/<push|pull>:<i>,<j>/below_fa`` per waiting row and
   ``arc:A/update_queue/<push|pull>:new/below_fa`` for the call's own request (each evaluated
-  where the row is present).
+  where the row is present). A user ``DecayArc`` or ``DecayArcAlt`` adds
+  ``arc:A/make_decay/cap:<pollutant>`` (its ``Decay``'s cap, evaluated at bind, D5); a
+  ``DecayArc``'s event ``"decay_arc_order_unknown"`` (D21) is recorded at the arc's name.
   A tank is not a node: its sites are its owner's with the tank's attribute path,
   ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
   ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,

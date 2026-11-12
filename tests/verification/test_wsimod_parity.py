@@ -435,7 +435,7 @@ def test_the_cases_cover_every_listed_feature():
     temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
     batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
     node_type_override decay_storage decay_groundwater decay_queue_groundwater
-    decay_queue_groundwater_n0
+    decay_queue_groundwater_n0 decay_arc decay_arc_alt
     surface_decay_nitrification land_run_twice""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
@@ -447,6 +447,40 @@ def test_the_cases_cover_every_listed_feature():
 def tiny_dropped(results) -> torch.Tensor:
     """The volume the run's mass balance counts as dropped, summed over the days."""
     return results.mass_balance.terms["dropped"][:, 0].sum()
+
+
+@pytest.mark.parametrize("mode", list(MODES))
+def test_the_decay_arc_cases_exercise_what_they_are_named_for(mode):
+    """``decay_arc`` decays in all four of its ``DecayArc``s (``n`` = 2, 1, 0 and 0, the last
+    out of a catchment, X29) inside the precondition of D21: the event is false on every day,
+    one column per arc. ``decay_arc_alt``'s in-port pushes on some days and not on others, and
+    its ``DecayArcAlt`` decays. In ``quantity`` mode nothing decays and both still run."""
+    results, diagnostics = case_ours("decay_arc", mode)
+    event = diagnostics["events"]["decay_arc_order_unknown"]
+    assert event.shape == (CASES["decay_arc"].days, len(results.arc_names))
+    assert not bool(event.any())
+    model = build_model(read_wsimod_config(CASES["decay_arc"].build()))[0]
+    arcs = model.wsimod_day.engine.arcs
+    assert {
+        name: arcs[name].number_of_timesteps
+        for name in arcs
+        if "Decay" in type(arcs[name]).__name__
+    } == {
+        "src2_to_j": 0,
+        "q": 2,
+        "b_to_sink": 0,
+        "q_pull": 1,
+    }
+    terms = results.mass_balance.terms
+    alt, _ = case_ours("decay_arc_alt", mode)
+    pushed = alt.arc_flow[:, alt.arc_names.index("src_to_head")] > 0
+    assert 0 < int(pushed.sum()) < len(pushed)
+    if mode == "pollutants":
+        assert float(terms["DecayArc.decayed"][:, 1].sum()) > 0.0
+        assert float(alt.mass_balance.terms["DecayArcAlt.decayed"][:, 1:].sum()) > 0.0
+    else:
+        assert terms["DecayArc.decayed"].shape[-1] == 1
+        assert float(terms["DecayArc.decayed"].abs().sum()) == 0.0
 
 
 def test_the_new_cases_exercise_what_they_are_named_for():

@@ -17,7 +17,7 @@ classes and formats; :func:`check_network` refuses the rest by name, through eac
 
 from __future__ import annotations
 
-from noodl.apps.wsimod.arcs import ARC_CLASSES
+from noodl.apps.wsimod.arcs import ARC_CLASSES, DECAY_ARCS
 from noodl.apps.wsimod.classes import NODE_SCHEMAS
 from noodl.apps.wsimod.config import WsimodNetwork
 from noodl.apps.wsimod.engine import _register_all
@@ -41,6 +41,8 @@ DECAYING_STORAGE = (
     "RiverReservoir",
     "River",
 )
+# the user arc classes that read their in_port's temperature (arcs.py:668-805)
+DECAY_ARC_CLASSES = tuple(cls.__name__ for cls in DECAY_ARCS)
 # model.py:697-735: the WSIMOD types (after the renames) whose arcs give the river order
 _RIVER_TYPES = ("River", "Node", "Waste", "Reservoir")
 # The tags a check can be asked under in 3a: the default, a Sewer's and a WWTW's "Sewer",
@@ -299,9 +301,12 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
     ``Storage``, ``Reservoir``, ``RiverReservoir`` or ``River`` (``temperature``, the same
     end-of-day read) or ``Groundwater`` or ``QueueGroundwater`` (a ``filename`` override's, X11), a
     ``ResidentialDemand`` ``temperature`` (``demand.py:321``) and a ``Catchment`` ``flow`` and
-    every pollutant of the configuration (``catchment.py:59-74``). A variable no node reads is
-    absent.
+    every pollutant of the configuration (``catchment.py:59-74``). The ``in_port`` of every user
+    ``DecayArc`` or ``DecayArcAlt`` reads ``temperature`` too (``core.py:464-470``), each node
+    once, a ``Catchment`` included (X29: its ``"wsimod.temperature"`` row is the decay's, its
+    concentration column the outflow's). A variable no node reads is absent.
     """
+    decay_ports = {arc.in_port for arc in network.arcs if arc.cls in DECAY_ARC_CLASSES}
     readers: dict[str, list[str]] = {}
     for spec in network.nodes:
         if spec.cls == "Land":
@@ -313,7 +318,9 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
         elif spec.cls in DECAYING_STORAGE and spec.parameters.get("decays") is not None:
             variables = ("temperature",)  # the DecayTank's end of day (core.py:484-487)
         else:
-            continue
+            variables = ()
+        if spec.name in decay_ports and "temperature" not in variables:
+            variables = (*variables, "temperature")
         for variable in variables:
             readers.setdefault(variable, []).append(spec.name)
     return readers
