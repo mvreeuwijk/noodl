@@ -111,24 +111,45 @@ class NutrientPool:
 
     # --- parameters -------------------------------------------------------------------------
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
-        """Set the parameters (``(..., 2)`` for the :data:`NUTRIENT_POOL_PAIRS`, ``(...)`` for
-        ``fraction_dry_n_to_dissolved_inorganic``); a name not given keeps its value. Then the
-        derived fractions as ``calculate_fraction_parameters`` (``np.py:146-153``):
-        ``fraction_manure_to_fast = 1 - fraction_manure_to_dissolved_inorganic`` per nutrient,
-        and ``fraction_dry_n_to_fast = 1 - fraction_dry_n_to_dissolved_inorganic``."""
+        """Set all seven parameters: ``(..., 2)`` for each of the :data:`NUTRIENT_POOL_PAIRS`
+        and ``(...)`` for ``fraction_dry_n_to_dissolved_inorganic``. A missing or unknown name
+        is refused by name, and so is a ``fraction_dry_n_to_dissolved_inorganic`` that is
+        neither 0-d nor of the pairs' batch shape (it would broadcast against the nutrient
+        axis). Then the derived fractions as ``calculate_fraction_parameters``
+        (``np.py:146-153``): ``fraction_manure_to_fast = 1 -
+        fraction_manure_to_dissolved_inorganic`` per nutrient, and ``fraction_dry_n_to_fast =
+        1 - fraction_dry_n_to_dissolved_inorganic``."""
         known = (*NUTRIENT_POOL_PAIRS, *NUTRIENT_POOL_SCALARS)
         unknown = [name for name in parameters if name not in known]
         if unknown:
             raise ValueError(
                 f"{self.site}: unknown NutrientPool parameter(s) {unknown}; known: {list(known)}"
             )
-        for name, value in parameters.items():
-            value = _f64(value)
-            if name in NUTRIENT_POOL_PAIRS and (value.ndim < 1 or value.shape[-1] != 2):
+        missing = [name for name in known if name not in parameters]
+        if missing:
+            raise ValueError(f"{self.site}: NutrientPool parameter(s) {missing} not given")
+        values = {name: _f64(parameters[name]) for name in known}
+        for name in NUTRIENT_POOL_PAIRS:
+            value = values[name]
+            if value.ndim < 1 or value.shape[-1] != 2:
                 raise ValueError(
                     f"{self.site}: {name} of shape {tuple(value.shape)}; expected (..., 2), "
                     "N then P"
                 )
+        try:
+            batch = torch.broadcast_shapes(*(values[n].shape[:-1] for n in NUTRIENT_POOL_PAIRS))
+        except RuntimeError as error:
+            raise ValueError(
+                f"{self.site}: the NutrientPool pair parameters' batch shapes do not broadcast"
+            ) from error
+        for name in NUTRIENT_POOL_SCALARS:
+            shape = values[name].shape
+            if values[name].ndim != 0 and shape != batch:
+                raise ValueError(
+                    f"{self.site}: {name} of shape {tuple(shape)}; expected () or the pairs' "
+                    f"batch shape {tuple(batch)}"
+                )
+        for name, value in values.items():
             setattr(self, name, value)
         self.fraction_manure_to_fast = 1 - self.fraction_manure_to_dissolved_inorganic
         self.fraction_dry_n_to_fast = 1 - self.fraction_dry_n_to_dissolved_inorganic
@@ -164,6 +185,11 @@ class NutrientPool:
         Returns the reply ``(..., 2)``, N then P."""
         active = torch.as_tensor(active, dtype=torch.bool)
         amount = _f64(amount)
+        if any(name not in NUTRIENTS for name in order) or len(set(order)) != len(order):
+            raise ValueError(
+                f"{self.site}.{POOLS[pool]}/extract: order {order!r}; expected distinct names "
+                f"from {NUTRIENTS} (a dict request holds each nutrient at most once)"
+            )
         call = self.ctx.call(self._element, f"{self._path}.{POOLS[pool]}/extract")
         reply = [_f64(0.0), _f64(0.0)]  # the empty nutrient (np.py:551)
         for name in order:
@@ -243,9 +269,11 @@ class NutrientPool:
         amount * fa})``, then ``humus.extract({N: 0, P: amount * (1 - fa)})``. Returns
         ``(humus removed, adsorbed removed)``, the P replies.
 
-        WSIMOD's caller runs it only where ``eff_erodedP > 0``, which implies a positive
-        denominator (``land.py:2049``). An instance with a zero denominator, necessarily
-        inactive, divides by a safe 1 so its values and gradients stay finite."""
+        Every zero denominator, active or not, is replaced by 1, so values and gradients stay
+        finite: such an instance then removes nothing and its stores are unchanged. On an
+        active one WSIMOD would raise ``ZeroDivisionError``; its caller excludes it, because
+        the guard ``eff_erodedP > 0`` (``land.py:2048``) implies ``ads.P + humus.P != 0``
+        (``land.py:2001-2013``), so the caller's ``active`` holds no zero denominator."""
         active = torch.as_tensor(active, dtype=torch.bool)
         amount = _f64(amount)
         ads_p = self.storage[..., ADS, 1]

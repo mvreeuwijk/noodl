@@ -177,8 +177,10 @@ def _drive(wp, pool: NutrientPool, rng: random.Random, calls: int) -> None:
             index = rng.randrange(5)
             store = wp.pools[index].storage
             a = {n: _request(rng, store[n]) for n in NUTRIENTS}
-            ref = wp.pools[index].extract(dict(a))
-            got = pool.extract(index, t(a["N"], a["P"]), active=TRUE)
+            # the request dict's insertion order: crop uptake builds {"P", "N"} (land.py:1908)
+            order = rng.choice((("N", "P"), ("P", "N")))
+            ref = wp.pools[index].extract({n: a[n] for n in order})
+            got = pool.extract(index, t(a["N"], a["P"]), active=TRUE, order=order)
             _assert_nutrient(got, ref, where)
         _assert_stores(wp, pool, where)
 
@@ -214,10 +216,38 @@ def test_the_defaults_are_wsimods():
     assert _same(pool.fraction_dry_n_to_fast, wp.fraction_dry_n_to_fast)
 
 
+def _defaults() -> dict[str, torch.Tensor]:
+    return {
+        **{name: t(*pair) for name, pair in NUTRIENT_POOL_PAIRS.items()},
+        **{name: t(value)[0] for name, value in NUTRIENT_POOL_SCALARS.items()},
+    }
+
+
 def test_bind_refuses_an_unknown_parameter():
     pool, _ = make_pool()
     with pytest.raises(ValueError, match="fraction_residue_to_fast"):
-        pool.bind({"fraction_residue_to_fast": t(0.1, 0.1)})
+        pool.bind({**_defaults(), "fraction_residue_to_fast": t(0.1, 0.1)})
+
+
+@pytest.mark.parametrize("name", [*NUTRIENT_POOL_PAIRS, *NUTRIENT_POOL_SCALARS])
+def test_bind_refuses_a_missing_parameter(name):
+    """All seven are drivers (Y24): a forgotten one would silently keep WSIMOD's default."""
+    pool, _ = make_pool()
+    parameters = _defaults()
+    del parameters[name]
+    with pytest.raises(ValueError, match=f"{name}.*not given"):
+        pool.bind(parameters)
+
+
+def test_bind_refuses_a_dry_fraction_that_would_broadcast_against_the_nutrients():
+    pool, _ = make_pool()
+    with pytest.raises(ValueError, match="fraction_dry_n_to_dissolved_inorganic of shape"):
+        pool.bind({**_defaults(), "fraction_dry_n_to_dissolved_inorganic": t(0.9, 0.9)})
+    batched = {name: value.expand(3, 2) for name, value in _defaults().items() if value.ndim}
+    with pytest.raises(ValueError, match=r"expected \(\) or the pairs' batch shape \(3,\)"):
+        pool.bind({**batched, "fraction_dry_n_to_dissolved_inorganic": t(0.9, 0.9)})
+    pool.bind({**batched, "fraction_dry_n_to_dissolved_inorganic": t(0.9, 0.8, 0.7)})
+    pool.bind({**batched, "fraction_dry_n_to_dissolved_inorganic": t(0.9)[0]})
 
 
 # --- the methods by hand --------------------------------------------------------------------
@@ -235,6 +265,22 @@ def test_extract_takes_pythons_min_per_nutrient_in_request_order():
     # a second call of the same pool's extract is call 1
     pool.extract(DI, t(0.0, 0.0), active=TRUE)
     assert [d.call for d in ctx.decisions[2:]] == [1, 1]
+
+
+@pytest.mark.parametrize("order", [("N", "X"), ("P", "P"), ("N", "P", "N")])
+def test_extract_refuses_an_order_that_no_dict_can_have(order):
+    pool, _ = make_pool()
+    with pytest.raises(ValueError, match="dissolved_inorganic_pool/extract: order"):
+        pool.extract(DI, t(1.0, 1.0), active=TRUE, order=order)
+
+
+def test_extract_with_an_order_omitting_a_nutrient_leaves_it_alone():
+    """WSIMOD's reply starts from the empty nutrient (np.py:551): the omitted one is 0."""
+    pool, ctx = make_pool(record=True)
+    set_storage(pool, {DI: (2.0, 1.0)})
+    reply = pool.extract(DI, t(3.0, 0.5), active=TRUE, order=("P",))
+    assert torch.equal(reply, t(0.0, 0.5)) and torch.equal(pool.storage[DI], t(2.0, 0.5))
+    assert [d.site.rsplit(":", 1)[1] for d in ctx.decisions] == ["P"]
 
 
 def test_the_transformation_by_hand():
@@ -289,6 +335,21 @@ def test_erode_P_splits_by_the_adsorbed_fraction():
         f"{SITE}.humus_pool/extract/clip:N",
         f"{SITE}.humus_pool/extract/clip:P",
     ]
+
+
+def test_erode_P_on_a_zero_denominator_removes_nothing_and_stays_finite():
+    """WSIMOD would raise ZeroDivisionError; its caller's guard eff_erodedP > 0
+    (land.py:2048) excludes such an instance. noodl divides by 1 instead, active or not."""
+    pool, _ = make_pool()
+    set_storage(pool, {ADS: (4.0, 0.0), HUMUS: (7.0, 0.0)})
+    amount = torch.tensor(2.0, dtype=F64, requires_grad=True)
+    org, inorg = pool.erode_P(amount, active=TRUE)
+    assert float(org.detach()) == 0.0 and float(inorg.detach()) == 0.0
+    assert torch.equal(pool.storage[ADS], t(4.0, 0.0)) and torch.equal(
+        pool.storage[HUMUS], t(7.0, 0.0)
+    )
+    (org + inorg).backward()
+    assert torch.isfinite(amount.grad)
 
 
 def test_dry_deposition_goes_to_fast_di_and_adsorbed():
@@ -404,10 +465,16 @@ def test_gradcheck_on_the_transformation_and_extract_dissolved():
         torch.tensor(0.3, dtype=F64, requires_grad=True),
     )
 
+    fmdi = t(*NUTRIENT_POOL_PAIRS["fraction_manure_to_dissolved_inorganic"])
+    fddi = t(NUTRIENT_POOL_SCALARS["fraction_dry_n_to_dissolved_inorganic"])[0]
+
     def run(storage, pars, tdf, smdf, proportion):
         pool, _ = make_pool()
         pool.storage = storage
-        pool.bind({n: pars[i] for i, n in enumerate(PARAMETERS)})
+        bound = {n: pars[i] for i, n in enumerate(PARAMETERS)}
+        bound["fraction_manure_to_dissolved_inorganic"] = fmdi
+        bound["fraction_dry_n_to_dissolved_inorganic"] = fddi
+        pool.bind(bound)
         pool.temperature_dependence_factor, pool.soil_moisture_dependence_factor = tdf, smdf
         inc_di, inc_do = pool.soil_pool_transformation(active=TRUE)
         inorganic, organic = pool.extract_dissolved(proportion, active=TRUE)
