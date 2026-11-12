@@ -255,8 +255,8 @@ class Surface(DecayTank):
 
     # --- state ----------------------------------------------------------------------------------
     def stores(self) -> dict[str, Tensor]:
-        """``storage``, the per-day flows and ``total_decayed``; the last is carried only when
-        ``nitrite`` is a pollutant (:class:`Land`, D8)."""
+        """``storage``, the per-day flows and ``total_decayed``: always held and compared in the
+        replay; carried by the Land only when ``nitrite`` is a pollutant (D8)."""
         return {
             "storage": self.storage,
             **{f: getattr(self, f) for f in self.flow_fields},
