@@ -917,11 +917,14 @@ def test_parameters_that_wsimod_cannot_run_a_river_on_are_refused(parameters, ma
     assert _validate("River", damp=0.0, mrf=2.0) == []
 
 
-def test_the_riparian_buffer_check_is_refused_by_name_with_3c():
+def test_the_riparian_buffer_check_is_refused_for_good():
     node = river()
     day(node)
-    with pytest.raises(KeyError, match="3c"):
+    with pytest.raises(KeyError, match="RiparianBuffer") as caught:
         node.pull_check(None, ("RiparianBuffer", "volume"), active=TRUE)
+    message = str(caught.value)
+    assert "no RiparianBuffer class in WSIMOD 0.8.1" in message
+    assert "3c" not in message
 
 
 def test_river_handlers_and_recursion():

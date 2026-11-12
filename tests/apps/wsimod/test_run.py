@@ -577,6 +577,48 @@ def test_the_mass_balance_closes_on_every_case(name, mode):
     )
 
 
+def _has_land(name: str) -> bool:
+    nodes = CASES[name].build()["nodes"]
+    return any(n.get("type_") == "Land" for n in nodes)
+
+
+LAND_RUN_CASES = [(name, mode) for name, mode in RUN_CASES if _has_land(name)]
+
+
+@pytest.mark.parametrize(("name", "mode"), LAND_RUN_CASES)
+def test_the_parts_sum_to_the_running_terms(name, mode):
+    """D11: the per-function parts of each direction sum to the Land's running term (WSIMOD
+    adds sequentially, ``land.py:444-449``; the parts differ by summation order only)."""
+    model, state, drivers = _case(name, mode)
+    results = wsimod_run(model, state, drivers, days=CASES[name].days)
+    balance = results.mass_balance
+    tolerance = 1e-12 * CASES[name].scale
+    for direction, term in (("in", "Land.running_inflow_mb"), ("out", "Land.running_outflow_mb")):
+        total = sum(balance.parts[direction].values())
+        assert float((total - balance.terms[term]).abs().max()) <= tolerance
+    if name == "surface_decay_nitrification" and mode == "pollutants":
+        assert float(balance.parts["in"]["Surface.nitrite_carry_over"].abs().max()) > 0.0
+
+
+def test_the_parts_are_not_in_the_balance():
+    model, state, drivers = _case("pervious_only")
+    results = wsimod_run(model, state, drivers, days=CASES["pervious_only"].days)
+    balance = results.mass_balance
+    assert balance.parts["in"] and balance.parts["out"]
+    for names in balance.parts.values():
+        assert not set(names) & set(balance.terms)
+    day = model.wsimod_day
+    direction: dict[str, str] = {}
+    for element in [*day.engine.nodes.values(), *day.engine.arcs.values(), *day._internal_arcs]:
+        direction.update(element.mass_balance)
+    inflow = sum(v for k, v in balance.terms.items() if direction.get(k) == "in")
+    outflow = (
+        sum(v for k, v in balance.terms.items() if direction.get(k) == "out")
+        + balance.terms["dropped"]
+    )
+    assert torch.equal(balance.residual, inflow - outflow - balance.storage_change)
+
+
 def test_drops_are_recorded_where_waters_are_dropped():
     """The ``QueueArc`` tiny push (``queue_arc``) and the ``Land.run`` percolation push-back
     (``land_percolation_threshold``) drop water below ``FLOAT_ACCURACY``; it is in

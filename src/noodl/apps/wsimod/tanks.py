@@ -240,6 +240,33 @@ class Tank:
         self.storage = write(run, extract_vqip(p, self.storage, reply), self.storage)
         return torch.where(dry[..., None], ctx.empty(), reply)
 
+    def pull_pollutants(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``tanks.py:241-266`` (D19): the request is clamped column by column to the store,
+        each additive pollutant in ``Pollutants.additive`` order and then the volume
+        (``min(storage, request)``, WSIMOD's operand order), and what is left of it leaves the
+        storage. Non-additive columns pass through. Returns the clamped VQIP (the request,
+        where ``active`` does not hold)."""
+        p, ctx = self.p, self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("pull_pollutants")
+        clamped = vqip
+        for name in (*p.additive, "volume"):
+            column = 0 if name == "volume" else p.column(name)
+            value = dmin(
+                ctx,
+                f"{self.site}/pull_pollutants/clip:{name}",
+                self.storage[..., column],
+                vqip[..., column],
+                active=active,
+                call=call,
+            )
+            hot = torch.zeros(1 + p.K, dtype=torch.bool)
+            hot[column] = True
+            clamped = torch.where(hot, value[..., None], clamped)
+        reply = torch.where(active[..., None], clamped, vqip)
+        self.storage = write(active, extract_vqip(p, self.storage, reply), self.storage)
+        return reply
+
     def evaporate(self, evap: Tensor, *, active: Tensor) -> Tensor:
         """``tanks.py:303-317``: ``min(evap, avail)`` leaves by ``v_distill_vqip`` (the
         pollutants stay); returns that volume. ``avail`` is ``self.get_avail()``, a

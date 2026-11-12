@@ -7,6 +7,7 @@ in the order of :class:`Pollutants`. Each operation transcribes WSIMOD 0.8.1's `
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -198,3 +199,43 @@ def pow_python(x: Tensor, y: Tensor) -> Tensor:
     return _PowPython.apply(
         torch.as_tensor(x, dtype=torch.float64), torch.as_tensor(y, dtype=torch.float64)
     )
+
+
+def _unary_python(name: str, function, slope):
+    """The autograd function of ``function`` with derivative ``slope(x)``."""
+
+    class Op(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x: Tensor) -> Tensor:
+            ctx.save_for_backward(x)
+            values = [function(v) for v in x.detach().reshape(-1).tolist()]
+            return torch.tensor(values, dtype=torch.float64).reshape(x.shape)
+
+        @staticmethod
+        @once_differentiable
+        def backward(ctx, grad: Tensor) -> Tensor:
+            (x,) = ctx.saved_tensors
+            return grad * slope(x)
+
+    Op.__name__ = Op.__qualname__ = name
+    return Op
+
+
+_LogPython = _unary_python("_LogPython", math.log, lambda x: 1.0 / x)
+_Log10Python = _unary_python("_Log10Python", math.log10, lambda x: 1.0 / (x * math.log(10.0)))
+_SinPython = _unary_python("_SinPython", math.sin, torch.cos)
+
+
+def log_python(x: Tensor) -> Tensor:
+    """``math.log`` per instance, bitwise Python's; ``d/dx = 1/x``."""
+    return _LogPython.apply(torch.as_tensor(x, dtype=torch.float64))
+
+
+def log10_python(x: Tensor) -> Tensor:
+    """``math.log10`` per instance, bitwise Python's; ``d/dx = 1/(x ln 10)``."""
+    return _Log10Python.apply(torch.as_tensor(x, dtype=torch.float64))
+
+
+def sin_python(x: Tensor) -> Tensor:
+    """``math.sin`` per instance, bitwise Python's; ``d/dx = cos x``."""
+    return _SinPython.apply(torch.as_tensor(x, dtype=torch.float64))

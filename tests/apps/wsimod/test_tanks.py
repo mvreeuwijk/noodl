@@ -1115,3 +1115,61 @@ def test_decay_arc_alt_decays_slot_zero_once_whatever_a_loaded_present_says():
         results.append(arc.register[0].clone())
     assert torch.equal(results[0], results[1])
     assert results[0][PHOSPHATE] < 1.0  # decayed once, not doubled
+
+
+def test_pull_pollutants_equals_wsimods(monkeypatch):
+    """``tanks.py:241-266``: each additive column, then the volume, is clamped to the store;
+    the request is clamped in place and leaves the storage."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes import tanks as wtanks
+
+    names = ("phosphate", "ammonia", "temperature")
+    p3 = Pollutants(names, ("phosphate", "ammonia"), ("temperature",))
+    monkeypatch.setattr(constants, "POLLUTANTS", list(names))
+    monkeypatch.setattr(constants, "ADDITIVE_POLLUTANTS", ["phosphate", "ammonia"])
+    monkeypatch.setattr(constants, "NON_ADDITIVE_POLLUTANTS", ["temperature"])
+    monkeypatch.setattr(constants, "FLOAT_ACCURACY", FA)
+    n = 200
+    g = torch.Generator().manual_seed(19)
+    keys = ("volume", *names)
+    stores = [
+        {k: float(torch.rand((), generator=g, dtype=torch.float64)) * 5 for k in keys}
+        for _ in range(n)
+    ]
+    requests = []
+    for i, store in enumerate(stores):
+        req = {k: float(torch.rand((), generator=g, dtype=torch.float64)) * 5 for k in keys}
+        if i % 3 == 0:  # above the store in some column
+            k = keys[int(torch.randint(len(keys) - 1, (), generator=g))]
+            req[k] = store[k] + 1.0
+        requests.append(req)
+    tank = Tank(
+        p3, capacity=100.0, area=1.0, datum=0.0, initial_storage=stack3(p3, stores), owner="t"
+    )
+    ctx = day(tank, p=p3, shape=(n,), record=True)
+    got = tank.pull_pollutants(stack3(p3, requests), active=torch.ones(n, dtype=torch.bool))
+    for i in range(n):
+        theirs = wtanks.Tank(capacity=100.0, area=1.0, datum=0.0, initial_storage=dict(stores[i]))
+        reply = theirs.pull_pollutants(dict(requests[i]))
+        for j, k in enumerate(keys):
+            assert float(got[i, j]) == reply[k], (i, k)
+            assert float(tank.storage[i, j]) == theirs.storage[k], (i, k)
+    sites = [d.site for d in ctx.decisions]
+    assert sites == [
+        "node:t/tank/pull_pollutants/clip:phosphate",
+        "node:t/tank/pull_pollutants/clip:ammonia",
+        "node:t/tank/pull_pollutants/clip:volume",
+    ]
+    # an inactive instance is left alone
+    tank2 = Tank(
+        p3, capacity=100.0, area=1.0, datum=0.0, initial_storage=stack3(p3, stores[:2]), owner="t"
+    )
+    day(tank2, p=p3, shape=(2,))
+    off = torch.tensor([True, False])
+    tank2.pull_pollutants(stack3(p3, requests[:2]), active=off)
+    assert torch.equal(tank2.storage[1], stack3(p3, stores[1:2])[0])
+
+
+def stack3(p, dicts):
+    return torch.stack([p.to_vqip(x) for x in dicts])

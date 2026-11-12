@@ -59,12 +59,25 @@ if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import NodeSpec, SurfaceSpec, WsimodNetwork
 
 __all__ = [
+    "PART_NAMES",
     "ImperviousSurface",
     "Land",
     "PerviousSurface",
     "Surface",
     "surface_derived",
 ]
+
+# The balance parts (D11): the name each surface function's ``(in, out)`` is recorded under
+# (``Ctx.part``), keyed by the function's name; ``WsimodMassBalance.parts``.
+PART_NAMES = {
+    "simple_deposition": "Surface.simple_deposition",
+    "precipitation_evaporation": "ImperviousSurface.precipitation_evaporation",
+    "push_to_sewers": "ImperviousSurface.push_to_sewers",
+    "ihacres": "PerviousSurface.ihacres",
+    "calculate_soil_temperature": "PerviousSurface.calculate_soil_temperature",
+    "route": "PerviousSurface.route",
+}
+NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"
 
 # land.py:208: where percolation goes; :221: where runoff goes; :711: where ponding goes
 PERCOLATION_TYPES = ("Groundwater",)
@@ -301,8 +314,12 @@ class Surface(DecayTank):
                     torch.where(column, parent.running_inflow_mb + moved, parent.running_inflow_mb),
                     parent.running_inflow_mb,
                 )
+                carried = torch.where(column, moved, torch.zeros_like(self.storage))
+                self.ctx.part(NITRITE_CARRY_OVER, "in", carried, active)
         for f in self.inflows + self.processes + self.outflows:
             in_, out_ = f(active=active)
+            self.ctx.part(PART_NAMES[f.__name__], "in", in_, active)
+            self.ctx.part(PART_NAMES[f.__name__], "out", out_, active)
             parent.running_inflow_mb = write(
                 active, sum_vqip(p, parent.running_inflow_mb, in_), parent.running_inflow_mb
             )

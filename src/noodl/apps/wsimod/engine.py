@@ -30,6 +30,7 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   A tank is not a node: its sites are its owner's with the tank's attribute path,
   ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
   ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,
+  ``node:N/<tank>/pull_pollutants/clip:<additive pollutant|volume>``,
   ``node:N/<tank>/make_decay/cap:<pollutant>`` (a ``Decay``'s cap, evaluated at bind, D5;
   a ``DecayQueueTank``'s is its internal arc's, ``node:N/tank/internal_arc/make_decay/cap:<p>``),
   ``node:N/<tank>/pull_ponded/excess``, ``node:N/<tank>/evaporate/clip``, and for a
@@ -148,7 +149,7 @@ class Ctx:
     conditions. ``maxiter[(node, method, call index)]`` says whether that distribute loop ran
     all ``MAXITER`` rounds (WSIMOD prints "Maxiter reached", ``nodes.py:405-406``, ``:475-476``).
     ``dropped`` sums the water WSIMOD drops below ``FLOAT_ACCURACY``; ``terms`` the mass-balance
-    terms ``"<Class>.<term>"``.
+    terms ``"<Class>.<term>"``; ``parts`` the breakdown of the running terms by function.
     """
 
     def __init__(
@@ -173,6 +174,9 @@ class Ctx:
         self.dropped: Tensor = self.empty()
         self.dropped_arcs: Tensor = self.empty()  # the part of ``dropped`` lost inside an arc
         self.terms: dict[str, Tensor] = {}
+        # the breakdown of the Land's running terms, ``{"in": {name: VQIP}, "out": {...}}`` (D11);
+        # a diagnostic, never part of the balance
+        self.parts: dict[str, dict[str, Tensor]] = {"in": {}, "out": {}}
         # each WWTW's current_input as of its last treat_current_input (the water that was
         # treated); what is pushed in later vanishes at end_timestep (W69)
         self.treated_input: dict[str, Tensor] = {}
@@ -222,6 +226,14 @@ class Ctx:
         """Add ``vqip`` where ``mask`` to the mass-balance term ``name`` (D11)."""
         old = self.terms.get(name, self.empty())
         self.terms[name] = sum_vqip(self.p, old, _masked(vqip, mask))
+
+    def part(self, name: str, direction: str, vqip: Tensor, mask: Tensor) -> None:
+        """Add ``vqip`` where ``mask`` to the balance part ``name`` of ``direction`` (``"in"`` or
+        ``"out"``, D11). Parts are not terms: they are never summed into the balance."""
+        if direction not in self.parts:
+            raise ValueError(f"part {name!r}: direction {direction!r} is not 'in' or 'out'")
+        table = self.parts[direction]
+        table[name] = sum_vqip(self.p, table.get(name, self.empty()), _masked(vqip, mask))
 
     def call(self, element: str, method: str) -> int:
         """The static index of this call of ``method`` on ``element`` (``"node:N"``,

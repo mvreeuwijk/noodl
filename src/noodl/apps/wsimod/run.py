@@ -48,7 +48,7 @@ the soil supplies what IHACRES asks; a shortfall below ``FLOAT_ACCURACY`` fires 
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
@@ -100,6 +100,9 @@ class WsimodMassBalance:
     residual: Tensor
     terms: dict[str, Tensor]
     dropped_arcs: Tensor | None = None  # part of terms["dropped"] lost inside a QueueArc
+    # the breakdown of the Land's running terms, ``{"in"|"out": {name: (..., T, 1 + K_add)}}``
+    # (D11); a diagnostic, in neither ``terms`` nor the balance
+    parts: dict[str, dict[str, Tensor]] = field(default_factory=lambda: {"in": {}, "out": {}})
 
 
 @dataclass
@@ -138,6 +141,25 @@ def _stack(records: list[Tensor], shape: torch.Size) -> Tensor:
     return torch.stack(
         [torch.broadcast_to(r, (*shape, *r.shape[len(shape) :])) for r in records], dim=len(shape)
     )
+
+
+def _parts(
+    records: list[DayRecord], additive: Tensor, shape: torch.Size, K: int
+) -> dict[str, dict[str, Tensor]]:
+    """Each part of each direction as ``(..., T, 1 + K_add)``; a day without it is zero."""
+    none = torch.zeros((*shape, 1 + K), dtype=F64)
+    parts: dict[str, dict[str, Tensor]] = {}
+    for direction in ("in", "out"):
+        names: list[str] = []
+        for record in records:
+            names.extend(n for n in record.parts[direction] if n not in names)
+        parts[direction] = {
+            name: _stack(
+                [r.parts[direction].get(name, none)[..., additive] for r in records], shape
+            )
+            for name in names
+        }
+    return parts
 
 
 def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBalance:
@@ -189,6 +211,7 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
         residual=inflow - outflow - change,
         terms=terms,
         dropped_arcs=_stack([r.dropped_arcs for r in records], shape),
+        parts=_parts(records, additive, shape, p.K),
     )
 
 

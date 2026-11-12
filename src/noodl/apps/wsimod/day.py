@@ -267,6 +267,8 @@ class DayRecord:
       key ``"Land"`` (``WsimodDay.surface_names``), NaN where WSIMOD records no such field (an
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
     - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
+      ``parts`` the breakdown of the Land's running terms, ``{"in"|"out": {name: VQIP}}``,
+      which is not part of the balance;
       ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``dropped_arcs`` the part
       of it lost inside a ``QueueArc``, ``storage_start`` the water held in every carried
       store when the day began, ``storage_total`` when it was recorded and ``storage_end``
@@ -291,6 +293,7 @@ class DayRecord:
     surface: dict[str, Tensor]
     surface_quality: Tensor
     terms: dict[str, Tensor]
+    parts: dict[str, dict[str, Tensor]]
     dropped: Tensor
     dropped_arcs: Tensor
     storage_total: Tensor
@@ -1170,6 +1173,7 @@ class WsimodDay:
             surface={f: stack(v, ()) for f, v in surface.items()},
             surface_quality=stack(quality, (p.K,)),
             terms=dict(ctx.terms),
+            parts=self._parts(ctx),
             dropped=self._additive(ctx.dropped, shape),
             dropped_arcs=self._additive(ctx.dropped_arcs, shape),
             storage_total=held,
@@ -1179,6 +1183,11 @@ class WsimodDay:
             maxiter=dict(ctx.maxiter),
             decisions=list(ctx.decisions) if ctx.record_decisions else None,
         )
+
+    @staticmethod
+    def _parts(ctx: Ctx) -> dict[str, dict[str, Tensor]]:
+        """A copy of ``ctx.parts``."""
+        return {direction: dict(table) for direction, table in ctx.parts.items()}
 
     def _additive(self, vqip: Tensor, shape: torch.Size) -> Tensor:
         """``vqip``'s volume and additive columns at the batch shape, ``(..., 1 + K_add)``."""
@@ -1220,6 +1229,7 @@ class WsimodDay:
         record = self.last_record
         record.storage_end = self._held(shape, {})
         record.terms = dict(ctx.terms)
+        record.parts = self._parts(ctx)
         record.dropped = self._additive(ctx.dropped, shape)
         record.dropped_arcs = self._additive(ctx.dropped_arcs, shape)
         record.events = self._events(ctx)
