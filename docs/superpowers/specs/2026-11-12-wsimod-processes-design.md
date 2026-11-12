@@ -2,8 +2,9 @@
 
 Status: designed 2026-11-12 under the user's standing instruction ("do not wait for me and make
 sensible decisions"). Rulings X1–X6 are the brainstorming rulings, which stand in for the user's
-approval. X7–X26 are made here (Rulings made in this spec). A Fable review checks both sets
-before the plan is written (X6). This document covers sub-project 3b of 3 of the WSIMOD port
+approval. X7–X26 are made here (Rulings made in this spec). The Fable spec review approved it
+with changes; this revision applies the coordinator's rulings on that review (R1–R7 and the
+optional items) as X27–X40, and rewrites X11, X12 and X24 to match. This document covers sub-project 3b of 3 of the WSIMOD port
 (W1). It builds on 3a, specified in `2026-11-11-wsimod-core-design.md` and merged as PR #41
 (main `a2fb7d0`). Rulings W1–W95 still bind and are cited by number.
 
@@ -54,7 +55,7 @@ The constraints are 3a's:
 | `DecayQueueTank` (`tanks.py:645-696`) | all of it: the internal `DecayArcAlt` (`:663-669`), `_end_timestep` (`:689-696`) and the override (`:673-687`). It is a decaying `QueueGroundwater`'s tank (`storage.py:307-315`) |
 | `DecayArc` (`arcs/arcs.py:668-728`) | as a user arc: decay on entry (`:686-708`) and at the end of the day (`:710-728`) |
 | `DecayArcAlt` (`arcs.py:731-805`) | as a user arc and as `DecayQueueTank`'s internal arc: entry (`:752-778`) and `_end_timestep` (`:780-805`) |
-| `Storage`, `Groundwater`, `QueueGroundwater`, `Reservoir`, `RiverReservoir`, `River` with `decays` (`storage.py:24`, `:53-68`, `:96-101`, `:300-315`) | the decaying tank, the `decays` override, and the temperature forcing they read |
+| `Storage`, `Groundwater`, `QueueGroundwater`, `Reservoir`, `RiverReservoir`, `River` with `decays` (`storage.py:24`, `:53-68`, `:96-101`, `:300-315`) | the decaying tank, the `decays` override, and the temperature forcing they read. A `Groundwater`'s or `QueueGroundwater`'s forcing arrives only through a `filename` override (X11) |
 | `River.biochemical_processes` (`storage.py:738-898`) with `update_depth` (`:723-725`), `get_din_pool` (`:727-736`), `calculate_discharge` (`:917-924`), the biochemistry parameters and lags (`:539-566`), their overrides (`:620-644`) and `bio_in`/`bio_out` (`:592-596`, `:951-955`) | all of it |
 | `WTW.treat_current_input` (`nodes/wtw.py:163-214`) with any `process_parameters` and per-pollutant `liquor_multiplier` (`:72-85`, `:121-128`, `:130-153`) | the general process. 3a accepted only the neutral one |
 | `Surface.run`'s nitrite carry-over (`nodes/land.py:427-439`) | the ammonia→nitrite→nitrate conversion of the decayed mass |
@@ -223,7 +224,11 @@ never decays.
 ### `DecayQueueTank` and its `DecayArcAlt` (`tanks.py:645-696`, `arcs.py:731-805`)
 
 The tank is a `QueueTank` (3a) whose internal arc is a `DecayArcAlt` with `parent` set to the
-node (`:663-669`).
+node (`:663-669`). Its `number_of_timesteps` defaults to **1** (`tanks.py:648`), and
+`QueueGroundwater` passes none (`storage.py:308-315`). Every entry of a decaying
+`QueueGroundwater` therefore waits one day longer than in a non-decaying one. noodl reproduces
+this, and accepts the `number_of_timesteps` override that `DecayQueueTank.apply_overrides`
+consumes (`tanks.py:682-685`) to set it, for example to 0 (X12, X28).
 
 **Entry.** `push_storage` (`tanks.py:513-539`) calls the internal arc's `send_push_request`,
 which runs as in 3a, including the early return below `FA` (`arcs.py:378-379`).
@@ -274,13 +279,18 @@ Four consequences follow. All are transcribed (X13).
   The non-additive blend `(t2·V2 + t1·V1)/V` (`core.py:112-114`) therefore adds in the other
   order, and noodl follows it.
 
-Order of `total_decayed` (`core.py:491`, sequential `sum_vqip`):
+Order of `total_decayed` (`core.py:491`, sequential `sum_vqip`), stated as the order of the
+value that is extracted from `storage` at the end of day d + 1 (X30):
 
-1. the day's entries, in push order;
-2. after the reset, the moved slots `1 … L` in ascending order;
-3. slot 0.
+1. reset to empty at the end of day d (`arcs.py:789`);
+2. `+ diff(slot 1)`, `+ diff(slot 2)`, …, `+ diff(slot L)` (the moved slots, ascending,
+   `:798-803`);
+3. `+ diff(slot 0)` (`:805`);
+4. during day d + 1, `+ diff` of each entry, in push order (`:769`);
+5. extracted at the end of day d + 1 (`tanks.py:694`), immediately before the next reset.
 
-noodl adds in that order. An absent key adds an empty `diff`, which is an exact zero. `L` is
+On day 0 the value is the empty initial `total_decayed` (`core.py:472`) plus day 0's entries.
+noodl adds in that order, starting from the carried `"wsimod.total_decayed"`. An absent key adds an empty `diff`, which is an exact zero. `L` is
 3a's register length; WSIMOD's growing `max_travel` covers only keys that exist, and the rest
 are absent.
 
@@ -304,10 +314,19 @@ are absent.
   In noodl the decay applies in place to every present row of `"wsimod.arc_queue"`, and the
   `since` counters advance as in 3a.
 
-`total_decayed` feeds only WSIMOD's arc balance (`:684`), never a state. noodl sums the term in
-its row order, which is not WSIMOD's list order across the two directions. The term is
-therefore compared at 1e-12 × scale with that named cause (X24). The rows themselves are
-bitwise.
+`total_decayed` feeds only WSIMOD's arc balance (`:684`), never a state. noodl's term for day d
+reconstructs WSIMOD's order of addition (X24):
+
+1. from empty, `+ diff` of each entry of day d, in the day's static call order (both
+   directions merged, as `Ctx.sequence` lists the calls);
+2. then `+ diff` of each waiting row at the end of day d, in WSIMOD's list order: by entry age
+   `i + since(direction)` descending (oldest first), then by the position of the row's call in
+   the static call sequence of its entry day.
+
+List order is entry order, because `update_queue` removes requests without reordering the
+rest (`arcs.py:518-520`). Every per-request `diff` is bitwise, and so is this sum. Its window
+(entries of d, then the end of d) differs from WSIMOD's (end of d − 1, then entries of d), so
+the comparison is rebuilt from the captured `diff`s (The replay harness).
 
 **`DecayArcAlt`** as a user arc is 3a's user `AltQueueArc` (shifted at every end of day,
 flushed only by its next push) with `DecayQueueTank`'s entry and end-of-day rules above. Its
@@ -550,7 +569,7 @@ The new carried state follows 3a's dict-of-tensors layout (W68/W77: each class d
 
 | Key | Shape | What it holds (WSIMOD attribute) | Labels |
 |---|---|---|---|
-| `"wsimod.total_decayed"` | (..., n_rows, 1+K) | `total_decayed` of each `DecayQueueTank`'s internal arc (`tanks.py:694`, `arcs.py:789`), then, when `"nitrite"` is a pollutant, of every surface (`land.py:434-439`) | `(node, "tank")` for a decaying `QueueGroundwater`; `(node, "surface:<name>")` for a surface |
+| `"wsimod.total_decayed"` | (..., n_rows, 1+K) | `total_decayed` of each `DecayQueueTank`'s internal arc (`tanks.py:694`, `arcs.py:789`), then, when `"nitrite"` is a pollutant, of every surface (`land.py:434-439`) | 3a's attribute paths (X35): `(node, "tank.internal_arc")` for a decaying `QueueGroundwater`; `(node, "surfaces.<name>")` for a surface |
 | `"wsimod.river_temperature_lag"` | (..., n_slots) | `lagged_temperatures` of every River with biochemistry (`storage.py:561`, `:753-755`), as a fixed register of `max_temp_lag + 1` slots per river, flattened as 3a's `travel_queue` is | `(river, i)`, `i = 0 … max_temp_lag`, with slot 0 the oldest; unit `degC` |
 | `"wsimod.river_phosphorus_lag"` | (..., n_slots) | `lagged_total_phosphorus` (`:564`, `:758-763`), `max_phosphorus_lag + 1` slots per river | `(river, i)`, `i = 0 … max_phosphorus_lag`; unit `kg` |
 
@@ -575,8 +594,10 @@ Python's exactly:
 
 - the windows are the last `min(10, size)`, `min(20, size)` and `size` slots;
 - they are added one slot at a time, oldest first, starting from `+0.0`;
-- Python's `sum` starts from the integer 0, and `0 + x`, `+0.0 + x` and `+0.0 + 0.0 + … + x`
-  are all exactly `x`, including when `x = −0.0`.
+- CPython's `sum` starts from the integer 0, so its first addition is `0 + x`, which gives `x`
+  for every `x` except `−0.0`, where it gives `+0.0`. noodl's first addition is `+0.0 + x`,
+  with the same result in every case, `−0.0` included, and a padded slot adds `+0.0`, which
+  leaves any running sum unchanged. The sums are therefore Python's bitwise (X31).
 
 So no presence mask is needed. The initial state is all zeros, which matches WSIMOD's empty
 lists. A run can be warm-started from another run's registers. Unlike WSIMOD, noodl stores no
@@ -593,9 +614,9 @@ order, D6):
 
 | Driver | Shape | Rows, columns | Notes |
 |---|---|---|---|
-| `"wsimod.<Class>.decays.constant"`, `"….decays.exponent"` | (..., n, K) | every node of a storage-family class `Class`; every surface of class `Class` (`ImperviousSurface`, `PerviousSurface`); every arc of class `DecayArc` or `DecayArcAlt`. Columns: the pollutants | an entry outside the element's `decays` key set is inert: its template is `(0, 1)` and `bind` refuses any other value (X9; W65's pattern) |
+| `"wsimod.<Class>.decays.constant"`, `"….decays.exponent"` | (..., n, K) | every node of a storage-family class `Class`, **including those built with `decays: None`, as all-inert rows**; every surface of class `Class` (`ImperviousSurface`, `PerviousSurface`); every arc of class `DecayArc` or `DecayArcAlt`. Columns: all `K` pollutants, the non-additive ones included (a non-additive key may decay, X21) | an entry outside the element's `decays` key set is inert: its template is `(0, 1)` and `bind` refuses any other value (X9; W65's pattern). Absent in a quantity-only run (X34) |
 | `"wsimod.<Class>.process_parameters.constant"`, `"….exponent"` | (..., n, K_add) | every `WWTW`, `FWTW` or `WTW`; columns: the additive pollutants | absent in a quantity-only run, as `pollutant_load` is |
-| `"wsimod.<Class>.liquor_multiplier"` | (..., n, 1 + K_add) | same rows; columns `volume`, then the additive pollutants | **changed from 3a's (..., n)**, which was the volume entry alone (X10) |
+| `"wsimod.<Class>.liquor_multiplier"` | (..., n, 1 + K_add) | same rows; columns `volume`, then the additive pollutants | **changed from 3a's (..., n)**, which was the volume entry alone (X10). In a quantity-only run `K_add = 0`, so the shape is `(..., n, 1)` (X34) |
 | `"wsimod.River.<p>"` for `uptake_PNratio`, `denpar_w`, `T_wdays`, `halfsatINwater`, `hsatTP`, `limpppar`, `prodNpar`, `prodPpar`, `muptNpar`, `muptPpar` | (..., n_rivers) | every `River` | present only when biochemistry runs |
 | `"wsimod.PerviousSurface.soil_temp_*"` | (..., n) | already 3a's drivers | 3b lifts the neutral requirement; `bind` refuses a weight sum of 0 |
 
@@ -613,13 +634,20 @@ New units: `decays.*` is `-`. The River parameters' units are WSIMOD's comments:
 **Drivers, forcing.** `"wsimod.temperature"` `(..., T, n_readers)` gains these readers, and the
 forcing check at build time refuses a missing `(temperature, date)` by name, as in 3a:
 
-- every storage-family node with a `decays` dict, including `Groundwater` and `QueueGroundwater`
-  through their configured `data_input_dict` (defect table: WSIMOD loses it);
+- every storage-family node with a `decays` dict. For a `Groundwater` or `QueueGroundwater`
+  the forcing is the data of its `filename` override, the only route by which WSIMOD gives
+  these classes any data (X11). Their configured `data_input_dict` or `filename` is lost
+  (`storage.py:202-203`, `:291-292`), as in WSIMOD, and is listed as unread;
 - every `River` when `"nitrate"` is among the configured pollutants;
 - the `in_port` of every user `DecayArc` or `DecayArcAlt`, each node counted once.
 
-An `in_port` that is a `Catchment` reads its temperature from `"wsimod.concentration"`. That
-requires `temperature` to be a pollutant, and without one the arc is refused by name.
+An `in_port` that is a `Catchment` gets its own `"wsimod.temperature"` row like every other
+reader, holding the same `("temperature", date)` values from its data, bitwise (X29). A Decay
+arc out of a Catchment therefore also runs in a quantity-only run, and needs no `temperature`
+pollutant. When `temperature` is a pollutant, the same values also appear in that catchment's
+`"wsimod.concentration"` column: the decay reads the `"wsimod.temperature"` row, and the
+catchment's outflow reads the concentration. Changing one driver does not change the other, and
+the docs say so.
 
 These readers are required in quantity-only runs too, because WSIMOD reads them whatever the
 pollutant list (3a's rule).
@@ -645,8 +673,9 @@ with the temperature forcing through every new process.
   They are listed in `model.ignored_by_quantity_only`.
 - The structure stays: a decaying `QueueGroundwater` keeps `DecayQueueTank`'s end of day,
   because WSIMOD's volumes depend on it (X25).
-- Volumes still never depend on any pollutant value or parameter. With X12 (the
-  `QueueGroundwater` delay) this holds for every 3b class, and a test asserts it.
+- Volumes still never depend on any pollutant value or decay parameter, and a test asserts
+  it. They do depend on the structure: whether a `QueueGroundwater` decays changes its delay
+  (X12) and its end of day (X13), in WSIMOD as in noodl.
 
 ## Mass balance
 
@@ -669,7 +698,10 @@ loaded at its start to the water held at the record point, which is before `end_
 end-of-day decays happen in `end_timestep`, after the record. Under 3a's window they would fall
 between two days and appear in no residual, which is WSIMOD's own blindness (below). In 3b:
 
-- `storage_change(d) = held(after end_timestep of d) − held(start of d)`;
+- `DayRecord.storage_total` keeps its 3a meaning, the water held at the record point. A new
+  field, `DayRecord.storage_end`, holds the water held after `end_timestep`, and `run._balance`
+  uses it (X32);
+- `storage_change(d) = storage_end(d) − held(start of d)`;
 - the terms recorded during `end_timestep` belong to day d;
 - `held(start of d + 1)` equals `held(after end_timestep of d)` exactly, because it is the same
   state, so consecutive windows meet.
@@ -737,6 +769,7 @@ The refusals 3a lifts are listed under Scope. New refusals, each by name and eac
   - A `decays` key that is not a configured pollutant, including `volume`: WSIMOD would
     `KeyError`, or would decay the water itself.
   - A `decays` entry without `constant` or `exponent`, or with any other key.
+  - The partial-dict refusals below apply to the configuration only; overrides merge (X36).
   - `exponent ≤ 0`, at build and at `bind`.
 - **WTW.**
   - `process_parameters` or `liquor_multiplier` missing an additive pollutant.
@@ -752,6 +785,9 @@ The refusals 3a lifts are listed under Scope. New refusals, each by name and eac
     raise `IndexError`.
   - `max_phosphorus_lag` not a positive integer: it is a divisor.
   - The `bind`-time checks repeat for batched drivers.
+- **Groundwater.** A decaying `Groundwater` or `QueueGroundwater` without a `filename` override
+  holding `("temperature", date)` for every date: WSIMOD raises `TypeError` at its first decay
+  (`core.py:485`), because its `data_input_dict` is `None`.
 - **Surfaces.** `nitrite` without `nitrate` and `ammonia` (`land.py:434-439`).
 - **Soil temperature.** A total weight of 0.
 - **Arcs.** `decays` on a non-`Decay*` arc, and `parent` on any arc.
@@ -771,9 +807,23 @@ The refusals 3a lifts are listed under Scope. New refusals, each by name and eac
   a test with two surfaces.
 - An arc `decays` override is refused, as WSIMOD consumes none (`Arc.apply_overrides`,
   `arcs.py:93-96`).
-- The 3a rule stands: an override key that the class does not consume is refused by name.
-  `QueueTank`'s `number_of_timesteps` override (`tanks.py:499-502`, `:682-685`) stays refused,
-  as in 3a; it is not a 3b process.
+- **Partial dicts.** A configuration's `process_parameters`, `liquor_multiplier` or `decays`
+  that names only some of what WSIMOD reads is refused (Validation). An **override** names only
+  what it changes and merges into the full dict, as WSIMOD's `update` does (`wtw.py:127`,
+  `:146-148`; `tanks.py:439`, `:686`; `storage.py:101`) (X36).
+- **`filename` overrides** (X27). 3a refused a `filename` override. 3b accepts one on any node
+  whose `apply_overrides` chain reaches `Node.apply_overrides` (`nodes.py:93-99`), which is every
+  node class in scope. noodl reads it as WSIMOD does: `read_csv` (`model.py:1252-1269`) on the
+  path as written, opened relative to the process's working directory rather than the
+  configuration's directory, with every value a float. The data replaces the node's forcing.
+  The docs advise absolute paths. A surface's `data_input_dict` override stays refused, because
+  it is deposition data (3c).
+- **`number_of_timesteps` on a decaying `QueueGroundwater`** (X28). It is accepted, and sets
+  `tank.number_of_timesteps` and `tank.internal_arc.number_of_timesteps`
+  (`DecayQueueTank.apply_overrides`, `tanks.py:682-685`). On a non-decaying `QueueGroundwater`
+  the `QueueTank` override (`tanks.py:499-502`) stays refused, as in 3a.
+- The 3a rule stands otherwise: an override key that the class does not consume is refused by
+  name.
 
 ### Decision vocabulary (W44), events and diagnostics
 
@@ -821,22 +871,31 @@ The new sites follow 3a's grammar, `"<node|arc>:<name>/<WSIMOD method>/<branch>"
 - `total_decayed` and the queue of each surface and `DecayQueueTank`.
 
 A new `capture_arc_calls(model, arcs)` records a user `Decay*` arc's request calls, its
-`update_queue` and its `end_timestep`, with the replies of its `out_port`. Its replay builds the
-noodl arc alone between `ScriptedPort`s that return the captured replies.
+`update_queue` and its `end_timestep`, with the replies of its `out_port`. It also wraps the
+arc's `make_decay` and records every per-request `diff`, tagged with its call (an entry, with
+its static call index) or its row (the end of the day), and `total_decayed` immediately before
+and after each `end_timestep`. Its replay builds the noodl arc alone between `ScriptedPort`s
+that return the captured replies.
 
-The bound is 0 (bitwise) for every 3b class. The one exception is the `DecayArc` mass-balance
-term, at 1e-12 × scale, with its cause named in the test (X24).
+The bound is 0 (bitwise) for every 3b class, the `DecayArc` mass-balance term included (X24):
 
-A helper `patch_groundwater_reference(model, network)` applies the two corrections of X11 and
-X12 to the live WSIMOD model before `run`:
+- each per-request `diff` is compared bitwise;
+- the reference term for day d is re-windowed from the captures: the entry `diff`s of day d in
+  call order, then the end-of-day `diff`s of day d in list order, summed with `sum_vqip` from
+  empty. noodl's term must equal it bitwise;
+- WSIMOD's own `total_decayed`, captured before each reset, must equal the same `diff`s summed
+  in WSIMOD's window (the end of d − 1, then the entries of d), bitwise. This checks the harness.
 
-- it sets each `Groundwater`'s and `QueueGroundwater`'s `data_input_dict` from the
-  configuration;
-- it sets a decaying `QueueGroundwater`'s `tank.number_of_timesteps` and
-  `tank.internal_arc.number_of_timesteps` to 0.
+If some part still cannot be bitwise, the difference is measured, its cause is written in the
+test, and the bound is asserted (W19). The expectation is that none arises.
 
-These are the only cases that compare against a patched WSIMOD. Each one also has a crash test
-against the unpatched WSIMOD.
+No case patches WSIMOD. A decaying `Groundwater` or `QueueGroundwater` gets its data through
+WSIMOD's own route. The case's configuration carries a `filename` override in its `overrides`
+section, with an absolute path that the test writes into a temporary directory, so both engines
+read the same file through their override code (`Model.load` applies the section, and
+`Node.apply_overrides` reads it, `nodes.py:93-99`). This is WSIMOD with an override, not a
+patched WSIMOD (X11). A crash test also runs the case without the override, and asserts
+WSIMOD's `TypeError` and noodl's refusal.
 
 ### The demos
 
@@ -858,7 +917,16 @@ against the unpatched WSIMOD.
 - **The 3b-live configuration** (X20). Each demo's `config_neutral.yml` is replaced by
   `config_no_deposition.yml`. It differs from `config.yml` only by an `overrides` section that
   sets every surface's `pollutant_load` to 0, the one 3c process the demos contain.
-  `scripts/regenerate_wsimod_fixtures.py` writes it, and the README says so.
+  `scripts/regenerate_wsimod_fixtures.py` writes it, and the README says so. The rename forces
+  these edits (X38):
+  - `tests/data/wsimod/quickstart/config_neutral.yml` and `…/oxford/config_neutral.yml`
+    become `config_no_deposition.yml`;
+  - `scripts/regenerate_wsimod_fixtures.py` (the writer and its overrides);
+  - `tests/verification/test_wsimod_parity.py`, `test_wsimod_replay.py`,
+    `test_wsimod_fixtures.py` and `test_wsimod_gradients.py`;
+  - `tests/data/wsimod/README.md` and `docs/applications/wsimod.md`.
+
+  The 3a spec and plan keep the old name as history.
 - **What runs live.** Both demos then run every 3b process they contain:
   - oxford: the FWTW and WWTW treatment on 11 additive pollutants, and the rural surface's soil
     temperature;
@@ -876,9 +944,9 @@ filed upstream without the user (X4). Issue #258 exists.
 
 | Defect | WSIMOD | noodl | Test |
 |---|---|---|---|
-| `Groundwater` takes `data_input_dict` and stores it before `super().__init__`, which lets `Node.__init__` reset it to `None` (`storage.py:154`, `:202-203`, `nodes.py:26`, `:58`) | a decaying `Groundwater` raises `TypeError: 'NoneType' object is not subscriptable` at its first decay (`core.py:485`); run while writing this spec | reads the configured data, the evident intent (X11) | crash test against WSIMOD; parity against the patched WSIMOD (`decay_groundwater`) |
+| `Groundwater` takes `data_input_dict` and stores it before `super().__init__`, which lets `Node.__init__` reset it to `None` (`storage.py:154`, `:202-203`, `nodes.py:26`, `:58`) | a decaying `Groundwater` raises `TypeError: 'NoneType' object is not subscriptable` at its first decay (`core.py:485`); run while writing this spec | reproduced: the configured data is lost; the data comes from a `filename` override, which WSIMOD's `Node.apply_overrides` consumes (`nodes.py:93-99`); without one, refused by name (X11) | crash test without the override; parity with it (`decay_groundwater`) |
 | The same in `QueueGroundwater` (`storage.py:252`, `:291-292`) | `TypeError` at the first push or end of day; run likewise | the same (X11) | `decay_queue_groundwater` |
-| `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring ("Defaults to 0", `:656-658`) and `QueueTank` (`:463`). `QueueGroundwater` passes none (`storage.py:308-315`) | adding `decays` delays all of a `QueueGroundwater`'s water by one day; run likewise (keys 1 and 2 for a time-area {0, 1}) | 0, the evident intent, so that `decays` changes only pollutants (X12) | `decay_queue_groundwater` against the patched WSIMOD; a unit test that WSIMOD's default gives the delay |
+| `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring ("Defaults to 0", `:656-658`) and `QueueTank` (`:463`). `QueueGroundwater` passes none (`storage.py:308-315`) | adding `decays` delays all of a `QueueGroundwater`'s water by one day; run likewise (keys 1 and 2 for a time-area {0, 1}) | reproduced: 1 by default, documented; the `number_of_timesteps` override that `DecayQueueTank.apply_overrides` consumes (`tanks.py:682-685`) is accepted (X12, X28) | `decay_queue_groundwater` at the default and with the override set to 0, both against WSIMOD |
 | `River.calculate_discharge` assigns `bio_in`/`bio_out` (`storage.py:923-924`) | a second call per day drops the first call's terms; the node check prints an error | the processes run twice as in WSIMOD, and noodl's balance adds both calls' terms | `river_double_discharge`: WSIMOD prints, noodl's residual is 0 |
 | River mineralisation with `din = 0` (`storage.py:866-873`) | the mineralised nitrogen is destroyed, and the lists show it as `bio_out` | reproduced, event `"river_nitrogen_lost"` (X15) | `river_nutrients` (DIN-free stretch): value parity and the event |
 | River phosphorus "365-day mean" over 366 entries ÷ 365 (`storage.py:758-763`, `:808`), and the windows that divide by their full length from day 1 (`:806-808`) | biased mean; cold start | reproduced (X14) | `river_nutrients`, more than 366 days |
@@ -953,7 +1021,7 @@ cases in `tests/verification/_wsimod_cases.py`.
     either side of 20, `exponent = 1`, zero volume with mass, a non-additive key, and absent
     keys.
   - `DecayTank` against a dummy parent with `data_input_dict`.
-  - `DecayQueueTank`, built with an explicit `number_of_timesteps=0`, which needs no patch. The
+  - `DecayQueueTank`, built with its default `number_of_timesteps=1` and with `0`. The
     sequences mix pushes, pulls, `pull_set_active` and ends of day, and assert the one-day lag
     of `storage`, `total_decayed`, the swapped merge and the missing `update_queue`.
   - `DecayArc` with the W21 driver: irregular pushes, pulls, backflow and `n = 0`.
@@ -967,8 +1035,8 @@ cases in `tests/verification/_wsimod_cases.py`.
     (`calculate_discharge`, both registers), and the storage family with decays.
 
   The default suite samples days as 3a does (W15); every day is replayed under `-m slow`.
-- **Arc replays** (`capture_arc_calls`), bound 0 for the rows. The `DecayArc` term is compared
-  at 1e-12 × scale (X24).
+- **Arc replays** (`capture_arc_calls`), bound 0 for the rows, the per-request `diff`s and the
+  re-windowed `DecayArc` term (X24).
 
 ### 2. Whole-model parity
 
@@ -984,14 +1052,15 @@ cases in `tests/verification/_wsimod_cases.py`.
   demos and on every purpose-built case.
 - Bounds and admission are W19's: 1e-12 × scale, and admissions only when named, measured and
   asserted. The expectation is bitwise with no admissions, as in 3a's Task 16.
-- WSIMOD's per-day prints are checked as in W90/W91. The only new expected print is the River
-  mass-balance error of `river_double_discharge`.
+- WSIMOD's per-day prints are checked as in W90/W91, with one named exception (X32):
+  `river_double_discharge`, where WSIMOD prints its River mass-balance error on every day and
+  noodl's residual is 0 on every day. The test asserts both.
 - noodl's balance closes within 1e-12 × scale on every case and every day, under the contiguous
   window (X8). The test is 3a's, re-run.
 
 ### 3. Purpose-built cases
 
-Each case runs in both modes. Unless marked, it is compared with the unpatched WSIMOD.
+Each case runs in both modes and is compared with WSIMOD as it is: none is patched.
 
 - `decay_storage`:
   - a `Storage`, a `Reservoir`, a `RiverReservoir` and a `River` without nitrate, each with
@@ -1000,15 +1069,16 @@ Each case runs in both modes. Unless marked, it is compared with the unpatched W
   - a decaying `do` (non-additive);
   - a pollutant that is not decayed;
   - a `decays` override merged into a node built with a dict.
-- `decay_groundwater`: a `Groundwater` with `decays`. It is compared with the patched WSIMOD
-  (X11), and the unpatched one must raise.
+- `decay_groundwater`: a `Groundwater` with `decays` and a `filename` override for its
+  temperature (X11). Without the override, WSIMOD must raise and noodl must refuse.
 - `decay_queue_groundwater`:
   - a `QueueGroundwater` with time-area {0: 0.5, 2: 0.5} and `decays`;
   - abstraction pulls through `pull_set_active`;
   - days on which water reaches slot 0 with no push before `distribute`, which makes the missing
     `update_queue` observable.
 
-  It is compared with the patched WSIMOD (X11, X12).
+  It has a `filename` override (X11), and it runs twice: at WSIMOD's default
+  `number_of_timesteps = 1`, and with the override `number_of_timesteps: 0` (X12, X28).
 - `decay_arc`: a user `DecayArc` with `n = 2` and a second one with `n = 0`, with push and pull
   requests, a rejecting receiver (decayed backflow), and an `in_port` with temperature forcing.
 - `decay_arc_alt`: a user `DecayArcAlt` with `n = 2`, irregular pushes, and temperature as a
@@ -1037,6 +1107,11 @@ Each case runs in both modes. Unless marked, it is compared with the unpatched W
   - a DIN-free stretch (`"river_nitrogen_lost"`);
   - one river overridden to `max_temp_lag = 5`, with other biochemistry overrides;
   - every 50 % cap binding at least once, which is asserted from the decisions.
+
+  The default suite runs it at value parity, without recording decisions. The per-day decisions,
+  and the assertions on them, run only under `-m slow`. Its default-suite time is measured as
+  W15 requires, and the case must not be among the default suite's slowest items. If it is, its
+  default run is cut to its first 400 days, which still turns the 366-slot register over (X39).
 - `river_double_discharge`: a custom orchestration with `River.calculate_discharge` twice.
   WSIMOD prints its mass-balance error. Values must be at parity and noodl's residual must be 0.
 - `land_run_twice`: `Land.run` twice with decaying surfaces, at value parity.
@@ -1073,7 +1148,12 @@ The no-`wsimod`-import subprocess test is unchanged.
   - the `DecayQueueTank` behaviours (X13);
   - the new refusals, kinks and events;
   - the verification rows with measured values;
-  - the demo configurations.
+  - the demo configurations;
+  - that WSIMOD's `DecayTank` and `DecayQueueTank` drop out of the `tank_*` results, because
+    `record_all` matches the classes `Tank`, `QueueTank` and `ResidenceTank` exactly
+    (`model.py:1123`), while their storage stays in the state (X40);
+  - the `filename` override and its working-directory path (X27), and the catchment temperature
+    held in two drivers (X29).
 - `docs/formats/wsimod.md`: `decays`, the `Decay*` arcs, the River overrides, the WTW entries,
   and the soil-temperature overrides.
 - `tests/data/wsimod/README.md`: `config_no_deposition.yml`.
@@ -1105,16 +1185,22 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   - Why: physical names, and no second key for one WSIMOD parameter.
   - Cost if wrong: 3a's `(…, n)` `liquor_multiplier` callers break. They are refused by name,
     and the 3a tests and docs are updated.
-- **X11, the `Groundwater` and `QueueGroundwater` forcing.** noodl reads the configured
-  `data_input_dict`. The reference is WSIMOD patched the same way, with a crash test for the
-  unpatched one.
-  - Why: the evident intent. Without it the classes cannot decay at all.
-  - Cost if wrong: parity rests on a patched reference for these two classes.
-- **X12, a decaying `QueueGroundwater` uses `number_of_timesteps = 0`.**
-  - Why: the class's docstring says 0, `QueueTank` uses 0, and no WSIMOD model can run the
-    defective value (X11's crash). The volumes then never depend on `decays`.
-  - Cost if wrong: a one-day timing difference against a WSIMOD with the data defect fixed by
-    another route.
+- **X11 (rewritten after review, R1), the `Groundwater` and `QueueGroundwater` forcing.** The
+  port is faithful: the configured `data_input_dict` is lost, as in WSIMOD, and the decay's
+  temperature comes from a `filename` override, which `Node.apply_overrides` consumes
+  (`nodes.py:93-99`). A decaying node of either class without such an override is refused by
+  name. The reference is WSIMOD with the same override, not a patched WSIMOD.
+  - Why: the first draft's premise, that WSIMOD cannot run these classes, was false. WSIMOD has
+    its own route, so faithfulness wins (X2).
+  - Cost if wrong: users must supply groundwater forcing through an override rather than through
+    the node's own data.
+- **X12 (rewritten after review, R1), a decaying `QueueGroundwater` keeps `number_of_timesteps
+  = 1`.** WSIMOD's default (`tanks.py:648`) is reproduced and documented as a defect, against
+  the class's docstring. The override that sets it is accepted (X28).
+  - Why: WSIMOD runs this value, so parity needs it. The override gives users the evident
+    intent.
+  - Cost if wrong: decaying a `QueueGroundwater` changes its timing, which surprises users. It is
+    documented.
 - **X13, `DecayQueueTank` is transcribed as written.** That covers the missing `update_queue`,
   the `active_storage` that never decays, the storage that lags by a day, and the swapped merge
   order.
@@ -1149,7 +1235,13 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   - Cost if wrong: speed at large batches, measured in the benchmark.
 - **X19, the new refusals.** They are the list in Interaction › Validation.
   - Why: each is a WSIMOD crash, an unread key, or water decaying.
-  - Cost if wrong: a configuration that WSIMOD runs is refused, and must be edited.
+  - Cost if wrong: a configuration that WSIMOD runs is refused, and must be edited. Two of the
+    refusals are stricter than WSIMOD's crashes (X37):
+    - a float `max_temp_lag` or `max_phosphorus_lag`: WSIMOD runs 20.5, keeping 21 entries, and
+      runs 365.5, dividing by 365.5;
+    - `exponent = 0`: WSIMOD runs it on every day on which the power is not negative (`0 ** 0 =
+      1`), which is `T ≥ 20` for decay and `T ≤ 20` for treatment, and crashes on the first
+      other day.
 - **X20, the demo configurations.** `config_neutral.yml` is replaced by
   `config_no_deposition.yml`, which neutralises only the surfaces' `pollutant_load`. A test
   asserts that the quantity-only volumes equal the live volumes.
@@ -1167,19 +1259,95 @@ Each ruling states what was decided, why, and the cost if it is wrong.
   - Why: only these two read the previous day's value. The storage family's `DecayTank`s and the
     user arcs reset it before every use.
   - Cost if wrong: a state-format change.
-- **X24, the `DecayArc` mass-balance term.** It is compared at 1e-12 × scale rather than
-  bitwise.
-  - Why: WSIMOD sums it in list order across directions, while noodl keeps its rows by
-    direction. The rows themselves, which are state, are bitwise.
-  - Cost if wrong: none to the values.
+- **X24 (rewritten after review, R6), the `DecayArc` mass-balance term is bitwise.** noodl sums
+  the entry `diff`s in call order and the end-of-day rows in list order (entry age descending,
+  then the static call sequence), which reconstructs WSIMOD's order. The test compares the
+  per-request `diff`s bitwise, and the term against a reference re-windowed from the
+  `end_timestep` captures. Anything still not bitwise is measured and asserted (W19).
+  - Why: no admission is needed once the order is reconstructed.
+  - Cost if wrong: a measured, asserted bound in one test.
 - **X25, quantity-only runs keep the decay structure.** That means the `DecayQueueTank`'s end of
   day and the temperature forcing; the values are listed as ignored.
   - Why: WSIMOD's volumes depend on the structure, not on the values (W10).
   - Cost if wrong: a quantity-only run of a decaying `QueueGroundwater` differs from WSIMOD in
     timing.
 - **X26, the state keys and labels.** They are as tabled under State:
-  - `"wsimod.total_decayed"` rows `(node, "tank")` and `(node, "surface:<name>")`;
+  - `"wsimod.total_decayed"` rows `(node, "tank.internal_arc")` and `(node, "surfaces.<name>")`
+    (X35);
   - `"wsimod.river_temperature_lag"` and `"wsimod.river_phosphorus_lag"` rows `(river, i)`,
     with slot 0 the oldest.
   - Why: 3a's labelling (D10).
   - Cost if wrong: a state-format change before release.
+
+### Rulings after the review (X27–X40)
+
+These record the coordinator's rulings on the Fable spec review (R1–R7 and the optional items).
+
+- **X27, `filename` overrides are accepted (R1).** On every node class in scope, a `filename`
+  override is read as WSIMOD reads it (`nodes.py:93-99`, `model.py:1252-1269`), with the path
+  as written, relative to the working directory. A surface's `data_input_dict` override stays
+  refused (3c).
+  - Why: it is WSIMOD's only route to a `Groundwater`'s or `QueueGroundwater`'s forcing (X11).
+  - Cost if wrong: a 3a refusal is lifted for every node class, and a relative path depends on
+    the working directory, as in WSIMOD.
+- **X28, the `number_of_timesteps` override on a decaying `QueueGroundwater` (R1).** It is
+  accepted (`tanks.py:682-685`). The non-decaying case stays refused, as in 3a.
+  - Why: the reviewer's option (a). It lets users choose 0 within WSIMOD's own behaviour.
+  - Cost if wrong: a non-decaying `QueueGroundwater` still cannot take the same override.
+- **X29, the Catchment's temperature row (R2).** A Catchment that is the `in_port` of a Decay arc
+  gets a `"wsimod.temperature"` row, bitwise its data's value, and the decay reads it.
+  - Why: every reader has a row, and the arc then also runs in a quantity-only run.
+  - Cost if wrong: with `temperature` a pollutant, the value is in two drivers, and a user must
+    change both. This is documented.
+- **X30, the order of the `DecayQueueTank`'s `total_decayed` (R3).** It is stated as the
+  extracted value's order: reset, `+ diff(slot 1 … L)`, `+ diff(slot 0)`, the next day's
+  entries in push order, then extracted.
+  - Why: that is the value that reaches the state.
+  - Cost if wrong: a last-bit difference in `storage`'s pollutant columns.
+- **X31, the zero-sign argument for the registers (R4).** It is restated: CPython's `sum`
+  starts from 0, and noodl's `+0.0` start gives the same results. The conclusion, that no
+  presence mask is needed, is unchanged.
+  - Why: precision about the starting value.
+  - Cost if wrong: none.
+- **X32, `storage_end` and the W90/W91 exception (R5).** `DayRecord.storage_total` keeps its
+  meaning. The new `DayRecord.storage_end` is the end of the X8 window, and `run._balance` uses
+  it. `river_double_discharge` is the named exception to W90/W91: WSIMOD prints, and noodl's
+  residual is 0.
+  - Why: an existing field does not change meaning, and the exception is named rather than
+    silent.
+  - Cost if wrong: one more record field.
+- **X33, the `DecayArc` term is bitwise (R6).** See X24, rewritten.
+  - Why: the admission is avoided.
+  - Cost if wrong: a measured bound (W19) in one test.
+- **X34, explicit driver shapes (R7).**
+  - `liquor_multiplier` is `(..., n, 1)` in a quantity-only run.
+  - The `decays.*` rows include the nodes of the class built with `decays: None`, as all-inert
+    rows.
+  - `K` includes the non-additive columns.
+  - Why: one layout per class, as 3a's leakage driver has.
+  - Cost if wrong: a change of driver shape.
+- **X35, attribute-path labels.** The `"wsimod.total_decayed"` rows are
+  `(node, "tank.internal_arc")` and `(node, "surfaces.<name>")`.
+  - Why: they are 3a's attribute paths (D10, `carried_paths`).
+  - Cost if wrong: a label change.
+- **X36, partial dicts.** A partial dict is refused only in the configuration. Partial overrides
+  merge, as WSIMOD's `update`s do.
+  - Why: an override names only what it changes.
+  - Cost if wrong: none, since WSIMOD behaves this way.
+- **X37, two stricter refusals named.** A float `max_temp_lag` or `max_phosphorus_lag`, and
+  `exponent = 0`, are refused although WSIMOD runs some of them. The cost is recorded under X19.
+  - Why: a float lag gives no register size, and `exponent = 0` crashes on the first day on
+    which the power is negative.
+  - Cost if wrong: such a configuration must be edited.
+- **X38, the renames forced by `config_no_deposition.yml`.** They are listed under The demos.
+  - Why: the name must say what is neutralised.
+  - Cost if wrong: fixture and test churn.
+- **X39, `river_nutrients` in the default suite.** Value parity runs by default, without
+  decisions. The decisions are recorded only under `-m slow`. The case is kept out of the
+  default suite's slowest items, and cut to 400 days if needed.
+  - Why: recording decisions over 1100 days is the expensive part.
+  - Cost if wrong: the cap assertions run only in the slow suite.
+- **X40, the `tank_*` docs line.** The application page states that WSIMOD's `DecayTank` and
+  `DecayQueueTank` drop out of the `tank_*` results (`model.py:1123`).
+  - Why: a user who adds `decays` sees a tank disappear from the results.
+  - Cost if wrong: none.
