@@ -28,6 +28,7 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   A tank is not a node: its sites are its owner's with the tank's attribute path,
   ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
   ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,
+  ``node:N/<tank>/make_decay/cap:<pollutant>`` (a ``Decay``'s cap, evaluated at bind, D5),
   ``node:N/<tank>/pull_ponded/excess``, ``node:N/<tank>/evaporate/clip``, and for a
   ``QueueTank`` ``node:N/<tank>/push_check/clip`` and
   ``node:N/<tank>/pull_storage_exact/clip:<volume|additive pollutant>``; its internal arc's

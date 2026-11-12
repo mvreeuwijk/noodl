@@ -274,22 +274,37 @@ class ResidenceTank(Tank):
 
 
 class DecayTank(Tank):
-    """``DecayTank`` (``tanks.py:403-457``) with empty ``decays`` only (decay is 3b).
+    """``DecayTank`` (``tanks.py:403-457``): a tank that decays its storage at the end of the day.
 
-    ``end_timestep`` (``end_timestep_decay``, ``:442-447``) reads the parent's
-    ``("temperature", t)`` (``core.py:484-487``), so a missing temperature fails as WSIMOD's
-    ``KeyError`` does, and with no decays it leaves the storage unchanged.
-    ``parent`` is the node whose bound parameters hold ``"temperature"``.
+    ``end_timestep`` (``end_timestep_decay``, ``:442-447``) resets ``total_decayed``, decays
+    ``storage`` with the day's factor and adds the decayed mass to ``total_decayed``
+    (``core.py:474-492``). The factor and its cap were evaluated when the owner bound the
+    parameters (D5: ``decay.bind``), so no decision is taken here (the end-of-day rule,
+    ``Engine.end_day``). The decayed mass is the mass-balance term ``"DecayTank.decayed"``, an
+    ``"out"`` term that the owning class declares. ``total_decayed`` is a per-day store (D8).
+
+    With ``decay=None`` (empty ``decays``) the storage is unchanged, but the end of the day
+    still reads the parent's ``("temperature", t)`` (``core.py:484-487``), so a missing
+    temperature fails as WSIMOD's ``KeyError`` does. ``parent`` is the node whose bound
+    parameters hold ``"temperature"``.
     """
 
-    def __init__(self, pollutants: Pollutants, *, parent, **kwargs) -> None:
+    def __init__(self, pollutants: Pollutants, *, parent, decay=None, **kwargs) -> None:
         self.parent = parent
+        self.decay = decay
         super().__init__(pollutants, **kwargs)
+        self.total_decayed = empty(pollutants, ())
 
     def end_timestep(self) -> None:
-        if "temperature" not in self.parent.params:
-            raise KeyError(f"{self.site}: the parent has no ('temperature', t) forcing")
-        # generic_temperature_decay over no pollutants: storage unchanged (core.py:507-520)
+        if self.decay is None:
+            if "temperature" not in self.parent.params:
+                raise KeyError(f"{self.site}: the parent has no ('temperature', t) forcing")
+            return  # generic_temperature_decay over no pollutants: storage unchanged
+        ctx = self.ctx
+        self.total_decayed = ctx.empty()  # tanks.py:444
+        self.storage, diff = self.decay.make_decay(self.storage)  # :447
+        self.total_decayed = sum_vqip(self.p, self.total_decayed, diff)  # core.py:491
+        ctx.term("DecayTank.decayed", diff, torch.ones(ctx.shape, dtype=torch.bool))
 
 
 class QueueTank(Tank):
