@@ -47,7 +47,7 @@ from noodl.apps.wsimod.constants import (
     UNBOUNDED_CAPACITY,
 )
 from noodl.apps.wsimod.decay import Decay, check_inert, read_decays
-from noodl.apps.wsimod.engine import Ctx, dmax, dmin
+from noodl.apps.wsimod.engine import Ctx, _register_all, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
 from noodl.apps.wsimod.storage import exp_python
 from noodl.apps.wsimod.tanks import DecayTank, ResidenceTank, Tank
@@ -65,6 +65,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import NodeSpec, SurfaceSpec, WsimodNetwork
 
 __all__ = [
+    "NO_PART",
     "PART_NAMES",
     "ImperviousSurface",
     "Land",
@@ -87,6 +88,8 @@ PART_NAMES = {
     "route": "PerviousSurface.route",
 }
 NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"
+# the surface functions that return empty VQIPs and so have no part (D11)
+NO_PART = frozenset({"calc_crop_cover"})
 
 # land.py:208: where percolation goes; :221: where runoff goes; :711: where ponding goes
 PERCOLATION_TYPES = ("Groundwater",)
@@ -261,7 +264,7 @@ class Surface(DecayTank):
         cls, surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
     ) -> list[str]:
         """The refusals of a class beyond :func:`_validate_surface`'s common ones, from the
-        spec alone; returns what a quantity-only run ignores. None for these surfaces."""
+        spec alone; returns what a quantity-only run ignores (``[]`` for these surfaces)."""
         return []
 
     # --- parameters -----------------------------------------------------------------------------
@@ -359,8 +362,8 @@ class Surface(DecayTank):
                 self.ctx.part(NITRITE_CARRY_OVER, "in", carried, active)
         for f in self.inflows + self.processes + self.outflows:
             in_, out_ = f(active=active)
-            part = PART_NAMES.get(f.__name__)  # a function absent from it returns empty VQIPs
-            if part is not None:
+            if f.__name__ not in NO_PART:
+                part = PART_NAMES[f.__name__]  # KeyError names a function without a part
                 self.ctx.part(part, "in", in_, active)
                 self.ctx.part(part, "out", out_, active)
             parent.running_inflow_mb = write(
@@ -1096,6 +1099,7 @@ def _validate_surface(
     # run pollutant is unread (D15, listed by the reader)
     if surface.parameters.get("pollutant_load") and not pollutants:
         ignored.append(f"{prefix}.pollutant_load")
+    _register_all()  # the classes that register themselves (growing), as the build does
     cls = SURFACE_CLASSES[surface.cls]
     if not issubclass(cls, PerviousSurface):
         return ignored

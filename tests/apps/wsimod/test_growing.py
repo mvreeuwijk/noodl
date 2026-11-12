@@ -506,9 +506,10 @@ def test_fertiliser_and_manure_data_are_needed_with_nitrate(pollutants):
             _mapping([_growing(data_input_dict=partial)], lists=_NITRATE), pollutants=pollutants
         )
     complete = _mapping([_growing(data_input_dict=_data(SURFACE_INPUTS))], lists=_NITRATE)
-    ignored = _ignored(complete, pollutants=pollutants)
-    # with them, a quantity-only run lists the data as ignored
-    assert ignored == ([] if pollutants else ["surfaces.g.data_input_dict"])
+    # with the data the interim refusal applies (removed by Task 6, which restores the
+    # assertion that a quantity-only run lists the data as ignored)
+    with pytest.raises(ValueError, match="not supported yet"):
+        _validate(complete, pollutants=pollutants)
 
 
 def test_a_missing_month_of_fertiliser_data_is_refused():
@@ -694,3 +695,52 @@ def test_a_batch_of_instances_runs_calc_crop_cover_under_a_mask():
     surface.calc_crop_cover(active=torch.tensor([True, False, True]))
     assert surface.days_after_sow.tolist() == [0.0, -1.0, 0.0]
     assert surface.crop_factor.tolist() == [1.0, 0.0, 1.0]
+
+
+def test_nitrate_with_a_growing_surface_is_not_supported_yet():
+    """Interim refusal (removed by Task 6, with this test)."""
+    mapping = _mapping([_growing(data_input_dict=_data(SURFACE_INPUTS))], lists=_NITRATE)
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match="GrowingSurface with nitrate.*not supported yet"):
+            _validate(mapping, pollutants=pollutants)
+
+
+def test_every_surface_function_has_a_part_or_none():
+    """``Surface.run`` raises ``KeyError`` for a function in neither table (D11)."""
+    from noodl.apps.wsimod.land import NO_PART, PART_NAMES
+
+    land = make_land()
+    for surface in make_land().surfaces + land.surfaces:
+        for f in surface.inflows + surface.processes + surface.outflows:
+            assert f.__name__ in PART_NAMES or f.__name__ in NO_PART, f.__name__
+    assert not NO_PART & set(PART_NAMES)
+
+
+def test_validate_registers_the_growing_class_in_a_fresh_interpreter():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    code = (
+        "from noodl.apps.wsimod.config import read_wsimod_config\n"
+        "from noodl.apps.wsimod.land import Land\n"
+        "dates = ['2000-01-01']\n"
+        "data = {(v, d): 0.001 for v in ('precipitation', 'et0', 'temperature') for d in dates}\n"
+        "n = read_wsimod_config({'pollutants': ['phosphate'], 'additive_pollutants': ['phosphate'],"
+        " 'non_additive_pollutants': [], 'dates': dates, 'nodes': [{'name': 'land',"
+        " 'type_': 'Land',"
+        " 'data_input_dict': data, 'surfaces': [{'type_': 'GrowingSurface', 'surface': 'g'}]}]})\n"
+        "Land.validate(n.nodes[0], n, pollutants=False)\n"
+    )
+    path = os.pathsep.join(p for p in (str(root / "src"), os.environ.get("PYTHONPATH")) if p)
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        timeout=300,
+        env={**os.environ, "PYTHONPATH": path},
+    )
+    assert done.returncode == 0, done.stderr

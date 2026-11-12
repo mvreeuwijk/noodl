@@ -319,7 +319,10 @@ class GrowingSurface(PerviousSurface):
                         f"{where}: no {variable!r} data on {month:%Y-%m-%d}, the first of the "
                         f"month of {date:%Y-%m-%d} (land.py:1649-1710, via :471)"
                     )
-        return []
+        # removed by Task 6
+        raise ValueError(
+            f"{where}: a GrowingSurface with nitrate among the pollutants is not supported yet"
+        )
 
     # --- the calendar ---------------------------------------------------------------------------
     def set_dates(self, dates: Sequence[datetime], labels: Sequence[str]) -> None:
