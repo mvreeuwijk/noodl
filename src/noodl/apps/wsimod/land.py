@@ -407,7 +407,7 @@ class PerviousSurface(Surface):
             if bool((total == 0).any()):
                 raise ValueError(
                     f"{self.site}: the total weight soil_temp_w_air + soil_temp_w_deep + "
-                    "soil_temp_w_prev is 0 (land.py:1073 divides by it)"
+                    f"soil_temp_w_prev is 0 (land.py:1073 divides by it); got total weight {total}"
                 )
         for name, value in (
             ("field_capacity", self.field_capacity_m),
@@ -906,6 +906,7 @@ def _validate_surface(
             "ZeroDivisionError on a saturated soil)"
         )
     weights = {k: float(values[k]) for k in SOIL_TEMPERATURE_DEFAULTS}
+    # ``neutral`` only decides which soil weights are listed as ignored when pollutants=False
     neutral = (
         weights["soil_temp_w_air"] == 0
         and weights["soil_temp_w_deep"] == 0
