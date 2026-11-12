@@ -90,6 +90,42 @@ WSIMOD's `record_all` lists only tanks whose class is exactly `Tank`, `QueueTank
 who adds `decays` to a node sees its tank disappear from them. Its storage stays in the state
 (`"wsimod.storage"`) and in the mass balance.
 
+### Decay on a land's surfaces and the nitrite carry-over
+
+A `Surface` is a `DecayTank`: with a `decays` dict it decays its storage at the end of every
+day, by the same rule as the storage family (`land.py:303-581`, `tanks.py:442-447`), with the
+`Land`'s **air** temperature (`DecayObj` reads its parent's `("temperature", date)`,
+`core.py:462-468`), not the soil temperature a `PerviousSurface` works out. A surface's
+`decays` default to `{}`, which decays nothing. The cap decision is
+`node:<land>/surfaces.<surface>/make_decay/cap:<pollutant>`. Drivers:
+`"wsimod.<ImperviousSurface|PerviousSurface>.decays.constant"` and `".exponent"`, `(..., n, K)`,
+labelled `(node, surface)`, inert for a pollutant the surface does not list (refused by name
+otherwise) and absent in a quantity-only run.
+
+The carry-over. With `"nitrite"` among the pollutants, `Surface.run` starts with yesterday's
+decayed mass (`land.py:427-439`):
+
+```
+storage["nitrate"] += total_decayed["nitrite"];  running_inflow_mb["nitrate"] += total_decayed["nitrite"]
+storage["nitrite"] += total_decayed["ammonia"];  running_inflow_mb["nitrite"] += total_decayed["ammonia"]
+```
+
+so decayed ammonia becomes nitrite and decayed nitrite becomes nitrate, and both count as
+inflows of the land. Decayed nitrate, phosphate or anything else is lost: it is the
+mass-balance outflow `"DecayTank.decayed"`. Without `"nitrite"` the block is skipped and all of
+the decayed mass is lost. The block reads `nitrate`, `nitrite` and `ammonia`: a `Land` with
+`nitrite` but not the other two is refused by name. `total_decayed` starts empty, so day 0
+converts nothing, and is carried state, `"wsimod.total_decayed"` (below). WSIMOD converts at
+every `Surface.run`, so a custom orchestration that runs a `Land` twice a day converts the same
+mass twice (transcribed; case `land_run_twice`).
+
+Two label forms. `"wsimod.total_decayed"` labels a surface row with its attribute path,
+`(node, "surfaces.<name>")` (X35), while `"wsimod.storage"` keeps `(node, "surface:<name>")`.
+
+WSIMOD's default `decays={}` is one dict shared by every surface built without a `decays` key
+(a mutable default argument), so a `decays` override of one of them reaches all of them. noodl
+merges per surface: the override reaches only the surface it names (D13).
+
 ### Treatment works
 
 `WTW.treat_current_input` (`wtw.py:163-214`) splits the day's input into treated water, liquor and
@@ -333,6 +369,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.travel_queue"`, `"wsimod.travel_queue_present"` | `(arc, i)` | the travel registers of the `QueueTank`s and `AltQueueArc`s, one row per travel time, and their key sets |
 | `"wsimod.arc_queue"`, `"wsimod.arc_queue_since"` | `(arc, direction, i, j)`, `(arc, direction)` | every `QueueArc`'s waiting requests and the days since its last delivery |
 | `"wsimod.liquor"`, `"wsimod.previous_pulled"`, `"wsimod.treated"` | node | the treatment works' liquor, an `FWTW`'s previous day's pull, a `WWTW`'s treated water |
+| `"wsimod.total_decayed"` | `(node, "surfaces.<name>")` | each surface's decayed mass of the last end of day, which the next `Surface.run` converts (rows only when `nitrite` is a pollutant; in the state layout's order) |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
 volume with no pollutants and a mapping a VQIP by name, `{"volume": 5.0, "phosphate": 0.1}`; a
@@ -365,7 +402,7 @@ mid-run, hang or silently do something else:
 
 - out-of-scope classes and keys (by the reader);
 - River biochemistry (nitrate among the pollutants); `decays` that are not ported yet (a
-  `Groundwater`'s or a `QueueGroundwater`'s, a surface's, an arc's); a `decays` key that is not
+  `QueueGroundwater`'s, an arc's); a `decays` key that is not
   a configured pollutant, an entry without exactly `constant` and `exponent`, a non-numeric
   value, an `exponent` of 0 or below, and an override of `decays` on a node built without;
 - a `total_porosity` not above `field_capacity`, a residence time of 0, `leakage` outside
@@ -413,6 +450,8 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `WWTW.make_discharge` rejection at or below `FLOAT_ACCURACY` | a tolerance, recorded as dropped | `test_a_tiny_discharge_rejection_vanishes_and_is_recorded_as_dropped` |
 | `decays: {}` on the `Storage` family builds a `DecayTank`, which reads the temperature and decays nothing | ported; the temperature forcing is required | `test_storage_with_decays_reads_its_temperature` |
 | WSIMOD's `record_all` skips a `DecayTank` | the tank drops out of `tank_*` (X40); its storage stays in the state | `test_a_decaying_storage_decays_at_the_end_of_the_day_and_closes_the_balance` |
+| the default `decays={}` of a surface is one dict shared by every surface built without one, so an override reaches all of them | per surface | `test_a_decays_override_reaches_only_its_surface` |
+| `Surface.run` converts `total_decayed` at every call | transcribed: a second `Land.run` on one day converts the same mass twice | case `land_run_twice` |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own

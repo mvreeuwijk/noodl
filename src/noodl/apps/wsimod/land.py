@@ -40,6 +40,7 @@ import torch
 from torch import Tensor
 
 from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
+from noodl.apps.wsimod.decay import Decay, check_inert, read_decays
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
 from noodl.apps.wsimod.storage import exp_python
@@ -148,8 +149,14 @@ class Surface(DecayTank):
     surface's forcing (``get_data_input``, ``:451-460``), and ``"temperature"`` is what the
     end-of-day decay reads (``DecayTank``).
 
-    ``Surface.run``'s ``nitrite`` carry-over (``:427-439``) adds ``total_decayed``, which is
-    zero without decays, and is not ported.
+    A surface is a ``DecayTank`` whose ``decays`` default to ``{}``: with entries it owns a
+    :class:`~noodl.apps.wsimod.decay.Decay`, bound once per day from the Land's *air*
+    temperature (``DecayObj`` reads ``parent``'s ``data_input_dict``, ``core.py:462-468``; not
+    the soil temperature, ``:1060-1079``). The decayed mass of the end of day ``d`` is
+    ``total_decayed``; when ``nitrite`` is a pollutant, ``Surface.run`` of day ``d + 1`` turns it
+    into nitrate and nitrite (``:427-439``). A surface's ``decays`` merge per surface; WSIMOD
+    shares the default ``{}`` between every surface built without a ``decays`` key, so an override
+    reaches all of them (D13: a defect that noodl does not reproduce).
     """
 
     surface_class: ClassVar[str] = "Surface"
@@ -173,9 +180,26 @@ class Surface(DecayTank):
             [float(load.get(name, 0.0)) for name in pollutants.names], dtype=torch.float64
         ).reshape(pollutants.K)
         derived = _derive(type(self).surface_class, self.defaults)
+        # X9, X34: dense over the K pollutants, inert (0, 1) where the configuration is silent;
+        # a quantity-only run decays nothing, as it carries no pollutant
+        known = {k: v for k, v in (values.get("decays") or {}).items() if k in pollutants.names}
+        where = f"node {parent.name!r}, surface {spec.name!r}"
+        self.decay_spec = read_decays(where, known, pollutants)
+        self.defaults["decays.constant"] = torch.tensor(
+            [self.decay_spec.constant.get(n, 0.0) for n in pollutants.names], dtype=torch.float64
+        ).reshape(pollutants.K)
+        self.defaults["decays.exponent"] = torch.tensor(
+            [self.decay_spec.exponent.get(n, 1.0) for n in pollutants.names], dtype=torch.float64
+        ).reshape(pollutants.K)
+        decay = None
+        if self.decay_spec.keys:
+            decay = Decay(
+                pollutants, self.decay_spec, site=f"node:{parent.name}/surfaces.{spec.name}"
+            )
         super().__init__(
             pollutants,
             parent=parent,
+            decay=decay,
             capacity=derived["capacity"],
             area=self.defaults["area"],
             datum=self.defaults["datum"],
@@ -208,9 +232,36 @@ class Surface(DecayTank):
         self.datum = values["datum"]
         self._set_derived(_derive(type(self).surface_class, values))
 
+    def bind_decay(self, ctx: Ctx, temperature: Tensor | None) -> None:
+        """Bind the surface's :class:`Decay` from the day's ``decays.*`` and the Land's air
+        ``temperature`` (D15, R5). A surface whose ``decays`` lists no pollutant refuses a
+        changed inert entry by name (X9); a quantity-only run has no pollutant to decay."""
+        if self.p.K == 0:
+            return
+        constant, exponent = self._param("decays.constant"), self._param("decays.exponent")
+        if self.decay is None:
+            check_inert(
+                self.site,
+                "decays.constant/exponent",
+                torch.zeros(self.p.K, dtype=torch.bool),
+                constant,
+                exponent,
+                self.p.names,
+            )
+            return
+        if temperature is None:
+            raise KeyError(f"{self.site}: the Land has no ('temperature', t) forcing (core.py:484)")
+        self.decay.bind(ctx, constant, exponent, temperature)
+
     # --- state ----------------------------------------------------------------------------------
     def stores(self) -> dict[str, Tensor]:
-        return {"storage": self.storage, **{f: getattr(self, f) for f in self.flow_fields}}
+        """``storage``, the per-day flows and ``total_decayed``; the last is carried only when
+        ``nitrite`` is a pollutant (:class:`Land`, D8)."""
+        return {
+            "storage": self.storage,
+            **{f: getattr(self, f) for f in self.flow_fields},
+            "total_decayed": self.total_decayed,
+        }
 
     def _with_temperature(self, vqip: Tensor, temperature: Tensor) -> Tensor:
         """``vqip["temperature"] = temperature`` (``land.py:685``, ``:991``, ``:1028``); WSIMOD
@@ -226,8 +277,30 @@ class Surface(DecayTank):
     # --- WSIMOD's methods -----------------------------------------------------------------------
     def run(self, *, active: Tensor) -> None:
         """``land.py:425-449``: every function in order, its ``(in, out)`` summed into the
-        parent's running mass balance."""
+        parent's running mass balance.
+
+        With ``nitrite`` among the pollutants the first thing is the carry-over of yesterday's
+        decay (``:427-439``, in WSIMOD's order): the decayed nitrite joins the nitrate, then the
+        decayed ammonia joins the nitrite, each added to the storage and to the parent's
+        ``running_inflow_mb``. ``total_decayed`` is what yesterday's ``end_timestep`` left
+        (zero on day 0). A repeated ``Land.run`` on one day repeats the carry-over and so adds
+        it again (``land_run_twice``)."""
         p, parent = self.p, self.parent
+        if "nitrite" in p.names:
+            for source, target in (("nitrite", "nitrate"), ("ammonia", "nitrite")):
+                column = torch.zeros(1 + p.K, dtype=torch.bool)
+                column[p.column(target)] = True
+                moved = self.total_decayed[..., p.column(source)][..., None]
+                self.storage = write(
+                    active,
+                    torch.where(column, self.storage + moved, self.storage),
+                    self.storage,
+                )
+                parent.running_inflow_mb = write(
+                    active,
+                    torch.where(column, parent.running_inflow_mb + moved, parent.running_inflow_mb),
+                    parent.running_inflow_mb,
+                )
         for f in self.inflows + self.processes + self.outflows:
             in_, out_ = f(active=active)
             parent.running_inflow_mb = write(
@@ -544,9 +617,12 @@ class Land(Node):
     wsimod_type: ClassVar[str] = "Land"
     step_methods: ClassVar[tuple[str, ...]] = ("run", "apply_irrigation")
     # land.py:158-162: the surfaces' and tanks' ds is the engine's, from the stores (D11)
+    # a surface's decayed mass leaves its storage at the end of the day (tanks.py:449-457) and
+    # re-enters as the next day's carry-over, inside "Land.running_inflow_mb" (land.py:427-439)
     mass_balance: ClassVar[dict[str, str]] = {
         "Land.running_inflow_mb": "in",
         "Land.running_outflow_mb": "out",
+        "DecayTank.decayed": "out",
     }
     parameter_defaults: ClassVar[dict[str, float]] = {
         "surface_residence_time": 1,
@@ -595,18 +671,22 @@ class Land(Node):
         self.running_outflow_mb = empty(pollutants, ())
         self.store_paths = self.store_paths_of([(s.cls, s.name) for s in spec.surfaces])
         # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
-        # running mass balance are the day's (W75)
-        self.carried_paths = tuple(p for p in self.store_paths if p.endswith(".storage"))
+        # running mass balance are the day's (W75). A surface's total_decayed is carried when
+        # "nitrite" is a pollutant: the next day's run reads it (D8)
+        carried = [x for x in self.store_paths if x.endswith(".storage")]
+        if "nitrite" in pollutants.names:
+            carried += [x for x in self.store_paths if x.endswith(".total_decayed")]
+        self.carried_paths = tuple(carried)
 
     @classmethod
     def store_paths_of(cls, surfaces: Sequence[tuple[str, str]]) -> tuple[str, ...]:
         """The store paths of a ``Land`` with ``surfaces`` ``[(class, name), ...]``: the
-        residence tanks in ``dir()`` order (D10), each surface's ``storage`` and per-day flows,
-        and the running mass balance."""
+        residence tanks in ``dir()`` order (D10), each surface's ``storage``, per-day flows and
+        ``total_decayed``, and the running mass balance."""
         paths = [f"{tank}.storage" for tank in cls._TANKS]
         for surface_cls, name in surfaces:
             fields = ("storage", *SURFACE_CLASSES[surface_cls].flow_fields)
-            paths += [f"surfaces.{name}.{field}" for field in fields]
+            paths += [f"surfaces.{name}.{field}" for field in (*fields, "total_decayed")]
         return (*paths, "running_inflow_mb", "running_outflow_mb")
 
     # --- the day's context and parameters -------------------------------------------------------
@@ -654,6 +734,10 @@ class Land(Node):
             by_surface[surface][parameter] = value
         for surface in self.surfaces:
             surface.bind(by_surface[surface.name])
+        # D15: each surface binds its Decay after the Land's own parameters, with the Land's
+        # air temperature (core.py:462-468: the parent's data_input_dict)
+        for surface in self.surfaces:
+            surface.bind_decay(self.ctx, self.params.get("temperature"))
 
     # --- state ----------------------------------------------------------------------------------
     def _surface(self, name: str) -> Surface:
@@ -788,6 +872,14 @@ class Land(Node):
             for date, label in zip(network.dates, network.date_labels, strict=True):
                 if (variable, date) not in spec.data:
                     raise ValueError(f"land {spec.name!r} has no {variable!r} forcing on {label}")
+        if pollutants and spec.surfaces and "nitrite" in network.pollutants.names:
+            missing = [n for n in ("nitrate", "ammonia") if n not in network.pollutants.names]
+            if missing:
+                raise ValueError(
+                    f"{where}: 'nitrite' is a pollutant but {missing[0]!r} is not: Surface.run "
+                    "moves decayed nitrite to nitrate and decayed ammonia to nitrite "
+                    "(land.py:427-439, KeyError)"
+                )
         names = [s.name for s in spec.surfaces]
         for name in names:
             if "." in name:
@@ -825,6 +917,7 @@ def _validate_surface(
     """
     ignored: list[str] = []
     prefix = f"surfaces.{surface.name}"
+    read_decays(where, surface.parameters.get("decays"), network.pollutants)
     variables = {variable for variable, _ in surface.data}
     other = sorted(variables - DEPOSITION_KEYS)
     if other:

@@ -569,7 +569,7 @@ The new carried state follows 3a's dict-of-tensors layout (W68/W77: each class d
 
 | Key | Shape | What it holds (WSIMOD attribute) | Labels |
 |---|---|---|---|
-| `"wsimod.total_decayed"` | (..., n_rows, 1+K) | `total_decayed` of each `DecayQueueTank`'s internal arc (`tanks.py:694`, `arcs.py:789`), then, when `"nitrite"` is a pollutant, of every surface (`land.py:434-439`) | 3a's attribute paths (X35): `(node, "tank.internal_arc")` for a decaying `QueueGroundwater`; `(node, "surfaces.<name>")` for a surface |
+| `"wsimod.total_decayed"` | (..., n_rows, 1+K) | `total_decayed` of each `DecayQueueTank`'s internal arc (`tanks.py:694`, `arcs.py:789`), then, when `"nitrite"` is a pollutant, of every surface (`land.py:434-439`), the rows in the state layout's order (nodes in configuration order, each node's carried paths in order; D7) | 3a's attribute paths (X35): `(node, "tank.internal_arc")` for a decaying `QueueGroundwater`; `(node, "surfaces.<name>")` for a surface |
 | `"wsimod.river_temperature_lag"` | (..., n_slots) | `lagged_temperatures` of every River with biochemistry (`storage.py:561`, `:753-755`), as a fixed register of `max_temp_lag + 1` slots per river, flattened as 3a's `travel_queue` is | `(river, i)`, `i = 0 … max_temp_lag`, with slot 0 the oldest; unit `degC` |
 | `"wsimod.river_phosphorus_lag"` | (..., n_slots) | `lagged_total_phosphorus` (`:564`, `:758-763`), `max_phosphorus_lag + 1` slots per river | `(river, i)`, `i = 0 … max_phosphorus_lag`; unit `kg` |
 

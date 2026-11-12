@@ -546,6 +546,7 @@ def test_the_stores_are_the_tanks_the_surfaces_and_the_running_balance():
         "surfaces.roads.storage",
         "surfaces.roads.evaporation",
         "surfaces.roads.precipitation",
+        "surfaces.roads.total_decayed",
         "surfaces.lawn.storage",
         "surfaces.lawn.evaporation",
         "surfaces.lawn.infiltration_excess",
@@ -553,6 +554,7 @@ def test_the_stores_are_the_tanks_the_surfaces_and_the_running_balance():
         "surfaces.lawn.precipitation",
         "surfaces.lawn.subsurface_flow",
         "surfaces.lawn.tank_recharge",
+        "surfaces.lawn.total_decayed",
         "running_inflow_mb",
         "running_outflow_mb",
     )
@@ -562,6 +564,13 @@ def test_the_stores_are_the_tanks_the_surfaces_and_the_running_balance():
     )
     values = {path: P.to_vqip({"volume": float(i)}) for i, path in enumerate(land.store_paths)}
     values["surfaces.lawn.tank_recharge"] = torch.tensor(2.5, dtype=torch.float64)
+    assert land.carried_paths == (
+        "percolation.storage",
+        "subsurface_runoff.storage",
+        "surface_runoff.storage",
+        "surfaces.roads.storage",
+        "surfaces.lawn.storage",
+    )
     land.load_stores(values)
     assert all(torch.equal(land.stores()[k], v) for k, v in values.items())
     with pytest.raises(KeyError, match="nowhere"):
@@ -574,6 +583,7 @@ def test_the_mass_balance_terms_are_the_running_balance():
     assert Land.mass_balance == {
         "Land.running_inflow_mb": "in",
         "Land.running_outflow_mb": "out",
+        "DecayTank.decayed": "out",
     }
     land = make_land(
         [
@@ -634,9 +644,13 @@ def test_a_batch_equals_its_single_runs_and_a_masked_instance_is_unchanged():
         one.bind(forcing(precipitation[i], et0[i]))
         one.run(active=TRUE)
         for path, value in one.stores().items():
+            if path.endswith(".total_decayed"):  # WsimodDay batches it; nothing here writes it
+                continue
             assert torch.equal(batch.stores()[path][i], value.expand_as(batch.stores()[path][i]))
     fresh = make_land(specs)
     for path in fresh.stores():
+        if path.endswith(".total_decayed"):
+            continue
         expected = 18.0 if path == "surfaces.rural.storage" else 0.0
         assert float(batch.stores()[path][2].reshape(-1)[0]) == expected, path
 
@@ -982,3 +996,184 @@ def test_an_override_in_one_wsimod_build_does_not_reach_the_next():
     assert model.nodes["land"].get_surface("rural").pollutant_load == {"phosphate": 1e-7}
     later = wsimod_model(CASES["pervious_only"].build())
     assert [s.pollutant_load for s in later.nodes["farm"].surfaces] == [{}, {}]
+
+
+# --- surface decay and the nitrite carry-over (land.py:425-449) ---------------------------------
+NP = Pollutants(
+    ("ammonia", "nitrite", "nitrate", "phosphate", "temperature"),
+    ("ammonia", "nitrite", "nitrate", "phosphate"),
+    ("temperature",),
+)
+_DECAYS = {
+    "ammonia": {"constant": 0.5, "exponent": 1.0},
+    "nitrite": {"constant": 0.25, "exponent": 1.0},
+}
+
+
+def _decaying_land(pollutants=NP, decays=None):
+    land = make_land(
+        [
+            surface(
+                "ImperviousSurface",
+                "roads",
+                area=10.0,
+                pore_depth=0.01,
+                decays=decays or _DECAYS,
+                initial_storage={"volume": 1.0, "nitrate": 1.0, "nitrite": 2.0},
+            )
+        ],
+        pollutants=pollutants,
+    )
+    return land, land.surfaces[0], day(land, pollutants=pollutants)
+
+
+def test_the_carry_over_converts_yesterdays_decay():
+    """``land.py:427-439``: the decayed nitrite joins the nitrate, then the decayed ammonia joins
+    the nitrite, and both are inflows of the land. On day 0 ``total_decayed`` is empty."""
+    land, roads, ctx = _decaying_land()
+    land.bind(forcing(0.0, 0.0))
+    land.run(active=TRUE)
+    assert float(roads.storage[NP.column("nitrate")]) == 1.0
+    assert float(land.running_inflow_mb[NP.column("nitrite")]) == 0.0
+    roads.storage = NP.to_vqip({"volume": 1.0, "nitrate": 1.0, "nitrite": 2.0})
+    land.running_inflow_mb = NP.to_vqip({"nitrate": 0.5})
+    roads.total_decayed = NP.to_vqip({"ammonia": 1.5, "nitrite": 0.4})
+    land.run(active=TRUE)
+    assert float(roads.storage[NP.column("nitrate")]) == 1.0 + 0.4
+    assert float(roads.storage[NP.column("nitrite")]) == 2.0 + 1.5
+    assert float(roads.storage[NP.column("ammonia")]) == 0.0
+    assert float(land.running_inflow_mb[NP.column("nitrate")]) == 0.5 + 0.4
+    assert float(land.running_inflow_mb[NP.column("nitrite")]) == 1.5
+    # a masked instance keeps its state (D3)
+    before = roads.storage.clone()
+    land.run(active=torch.tensor(False))
+    assert torch.equal(roads.storage, before)
+    # a second run on the same day converts the same mass again (X16)
+    land.run(active=TRUE)
+    assert float(roads.storage[NP.column("nitrate")]) == (1.0 + 0.4) + 0.4
+
+
+def test_the_surface_decays_at_the_end_of_the_day_and_the_mass_is_a_balance_term():
+    land, roads, ctx = _decaying_land()
+    roads.storage = NP.to_vqip({"volume": 1.0, "ammonia": 8.0, "nitrite": 4.0, "nitrate": 2.0})
+    land.bind(forcing(0.0, 0.0, 20.0))
+    land.end_timestep()
+    assert float(roads.storage[NP.column("ammonia")]) == 4.0
+    assert float(roads.storage[NP.column("nitrite")]) == 3.0
+    assert float(roads.storage[NP.column("nitrate")]) == 2.0  # not listed: stays
+    assert float(roads.total_decayed[NP.column("ammonia")]) == 4.0
+    assert float(roads.total_decayed[NP.column("nitrite")]) == 1.0
+    assert torch.equal(ctx.terms["DecayTank.decayed"], roads.total_decayed)
+
+
+def test_without_nitrite_the_decayed_mass_is_lost():
+    """Without ``nitrite`` the block is skipped (``:427``): no carry-over, the storage still
+    decays, and the mass is the ``"DecayTank.decayed"`` out-term."""
+    land, roads, ctx = _decaying_land(PP, {"phosphate": {"constant": 0.1, "exponent": 1.0}})
+    assert not any(path.endswith(".total_decayed") for path in land.carried_paths)
+    roads.storage = PP.to_vqip({"volume": 1.0, "phosphate": 1.0, "temperature": 5.0})
+    roads.total_decayed = PP.to_vqip({"phosphate": 9.0})  # never converted
+    land.bind(forcing(0.0, 0.0, 20.0))
+    land.run(active=TRUE)
+    assert float(roads.storage[PP.column("phosphate")]) == 1.0
+    assert float(land.running_inflow_mb[PP.column("phosphate")]) == 0.0
+    land.end_timestep()
+    assert float(roads.storage[PP.column("phosphate")]) == 1.0 - 1.0 * 0.1
+    assert float(ctx.terms["DecayTank.decayed"][PP.column("phosphate")]) == 1.0 * 0.1
+
+
+def _lists_mapping(names, additive, non_additive):
+    return _mapping(
+        [{"type_": "ImperviousSurface", "surface": "roads"}],
+        lists={
+            "pollutants": names,
+            "additive_pollutants": additive,
+            "non_additive_pollutants": non_additive,
+        },
+    )
+
+
+def test_nitrite_needs_nitrate_and_ammonia():
+    """``land.py:427-439`` reads all three (``KeyError``): refused by name."""
+    for names in (["nitrite", "ammonia"], ["nitrite", "nitrate"], ["nitrite"]):
+        with pytest.raises(ValueError, match="nitrite"):
+            _validate(_lists_mapping(names, names, []), pollutants=True)
+    names = ["nitrite", "nitrate", "ammonia"]
+    _validate(_lists_mapping(names, names, []), pollutants=True)
+    # a quantity-only run carries no nitrite
+    _validate(_lists_mapping(["nitrite"], ["nitrite"], []), pollutants=False)
+
+
+def test_surface_decay_reads_the_lands_air_temperature():
+    """``DecayObj`` reads the parent's ``("temperature", t)`` (``core.py:462-468``), not the
+    soil temperature the pervious surface works out (``land.py:837-839``, ``:1060-1079``)."""
+    spec = surface(
+        "PerviousSurface",
+        "lawn",
+        area=100.0,
+        decays={"phosphate": {"constant": 0.1, "exponent": 2.0}},
+    )
+    land = make_land([spec], pollutants=PP)
+    lawn = land.surfaces[0]
+    day(land, pollutants=PP)
+    lawn.storage = PP.to_vqip({"volume": 7.0, "phosphate": 1.0, "temperature": 30.0})
+    land.bind(forcing(0.0, 0.0, 22.0))
+    assert float(lawn.decay.factor[PP.column("phosphate")]) == 0.1 * 2.0**2
+    land.end_timestep()
+    assert float(lawn.storage[PP.column("phosphate")]) == 1.0 - 1.0 * (0.1 * 2.0**2)
+
+
+def test_a_surface_without_decays_refuses_a_changed_inert_driver():
+    """D15, X9: the key set is structure; an entry at a pollutant the surface does not list must
+    stay (0, 1)."""
+    land = make_land([surface("ImperviousSurface", "roads", area=1.0)], pollutants=PP)
+    day(land, pollutants=PP)
+    inert = {
+        "surfaces.roads.decays.constant": torch.zeros(2, dtype=torch.float64),
+        "surfaces.roads.decays.exponent": torch.ones(2, dtype=torch.float64),
+    }
+    land.bind({**forcing(0.0, 0.0), **inert})
+    changed = {**inert, "surfaces.roads.decays.constant": torch.tensor([0.1, 0.0])}
+    with pytest.raises(ValueError, match="phosphate"):
+        land.bind({**forcing(0.0, 0.0), **changed})
+    # a listed pollutant takes a driver value; an unlisted one is still refused
+    land, roads, _ = _decaying_land()
+    constant = torch.tensor([0.5, 0.25, 0.3, 0.0, 0.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="nitrate"):
+        land.bind({**forcing(0.0, 0.0), "surfaces.roads.decays.constant": constant})
+
+
+def test_a_decays_override_reaches_only_its_surface():
+    """D13: noodl merges ``decays`` per surface. WSIMOD's default ``{}`` is one dict shared by
+    every surface built without a ``decays`` key (the defect row), so its override reaches all
+    of them."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    override = {"phosphate": {"constant": 0.1, "exponent": 1.0}}
+    mapping = _mapping(
+        [
+            {"type_": "ImperviousSurface", "surface": "roads"},
+            {"type_": "ImperviousSurface", "surface": "roofs"},
+        ],
+        overrides={"roads": {"decays": override}},
+        lists=_LISTS,
+    )
+    network = read_wsimod_config(mapping)
+    roads, roofs = make_node(network.nodes[0], network, network.pollutants).surfaces
+    assert roads.decay is not None and roofs.decay is None
+    assert network.nodes[0].surfaces[1].parameters["decays"] == {}
+    theirs = wsimod_model(mapping).nodes["land"].surfaces
+    assert theirs[0].decays is theirs[1].decays
+    assert theirs[1].decays == override
+
+
+def test_the_surfaces_decay_drivers_are_dense_and_absent_in_a_quantity_only_run():
+    spec = surface("ImperviousSurface", "roads", area=1.0, decays=_DECAYS)
+    land = make_land([spec], pollutants=NP)
+    roads = land.surfaces[0]
+    assert roads.defaults["decays.constant"].tolist() == [0.5, 0.25, 0.0, 0.0, 0.0]
+    assert roads.defaults["decays.exponent"].tolist() == [1.0, 1.0, 1.0, 1.0, 1.0]
+    quantity = make_land([spec])  # P: unlisted names are dropped
+    assert quantity.surfaces[0].decay is None
+    assert quantity.surfaces[0].defaults["decays.constant"].shape == (0,)

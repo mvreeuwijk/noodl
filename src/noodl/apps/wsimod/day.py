@@ -9,7 +9,8 @@ dates (D16) through the closure, which owns every ``"wsimod.*"`` state key:
    (rows: the nodes of that configured class, D6), ``"wsimod.<SurfaceClass>.<parameter>"``
    (rows: the surfaces of every ``Land``), the storage family's
    ``"wsimod.<Class>.decays.constant"`` and ``".exponent"`` ``(n, K)`` (all-inert rows for a
-   node without decays, absent in a quantity-only run; X9, X34), ``"wsimod.Arc.capacity"`` and
+   node without decays, absent in a quantity-only run; X9, X34; the surfaces' under the
+   surface class, labelled ``(node, surface)``), ``"wsimod.Arc.capacity"`` and
    ``"wsimod.Arc.preference"`` (rows: every arc), and the forcing series
    ``"wsimod.precipitation"``, ``"wsimod.et0"``, ``"wsimod.temperature"`` ``(..., T,
    n_readers)``, ``"wsimod.flow"`` ``(..., T, n_catchments)`` and ``"wsimod.concentration"``
@@ -43,6 +44,11 @@ State layout (D10; spec, State). Every key has a leading batch shape; the rows a
   anchors ``(arc, direction)``.
 - ``"wsimod.liquor"`` (every ``WWTW`` and ``FWTW``), ``"wsimod.previous_pulled"`` (``FWTW``)
   and ``"wsimod.treated"`` (``WWTW``), ``(..., n, 1+K)`` by node.
+- ``"wsimod.total_decayed"`` ``(..., n_rows, 1+K)``: the decayed mass of the last end of day of
+  each ``Land`` surface, ``(node, "surfaces.<name>")`` (X35: the attribute path, where
+  ``"wsimod.storage"`` has ``"surface:<name>"``), in the state layout's order (D7). The rows
+  exist when ``nitrite`` is a pollutant: the next day's ``Surface.run`` converts them
+  (``land.py:427-439``).
 
 Units (W20): volumes ``m3``, flows and capacities ``m3/d``, additive pollutants ``kg``,
 non-additive ones by name (``temperature`` ``degC``); never converted.
@@ -92,12 +98,15 @@ STATE_KEYS = (
     "wsimod.liquor",
     "wsimod.previous_pulled",
     "wsimod.treated",
+    "wsimod.total_decayed",
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
 # keys that are not water held: a QueueTank's active storage is inside its storage, and an
 # FWTW's previous_pulled is the quality of yesterday's pulled water (W75)
-_NOT_HELD = ("wsimod.active_storage", "wsimod.previous_pulled")
+# a surface's total_decayed is mass that left the storage at the end of the day and returns
+# through the next day's carry-over (land.py:427-439), so it is not held either
+_NOT_HELD = ("wsimod.active_storage", "wsimod.previous_pulled", "wsimod.total_decayed")
 # keys of one value per row, not a VQIP
 _FLAT_KEYS = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
 _STATE_UNITS = {
@@ -114,6 +123,7 @@ _STATE_TEXT = {
     "wsimod.liquor": "every WWTW's and FWTW's liquor (VQIP)",
     "wsimod.previous_pulled": "every FWTW's previous day's pulled water (VQIP)",
     "wsimod.treated": "every WWTW's treated water (VQIP)",
+    "wsimod.total_decayed": "every Land surface's decayed mass of the last end of day (VQIP)",
 }
 
 # D6 parameter units (W20); a parameter not listed has none declared
@@ -624,6 +634,16 @@ class WsimodDay:
                     put("wsimod.travel_queue_present", node, present, rows, (length,))
                 elif path in ("liquor", "previous_pulled", "treated"):
                     put(f"wsimod.{path}", node, path, [spec.name], (width,))
+                elif path.startswith("surfaces.") and last == "total_decayed":
+                    # X35: the attribute path, not "surface:<name>" (D7)
+                    surface = path.split(".")[1]
+                    put(
+                        "wsimod.total_decayed",
+                        node,
+                        path,
+                        [(spec.name, f"surfaces.{surface}")],
+                        (width,),
+                    )
         for name, arc in self.engine.arcs.items():
             if isinstance(arc, AltQueueArc):
                 length = arc.register.shape[-2]

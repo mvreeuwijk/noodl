@@ -477,7 +477,7 @@ REFUSALS = [
     (_node(type_="River", decays={"phosphate": {"constant": 1, "exponent": 0}}), "exponent"),
     (_node(type_="Storage", decays={"phosphate": {"constant": "a", "exponent": 1}}), "constant"),
     (_node(type_="Storage", decays={"phosphate": {"constant": 1, "exponent": None}}), "exponent"),
-    (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "decays": {"a": 1}}]), "3b"),
+    (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "decays": {"a": 1}}]), "'a'"),
     (_node(type_="Waste", data_input_dict={}), "data_input_dict"),
     (_override(node={"type_": "Catchment", "name": "a", "decays": {}}), "decays"),
     (_override(arc={"name": "nowhere", "type_": "Arc"}), "nowhere"),

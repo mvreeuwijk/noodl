@@ -430,7 +430,8 @@ def test_the_cases_cover_every_listed_feature():
     queue_tank_time_zero wtw_zero_input impervious_only pervious_only evaporation_clamp
     temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
     batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
-    node_type_override decay_storage decay_groundwater""".split()
+    node_type_override decay_storage decay_groundwater
+    surface_decay_nitrification land_run_twice""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",
@@ -681,3 +682,24 @@ def test_case_runs_where_wsimod_crashes_nonresidential_demand():
     assert deficit.tolist() == [False] * 20 + [True] * (spec.days - 20)
     assert bool(torch.isfinite(results.arc_flow).all())
     assert mass_balance_worst(results) <= BOUND
+
+
+@pytest.mark.parametrize(
+    ("name", "times"), [("surface_decay_nitrification", 1), ("land_run_twice", 2)]
+)
+def test_the_surface_decay_cases_carry_yesterdays_decay_into_nitrate_and_nitrite(name, times):
+    """``land.py:427-439``: day ``d + 1``'s inflow of nitrate is day ``d``'s decayed nitrite and
+    of nitrite its decayed ammonia, once per ``Land.run`` (X16: twice in ``land_run_twice``).
+    Rain carries neither, so they are the whole inflow; day 0 has none. The factor reaches its
+    cap on warm days, so the cap decisions are exercised."""
+    results, diagnostics = case_ours(name, "pollutants")
+    network = read_wsimod_config(CASES[name].build())
+    columns = ["volume", *network.pollutants.additive]
+    inflow = results.mass_balance.terms["Land.running_inflow_mb"]
+    decayed = results.mass_balance.terms["DecayTank.decayed"]
+    for source, target in (("nitrite", "nitrate"), ("ammonia", "nitrite")):
+        carried = inflow[:, columns.index(target)]
+        assert float(carried[0]) == 0.0
+        assert float(decayed[:, columns.index(source)].abs().sum()) > 0.0
+        expected = times * decayed[:-1, columns.index(source)]
+        assert torch.allclose(carried[1:], expected, rtol=1e-12, atol=0.0)

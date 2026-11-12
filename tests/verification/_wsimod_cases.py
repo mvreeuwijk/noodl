@@ -1763,6 +1763,96 @@ def _decay_groundwater(*, override: bool = True) -> dict:
     return mapping
 
 
+def _nitrifying(volume: float) -> dict:
+    """An ``initial_storage`` VQIP over WSIMOD's 12 default pollutants, with ammonia, nitrite and
+    nitrate to decay (every key is needed: WSIMOD sums over its pollutant list)."""
+    return {
+        "volume": volume,
+        "do": 8.0,
+        "org-phosphorus": 0.0004 * volume,
+        "phosphate": 0.002 * volume,
+        "ammonia": 0.02 * volume,
+        "solids": 0.5 * volume,
+        "bod": 0.01 * volume,
+        "cod": 0.02 * volume,
+        "ph": 7.0,
+        "temperature": 11.0,
+        "nitrate": 0.01 * volume,
+        "nitrite": 0.005 * volume,
+        "org-nitrogen": 0.003 * volume,
+    }
+
+
+def _nitrifying_land(*, twice: bool) -> dict:
+    """An impervious and a pervious surface that decay ammonia, nitrite and phosphate, each with
+    its own ``decays`` (D13) over WSIMOD's 12 default pollutants and the live soil temperature.
+    The air temperature crosses 20 degC, so ``roads`` nitrite hits the cap of 1 on warm days
+    (``core.py:513-515``). There is no ``River`` (nitrate would start its biochemistry): the
+    percolation goes to a ``Groundwater`` without decays, the runoff through a ``Node`` to a
+    ``Waste``. ``twice`` runs the ``Land`` twice a day (X16: the carry-over, ``land.py:427-439``,
+    is converted at every ``Surface.run``)."""
+    days = _LAND_DAYS
+    forcing = _land_forcing(days, 71 if twice else 70)
+    for number, date in enumerate(_dates(days)):
+        forcing[("temperature", date)] = round(8.0 + 16.0 * (number % 10) / 9, 4)
+    orchestration = [{"Land": "run"}] * (2 if twice else 1) + [{"Groundwater": "distribute"}]
+    return {
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "plot",
+                [
+                    _impervious(
+                        "roads",
+                        area=2000.0,
+                        pore_depth=0.002,
+                        et0_to_e=0.9,
+                        initial_storage=_nitrifying(3.0),
+                        decays={
+                            "ammonia": {"constant": 0.05, "exponent": 1.08},
+                            "nitrite": {"constant": 0.9, "exponent": 1.1},
+                            "phosphate": {"constant": 0.01, "exponent": 1.03},
+                        },
+                    ),
+                    _pervious(
+                        "turf",
+                        area=1e4,
+                        depth=0.5,
+                        infiltration_capacity=0.01,
+                        initial_storage=_nitrifying(1700.0),
+                        decays={
+                            "ammonia": {"constant": 0.08, "exponent": 1.06},
+                            "nitrite": {"constant": 0.12, "exponent": 1.04},
+                            "phosphate": {"constant": 0.02, "exponent": 1.02},
+                        },
+                    ),
+                ],
+                forcing,
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("plot_to_aquifer", "plot", "aquifer"),
+            _arc("plot_to_brook", "plot", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": orchestration,
+    }
+
+
+def _surface_decay_nitrification() -> dict:
+    return _nitrifying_land(twice=False)
+
+
+def _land_run_twice() -> dict:
+    return _nitrifying_land(twice=True)
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -2007,6 +2097,18 @@ CASES: dict[str, Case] = {
         days=_DECAY_DAYS,
         scale=_largest_volume(_decay_groundwater()),
         replay=("gw",),
+    ),
+    "surface_decay_nitrification": Case(
+        build=_surface_decay_nitrification,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("plot",),
+    ),
+    "land_run_twice": Case(
+        build=_land_run_twice,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("plot",),
     ),
     "node_type_override": Case(
         build=_node_type_override,

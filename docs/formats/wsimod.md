@@ -102,8 +102,9 @@ refused by name.
   `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
   forcing on every date. A `Groundwater` loses its configured forcing (`storage.py:202-203`), so
   its dict needs a `filename` override that gives `temperature` on every date. On a
-  `QueueGroundwater` a dict is refused until a later task of sub-project 3b, and a surface's must
-  be empty.
+  `QueueGroundwater` a dict is refused until a later task of sub-project 3b. A surface takes
+  `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
+  air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
   `DecayArc` and `DecayArcAlt` (sub-project 3b), `GrowingSurface`, `IrrigationSurface`,
   `GardenSurface` and `VariableAreaSurface` (3c), and `EnfieldFoulSewer`, whose
@@ -151,7 +152,8 @@ compute derived quantities.
   constructor keyword of the node) is refused.
 - An override of `decays` on the Storage family merges per pollutant, as `dict.update` does
   (an entry replaces the pollutant's whole dict, so it needs both keys); it is refused on a node
-  built with `decays: None` (`storage.py:96-100`) and on a surface (sub-project 3b).
+  built with `decays: None` (`storage.py:96-100`). On a surface it merges per surface
+  (WSIMOD's shared default `{}` would reach every surface built without a `decays` key).
 - A node's `filename` override is read as WSIMOD reads it (`nodes.py:93-99`, `model.py:1252-1269`):
   the path as written, opened relative to the process's **working directory**, not the
   configuration's directory (use absolute paths); the file's data replaces the node's forcing.

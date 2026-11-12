@@ -276,7 +276,7 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     # warning), so only ``area`` and ``depth`` reach the tank; ``Tank.apply_overrides``
     # (tanks.py:55-68) then takes ``datum``.
     "Tank": frozenset({"datum"}),
-    "DecayTank": frozenset({"decays"}),  # tanks.py:430-440 (a Surface's merge is refused: Task 8)
+    "DecayTank": frozenset({"decays"}),  # tanks.py:430-440 (a Surface's merges per surface: D13)
     "Surface": frozenset({"surface", "pollutant_load", "area", "depth"}),
     # land.py:623-643; ``depth`` is popped and ignored (a printed error)
     "ImperviousSurface": frozenset({"et0_to_e", "pore_depth"}),

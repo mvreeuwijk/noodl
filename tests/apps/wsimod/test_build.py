@@ -460,6 +460,9 @@ def test_quantity_only_driver_shapes():
     mapping = CASES["decay_storage"].build()
     model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=False)
     assert not any(".decays." in key for key in drivers)
+    nitrifying = read_wsimod_config(CASES["surface_decay_nitrification"].build())
+    _, _, drivers = build_model(nitrifying, pollutants=False)
+    assert not any(".decays." in key for key in drivers)  # nor a surface's
     model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=True)
     k = len(mapping["pollutants"])
     for cls in ("Storage", "Reservoir", "RiverReservoir", "River"):
@@ -648,3 +651,58 @@ def test_a_driver_that_breaks_a_division_is_refused_by_name(case, driver, value,
     bad = {**drivers, driver: torch.full_like(drivers[driver], value)}
     with pytest.raises(ValueError, match=name):
         model.step(state, bad, dt=DAY, t=0.0)
+
+
+def test_surface_decay_drivers_have_the_surface_class_and_the_node_surface_label():
+    """O2, X34: ``wsimod.<SurfaceClass>.decays.constant`` and ``.exponent`` ``(n, K)`` with the
+    labels ``(node, surface)``, inert where nothing decays, absent in a quantity-only run."""
+    mapping = CASES["surface_decay_nitrification"].build()
+    network = read_wsimod_config(mapping)
+    model, _, drivers = build_model(network, pollutants=False)
+    assert not any(".decays." in key and "Surface" in key for key in drivers)
+    model, _, drivers = build_model(network, pollutants=True)
+    names = network.pollutants.names
+    for cls, surface in (("ImperviousSurface", "roads"), ("PerviousSurface", "turf")):
+        for field, inert in (("constant", 0.0), ("exponent", 1.0)):
+            key = f"wsimod.{cls}.decays.{field}"
+            assert drivers[key].shape == (1, len(names))
+            assert model.wsimod_day.drivers[key].labels == [("plot", surface)]
+            assert model.wsimod_day.drivers[key].columns == names
+            row = drivers[key][0]
+            assert float(row[names.index("nitrate")]) == inert  # not listed: inert
+            assert float(row[names.index("ammonia")]) != inert
+
+
+def test_the_total_decayed_state_round_trips():
+    """X35, D7: ``"wsimod.total_decayed"`` has one row per surface, labelled by the attribute
+    path ``(node, "surfaces.<name>")``, and the state is the carry-over day 0 reads (the surface
+    labels of ``"wsimod.storage"`` keep their form ``"surface:<name>"``). Without ``nitrite`` the
+    key has no rows."""
+    network = read_wsimod_config(CASES["surface_decay_nitrification"].build())
+    model, _, _ = build_model(network, pollutants=True)
+    day = model.wsimod_day
+    assert day.state_labels("wsimod.total_decayed") == [
+        ("plot", "surfaces.roads"),
+        ("plot", "surfaces.turf"),
+    ]
+    assert ("plot", "surface:turf") in day.state_labels("wsimod.storage")
+    plain = initial_state(model)
+    state = initial_state(
+        model,
+        values={"wsimod.total_decayed": {("plot", "surfaces.turf"): {"ammonia": 2.0}}},
+    )
+    assert (
+        float(state["wsimod.total_decayed"][1, 1 + network.pollutants.names.index("ammonia")])
+        == 2.0
+    )
+    assert not plain["wsimod.total_decayed"].any()
+    terms = {}
+    for tag, start in (("plain", plain), ("given", state)):
+        _, ctx, _ = next(day.run_days(start, days=1))
+        terms[tag] = ctx.terms["Land.running_inflow_mb"].clone()
+    nitrite = 1 + network.pollutants.names.index("nitrite")
+    assert float(terms["given"][nitrite] - terms["plain"][nitrite]) == 2.0  # ammonia -> nitrite
+    # a model without nitrite carries nothing
+    mapping = CASES["decay_storage"].build()
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=True)
+    assert model.wsimod_day.state_labels("wsimod.total_decayed") == []

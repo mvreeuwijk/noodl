@@ -247,8 +247,7 @@ def _checked_parameters(
 
 
 def _refuse_decays(where: str, decays: object, reason: str = "decay is sub-project 3b") -> None:
-    """A ``decays`` this task does not port yet: a Surface's and a ``QueueGroundwater``'s
-    (Tasks 8 and 9) and a ``Groundwater``'s (Task 7)."""
+    """A ``decays`` this task does not port yet: a ``QueueGroundwater``'s (Task 9)."""
     raise ValueError(f"{where}: 'decays' {decays!r} is not supported ({reason})")
 
 
@@ -404,8 +403,6 @@ def _override_node(node: NodeSpec, entry: dict, where: str, unread: list[str]) -
             f"{where}, surface {surface_name!r}",
             surface=True,
         )
-        if match.parameters["decays"]:  # a surface's decay is Task 8
-            _refuse_decays(f"{where}, surface {surface_name!r}", match.parameters["decays"])
         match.name = override.get("surface", match.name)  # land.py:396
 
 
@@ -469,7 +466,7 @@ def _read_node(
         if "surfaces" not in schema.parameters:
             raise ValueError(f"{where}: {cls} has no surfaces")
         surfaces = [
-            _read_surface(s, base, where)
+            _read_surface(s, base, where, pollutants)
             for s in _items(entry.pop("surfaces"), f"{where} surfaces")
         ]
     parameters = _checked_parameters(entry, schema, where)
@@ -489,7 +486,9 @@ def _read_node(
     return NodeSpec(name, cls, slot_key, parameters, data, surfaces)
 
 
-def _read_surface(entry: dict, base: Path | None, owner: str) -> SurfaceSpec:
+def _read_surface(
+    entry: dict, base: Path | None, owner: str, pollutants: Pollutants
+) -> SurfaceSpec:
     type_ = _need(entry, "type_", f"a surface of {owner}")
     _refuse_class(type_, "surface", SURFACE_SCHEMAS)
     schema = SURFACE_SCHEMAS[type_]
@@ -497,8 +496,7 @@ def _read_surface(entry: dict, base: Path | None, owner: str) -> SurfaceSpec:
     where = f"{owner}, surface {name!r}"
     data = _forcing(entry, base, where)
     parameters = _checked_parameters(entry, schema, where)
-    if parameters["decays"]:
-        _refuse_decays(where, parameters["decays"])
+    read_decays(where, parameters["decays"], pollutants)  # land.py:303-581: a DecayTank
     return SurfaceSpec(name, type_, parameters, data)
 
 
