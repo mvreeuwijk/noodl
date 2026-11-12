@@ -22,7 +22,7 @@
 - **Slow tests.** Add `-m slow` on the wsimod row when a task changes what a slow test compares.
 - **mkdocs.** Run `python -m mkdocs build --strict` at the end of every task that touches `docs/`.
 - **Catalogue.** A task that adds or changes a public name runs `python scripts/gen_catalogue.py` and commits `docs/catalogue/wsimod.md` (`tests/test_docs_catalogue.py`).
-- **Commit.** `git -c user.email=58522531+mvreeuwijk@users.noreply.github.com -c user.name="Maarten van Reeuwijk" commit`. Every message ends with the line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- **Commit.** `git -c user.email=58522531+mvreeuwijk@users.noreply.github.com -c user.name="Maarten van Reeuwijk" commit`. Every message ends with a `Co-Authored-By:` line that names the implementer's own model: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`, `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`, `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`, or the Haiku equivalent.
 - **Project rules.** Physical names and no aliases: a moved name is imported from its new home and never re-exported. Code, tests and docs change together. No wall-clock assertions: times are measured and recorded, never asserted. Coverage is 90 % on the full suite. `src/` never imports `wsimod`.
 - **Transcription.** Every transcribed behaviour cites its WSIMOD `file:line`. Where the spec and the source disagree, the source wins, and the spec is corrected in the same commit (W2).
 - **Bitwise parity.** Every 3c class has `replay_bound: ClassVar[float] = 0.0`, and every whole-model and replay comparison of a 3c case expects 0. "Bitwise" means equal under `abs(a − b) <= 0` / `torch.equal`, for which `-0.0 == 0.0` (rule 6, Y50). A non-zero bound needs a measured cause, written beside it and in the test (W19). The only planned admission is Y41's store-bounded print (D12).
@@ -37,7 +37,7 @@
 
 ## Review Focus
 
-1. **A batch whose instances leave the adsorption Newton loop at different iterations, one of them by the shortcut** (`adsorption`): each instance should be bitwise equal to its single run, with the stopped instances' `xn`, `xn_1` and `fxn` frozen (Y25), and no instance should take another's iteration count. Tests in Tasks 8 and 10.
+1. **A batch whose instances leave the adsorption Newton loop at different iterations, one of them by the shortcut** (`adsorption`): each instance should be bitwise equal to its single run, with the stopped instances' `xn`, `xn_1` and `fxn` frozen (Y25), and no instance should take another's iteration count. Tests in Tasks 8b and 10.
 2. **A soil exactly at field capacity or exactly at the wilting point** (`calc_soil_moisture_dependence_factor`, `denitrification`, `calc_crop_cover`): expect WSIMOD's tie branches. `smc == fc_m` gives `smdf = satact` (`>=`), while denitrification takes the ratio branch, giving `((1 − limpar)/(1 − limpar)) ** exppar`, which is `1.0` (`>` is strict). `smc == wp_m` gives `smdf = 0`. A tie must not fall into a neighbouring branch. Tests in Task 7.
 3. **Negative fertiliser, manure or deposition values** (a sign error in user data): expect them transcribed. `adjust_vqip_to_liquid` skips its `dep > 0` scaling, the pool receives the negative mass and the tank receives it too, equal to WSIMOD, with no NaN and no refusal. Test in Task 6.
 4. **A warm start mid-season** (`days_after_sow > 0`) from another run's last state, whose next days cross the harvest day: expect the harvest to reset `days_after_sow` to −1 and both covers to 0 on the harvest day, equal to the continuation of the first run. It must not be treated as an unsown start. Test in Task 10.
@@ -52,28 +52,25 @@ Each decision is binding for the implementer.
   - Task 12 opens 3c-ii (the surface `data_input_dict` override), and Tasks 13–16 add `IrrigationSurface`, `GardenSurface`, `VariableAreaSurface` and their structure tests.
   - The commit that ends Task 11 is the boundary. Nothing in Tasks 12–16 changes a 3c-i behaviour or test except by adding to it. A task-12+ edit to a 3c-i file adds a branch or an entry; it never rewrites one.
   - Until its task, each of the three subclasses stays in `OUT_OF_SCOPE` with the reason `"3c"`. Task 17's grep proves that none remains.
-  - `GrowingSurface`'s own attribute overrides (`land.py:1376-1431`) are part of the class, so they are 3c-i (Task 5). The 3c-ii "overrides" are the `data_input_dict` override, the unread `pollutant_load` override (L14, L15) and the `surface_overrides` case.
+  - `GrowingSurface`'s own attribute overrides (`land.py:1376-1431`) are part of the class, so they are 3c-i (Task 5a). The 3c-ii "overrides" are the `data_input_dict` override, the unread `pollutant_load` override (L14, L15) and the `surface_overrides` case.
 - **D2 Modules and registration.**
   - `growing.py` imports `land.PerviousSurface`, and at import it registers its classes in `land.SURFACE_CLASSES`, as `land.py` registers `NODE_CLASSES["Land"]`.
   - `engine._register_all` imports `growing`. `nutrient_pool.py` imports only `vqip`, `engine` and `torch`.
   - `land.py` never imports `growing`. Where `land.py` needs a class test, it uses `getattr(surface, "<flag>", False)` on a class attribute: `has_nutrients`, `is_garden`, `is_irrigated`.
 - **D3 The math helpers.** `log_python(x)`, `log10_python(x)` and `sin_python(x)` live in `vqip.py`, beside `pow_python`, as `torch.autograd.Function`s. The forward pass maps `math.log`/`math.log10`/`math.sin` over `x.detach().reshape(-1).tolist()`, and the backward pass returns `grad / x`, `grad / (x * math.log(10))` and `grad * torch.cos(x)`. Domain errors propagate as Python's `ValueError`, because every guarded call site keeps its argument in the domain. `exp_python` stays in `storage.py`, and `growing.py` imports it from there.
-- **D4 State keys with a trailing shape.**
-  - `day.py` gains `_TRAILING = {"wsimod.nutrient_pool": (5, 2), "wsimod.surface_climate": (2,)}`, and `_rank(key)` becomes `1 + len(_TRAILING[key])` for those keys.
-  - `initial_state`, `_dump`, `_load` and `_batch_shape` use `(rows, *trailing)` where today they use `(rows,)` or `(rows, 1 + K)`.
-  - `"wsimod.days_after_sow"`, `"wsimod.crop_cover"` and `"wsimod.ground_cover"` join `_FLAT_KEYS`.
-  - All five join `_NOT_HELD` (Y11). The units are `kg`, `d`, `-`, `-` and `m3`.
-  - A trailing-shaped key's `Field` has `column=False`, `species=None`, and a description that names the axes: the pools `fast_pool, humus_pool, dissolved_inorganic_pool, dissolved_organic_pool, adsorbed_inorganic_pool`, then `N, P`; or `evaporation, precipitation`.
-  - `initial_state(values=...)` accepts:
-    - for `nutrient_pool`, `{label: {pool: {"N": x, "P": y}}}`, with pools and nutrients that are not named left unchanged;
-    - for `surface_climate`, `{label: {"evaporation": x, "precipitation": y}}`.
+- **D4 The new state keys are flat, with slot shapes and labelled rows.** This is the layout the state already uses for multi-slot registers (`arc_queue_since`, the River lags, `travel_queue_present`). The spec's State table is amended to match (W2).
+  - All five keys join `_FLAT_KEYS` and `_NOT_HELD` (Y11). The units are `kg` (`nutrient_pool`), `d`, `-`, `-` and `m3` (`surface_climate`).
+  - `"wsimod.nutrient_pool"` has `slot.shape = (5, 2)`: 10 rows per growing surface, labelled `(land, "surfaces.<s>.nutrient_pool", <pool>, <N|P>)`. The pools come in `POOLS` order, each `N` then `P`. The engine's tensor stays `(..., 5, 2)`.
+  - `"wsimod.surface_climate"` has `slot.shape = (2,)`, with rows `(land, "surfaces.<s>", "evaporation")` and `(land, "surfaces.<s>", "precipitation")`.
+  - `"wsimod.days_after_sow"`, `"wsimod.crop_cover"` and `"wsimod.ground_cover"` have `slot.shape = ()`, with one row `(land, "surfaces.<s>")`.
+  - `_dump`'s `broadcast_to(..., *slot.shape)` → `reshape(*shape, slot.rows)` and `_load`'s `reshape(*batch, *slot.shape)` already convert `(5, 2) ↔ 10` (`day.py:877-913`). `_held` skips flat keys, and `build.initial_state` already takes `{label: number}` for flat keys. No change to the layout code, `Field` or `build.py`; `_state_layout` only adds the `put` branches.
 - **D5 Store paths.**
   - A growing surface's stores add `days_after_sow`, `crop_cover`, `ground_cover`, `crop_factor` and `et0_coefficient`. With nutrients they also add `nutrient_pool`, `temperature_dependence_factor` and `soil_moisture_dependence_factor`.
   - An Irrigation or Garden surface adds `surface_climate`.
   - Carried: `nutrient_pool` (with nutrients), the three crop registers (always), and `surface_climate`. The others are per-day stores that the replay compares.
   - `surface_climate` is a view. `stores()` stacks the volumes of `evaporation` and `precipitation`. `load_stores` rebuilds both VQIPs as `v_change_vqip(empty, volume)` (`land.py:1029-1031`).
   - The signature changes to `Land.store_paths_of(surfaces, *, nutrients: bool = False)`, where `nutrients` is `"nitrate"` among the run's pollutants. The harness's `_store_paths` passes `"nitrate" in constants.POLLUTANTS`.
-  - State rows: `(land, "surfaces.<name>.nutrient_pool")` for the pool, and `(land, "surfaces.<name>")` for the others (spec State).
+  - State rows: as in D4.
 - **D6 `days_after_sow`.**
   - A float register, with −1 for `None`.
   - The sowing and harvest tests are structural, from the build-time calendar (D7).
@@ -83,7 +80,7 @@ Each decision is binding for the implementer.
 - **D7 The build-time calendar.**
   - `GrowingSurface.set_dates(dates, labels)` builds one `CalendarDay` per network date, in WSIMOD's arithmetic: `bisect.bisect_left` on the same Python lists, Python indexing (the wrap included), and `math.sin(2 * PI * ((raw - 70) / 365))`. `Engine.__init__` calls it on every growing surface, and unit tests call it directly.
   - The day's entry is `calendar[ctx.day]`.
-  - A date whose interpolation would raise `IndexError` or divide by zero is refused at build, naming the surface, the stage list and the date label.
+  - noodl evaluates WSIMOD's `bisect_left`, its indexing and the division `x_right − x_left` for every run date. A date that would raise `IndexError` or `ZeroDivisionError` is refused at build, naming the surface, the stage list and the first date that raises. A duplicate inside the list is not a refusal in itself: `bisect_left` returns the first duplicate, so `[0, 100, 100, 365]` runs in WSIMOD. Only a list whose wrap or segment has zero width on a run date, such as `[365, 365]`, divides by zero.
   - **Y47's step-time clause is unreachable:** `WsimodDay._day_index` confines `model.step` to the network's dates (3a D16), all of which are checked at build. A test pins that `model.step` cannot reach a date outside them, so no separate step-time check is written (see Spec gaps).
 - **D8 Surface forcing.**
   - `land.py` gains `SURFACE_DEPOSITION = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")` (replacing `DEPOSITION_KEYS`) and `SURFACE_INPUTS = ("nhx-fertiliser", "noy-fertiliser", "srp-fertiliser", "nhx-manure", "noy-manure", "srp-manure")`.
@@ -93,7 +90,7 @@ Each decision is binding for the implementer.
   - `structure.surface_forcing_readers(network) -> dict[str, list[tuple[str, str]]]` lists `(land, surface)` per variable. `forcing_readers` is unchanged.
 - **D9 Constructor flags (Y21).** `SurfaceSpec` gains `constructed_variables: frozenset[str] = frozenset()` and `constructed_load: tuple[str, ...] = ()`. `_read_surface` sets both before any override. `Surface.__init__` reads `has_deposition = "nhx-dry" in spec.constructed_variables` and `has_load = len(spec.constructed_load) > 0`.
 - **D10 Events.**
-  - `run.EVENT_NAMES` gains the eight events in order of introduction: `"crop_water_stress_zero_denominator"` (Task 5), `"pull_storage_no_din"` (6), `"nutrient_pool_not_tracking"`, `"transformation_no_din"` and `"crop_uptake_dry_soil"` (7), and `"adsorption_shortcut"`, `"erosion_pool_short"` and `"freundlich_flow_adjusted"` (8).
+  - `run.EVENT_NAMES` gains the eight events in order of introduction: `"crop_water_stress_zero_denominator"` (Task 5a), `"pull_storage_no_din"` (6), `"nutrient_pool_not_tracking"`, `"transformation_no_din"` and `"crop_uptake_dry_soil"` (7), `"erosion_pool_short"` (8a), and `"adsorption_shortcut"` and `"freundlich_flow_adjusted"` (8b).
   - Each event is recorded at the `Land`'s name.
   - `_wsimod_parity._UNDATED` gains `"adsorption_shortcut"` and `"erosion_pool_short"`, with patterns copied from WSIMOD's print strings (`land.py:2193`, `:2053`).
 - **D11 Mass-balance parts (Y11).**
@@ -103,9 +100,10 @@ Each decision is binding for the implementer.
   - A repeated `Land.run` adds to its parts.
 - **D12 The Y41 admission.**
   - `assert_matches_wsimod` gains `store_bounded_prints: Mapping[str, float] = {}`, which maps a land's name to `c`.
-  - A line `mass balance error for <p> of x in <land>` of a mapped land passes when `|x| <= c * 2.220446049250313e-16 * S`. `S` is the largest storage of `p` over the land's surfaces in WSIMOD's recorded surface quality, at the end of that day and at the end of the day before (the initial storage on day 0). The line must also fall on its day.
+  - A line `mass balance error for <p> of x in <land>`, with `p` an **additive pollutant** of a mapped land, passes when `|x| <= c * 2.220446049250313e-16 * S`. `x` is WSIMOD's absolute `in_ − ds_ − out_` (`core.py:420-427`). Volume lines are never admitted: they stay W86's comparison with `residual + dropped`.
+  - `S` is the largest storage of `p` over the land's surfaces and its three residence tanks (WSIMOD's recorded `surface_quality` and that land's `tank_quality` rows; `ds_` sums both, `land.py:158-162`). It is taken at the end of that day and at the end of the day before (the initial storage on day 0). The line must also fall on its day.
   - An unmapped land's line fails as today, and that is how "zero lines" is asserted.
-  - Task 9 measures `max |x| / (ε S)` per case and sets `GROWING_PRINT_C = ceil(maximum)` in `test_wsimod_parity.py`, with the measured values in a comment and in the progress file. The expected value is 2, from the review's ≈1.4.
+  - Task 9b measures `max |x| / (ε S)` per case and sets `GROWING_PRINT_C = ceil(maximum)` in `test_wsimod_parity.py`, with the measured values in a comment and in the progress file. The expected value is 2, from the review's ≈1.4.
 - **D13 Crash cases.**
   - `Case` gains `crash: tuple[str, str] | None = None`: the exception's class name and the `"land.py:<line>"` WSIMOD raises at. A crash case has `wsimod=False`, so the generic parity and replay skip it.
   - `_wsimod_parity.wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]` runs WSIMOD one day at a time until it raises. It returns the days recorded, the exception and the crash day.
@@ -125,7 +123,8 @@ Each decision is binding for the implementer.
 - **D16 Surface driver columns.**
   - `Surface.driver_columns() -> dict[str, tuple]` (default `{}`) names the columns of its non-pollutant vector parameters. `_driver_layout`'s surface loop consults it before the pollutant-column rule.
   - A growing surface returns `("N", "P")` for the six `nutrient_pool.<p>` pairs.
-  - It returns `tuple(range(S))` for `crop_factor_stages`, where `S` is that class's longest list. The layout pads each shorter template row with 0 (Y33), and `GrowingSurface.bind` refuses a non-zero padding entry, naming the surface and the index.
+  - It returns the sentinel `"stages"` for `crop_factor_stages`. `_driver_layout` pads each row with 0 to the longest list of that class and sets `d.columns = tuple(range(S))`, as its time-area branch does (`day.py:548-557`) (Y33). `GrowingSurface.bind` refuses a non-zero entry beyond its own length, naming the surface and the index.
+  - The surface loop consults `driver_columns()` before its `ndim == 1 and K == 0` skip. A surface without a pool has no `nutrient_pool.*` entries in its `defaults`.
 - **D17 Growing parameters.**
   - `GrowingSurface.parameter_defaults` is `PerviousSurface`'s without `depth` and `et0_coefficient`, plus the spec's 25 attributes, `ET_depletion_factor = 1` and `rooting_depth = 1`. `et0_coefficient` is accepted (schema and override) and listed as unread (D15), but it is not a driver.
   - The structural keys `crop_factor_stage_dates`, `sowing_day`, `harvest_day`, `adsorption_nr_maxiter` and `initial_soil_storage` are read from `spec.parameters` at construction and are not drivers.
@@ -136,7 +135,7 @@ Each decision is binding for the implementer.
 - **D19 `pull_pollutants` and the tracking event.**
   - `Tank.pull_pollutants(vqip, *, active) -> Tensor` clamps each additive column, in the run's additive order, then the volume, with the decisions `<site>/pull_pollutants/clip:<name>`. It then extracts the result and returns it (`tanks.py:261-266`).
   - The four growing call sites go through `GrowingSurface._pull_tracked(out_, *, active) -> Tensor`. It records `"nutrient_pool_not_tracking"` where `active & any(request − clamped > FA)` and returns the clamped VQIP.
-- **D20 Partial process lists.** Tasks 6–8 append each process to `inflows`/`processes` as it lands, in WSIMOD's list order. No whole-model `nitrate` case exists before Task 9: Tasks 6–8 are judged by unit tests against WSIMOD's own objects.
+- **D20 Partial process lists.** Tasks 6–8b insert each process into `inflows`/`processes` as it lands, at its position in WSIMOD's list (`land.py:1275-1291`), so that the lists are always in WSIMOD's order. No whole-model `nitrate` case exists before Task 9a: Tasks 6–8b are judged by unit tests against WSIMOD's own objects.
 - **D21 Calendar of the cases.**
   - Every 3c case's dates start on 2003-10-01 (`_land_dates(n)`), so that a run crosses 29 February 2004.
   - Monthly surface data come from `_monthly(variables: Mapping[str, Callable[[int, int], float]], start: str, months: int) -> dict`, keyed `"YYYY-MM"`.
@@ -188,7 +187,7 @@ PART_NAMES: dict[str, str]   # "ihacres" -> "PerviousSurface.ihacres", ..., D11
 ```
 
 - [ ] **Step 1: Write the failing tests.**
-  - `test_log_log10_sin_python_are_pythons_bitwise` (`test_vqip.py`): 10⁴ seeded samples each on `log` and `log10` over `[1e-6, 50]` and `sin` over `[0, 0.2]` and `[-7, 7]`. Every element equals `math.<f>(float(x))`, compared as floats. The test also asserts that torch's own function differs from Python's on at least one sample of the `sin` range `[-7, 7]`, so that the helper is needed (spec: 3.0 %).
+  - `test_log_log10_sin_python_are_pythons_bitwise` (`test_vqip.py`): 10⁴ seeded samples each on `log` and `log10` over `[1e-6, 50]` and `sin` over `[0, 0.2]` and `[-7, 7]`. Every element equals `math.<f>(float(x))`, compared as floats. The test asserts nothing about torch's own functions: whether they differ from Python's depends on the platform, and the helpers are required by Approach rule 1 either way.
   - `test_gradcheck_on_the_python_math_helpers`: `torch.autograd.gradcheck` on each helper, inside its domain.
   - `test_pull_pollutants_equals_wsimods` (`test_tanks.py`, `importorskip`): a WSIMOD `Tank` with pollutants `phosphate`, `ammonia`, `temperature` (WSIMOD globals set to match). 200 random storages and requests, a third of the requests above the store in some column. The returned VQIP and the storage equal WSIMOD's. The returned VQIP is clamped column by column, and `volume` is clamped too. The decisions `node:t/tank/pull_pollutants/clip:phosphate`, `…/clip:ammonia` and `…/clip:volume` appear in that order.
   - `test_the_parts_sum_to_the_running_terms[<case>-<mode>]` (`test_run.py`), over every `CASES` entry that has a `Land`. For each direction, the sum of `mass_balance.parts[direction]` over its names equals `terms["Land.running_inflow_mb"]` / `["Land.running_outflow_mb"]` within `1e-12 * scale` on every day. On `surface_decay_nitrification`, `parts["in"]["Surface.nitrite_carry_over"]` is non-zero on some day.
@@ -289,7 +288,7 @@ def _monthly(variables, start: str, months: int) -> dict
   - Case `surface_deposition` (spec Verification 3): `replay=("land",)`, `days=450` (the 15 months of data from 2003-10 hold 457 days), crossing month and year boundaries. Add it to `test_the_cases_cover_every_listed_feature`.
 - [ ] **Step 2:** Run them. Expected: FAIL.
 - [ ] **Step 3:** Implement. Check that `wsimod_model` passes a surface's `data_input_dict` keyed by `to_datetime` (`_wsimod_reference.py:315-316`), and extend it if it does not.
-- [ ] **Step 4:** Run the wsimod subset. Expected: PASS, with `test_case_matches_wsimod[surface_deposition-*]` and its replay bitwise. Docs: the deposition functions, the monthly lookup, the refusals and the unread entries. Regenerate the catalogue.
+- [ ] **Step 4:** Run the wsimod subset. Expected: PASS, with `test_case_matches_wsimod[surface_deposition-*]` and its replay bitwise. Docs: the deposition functions, the monthly lookup, the refusals and the unread entries, and the sentence that a batched driver may vary within a month, which WSIMOD cannot express (spec, Inputs › Forcing). Regenerate the catalogue.
 - [ ] **Step 5:** Commit: `feat(wsimod): surface deposition from monthly nhx/noy/srp data`.
 
 ### Task 4: The batched `NutrientPool` (`np.py:11-564`)
@@ -353,7 +352,7 @@ class NutrientPool:
 - [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Regenerate the catalogue.
 - [ ] **Step 5:** Commit: `feat(wsimod): the batched NutrientPool`.
 
-### Task 5: `GrowingSurface`: construction, overrides, the crop calendar and `calc_crop_cover`
+### Task 5a: `GrowingSurface`: construction, overrides, the crop calendar and `calc_crop_cover`
 
 **Implementer:** standard.
 
@@ -363,9 +362,7 @@ class NutrientPool:
   - `land.py`:
     - `PerviousSurface.get_climate() -> tuple[Tensor, Tensor]` (`land.py:905-911`), which `ihacres` calls, bitwise as now;
     - `PerviousSurface.crop_et0_coefficient()`, overridden by the growing class;
-    - `_validate_surface` (D18);
-    - `store_paths_of` (D5);
-    - `Surface.driver_columns` (D16);
+    - `_validate_surface` (D18), where `surface_derived` takes `rooting_depth` as the physical depth of the growing classes;
   - `classes.py`:
     - `_CONSTRUCTORS["GrowingSurface"]` with WSIMOD's keywords (`:1085-1094`) and `initial_soil_storage`;
     - `_OVERRIDES["GrowingSurface"]` with the 31 names of `:1376-1408` plus `rooting_depth`;
@@ -374,13 +371,8 @@ class NutrientPool:
     - `OUT_OF_SCOPE` loses `GrowingSurface`;
   - `config.py`: overrides of a growing surface;
   - `engine.py`: `_register_all`, `set_dates` (D7), sites;
-  - `day.py` (D4, D23): `STATE_KEYS` gains `"wsimod.days_after_sow"`, `"wsimod.crop_cover"` and `"wsimod.ground_cover"`; `_STATE_TEXT`, `_STATE_UNITS`, `_state_layout`, `_SURFACE_FIELDS`, `_driver_layout` padding;
   - `run.py`: `"crop_water_stress_zero_denominator"`;
-  - `tests/verification/_wsimod_reference.py`: `_store_paths`, `_wsimod_store` (`None` → −1), the capture of the crop state before and after each `Land.run`, `_SURFACE_FIELDS`;
-  - `tests/apps/wsimod/_replay.py`;
-  - `tests/verification/_wsimod_cases.py`: `_growing`, the cases `growing_no_nitrate` and `growing_default_depletion` (D13);
-  - `tests/verification/test_wsimod_parity.py`: the crash test of D13;
-  - tests: `test_config.py:415`, `test_build.py`;
+  - tests: `tests/apps/wsimod/test_config.py:415`;
   - docs.
 
 **Interfaces:**
@@ -404,26 +396,26 @@ class GrowingSurface(PerviousSurface):
     def set_dates(self, dates: Sequence[datetime], labels: Sequence[str]) -> None      # D7, refuses by name
     def calc_crop_cover(self, *, active: Tensor) -> tuple[Tensor, Tensor]              # land.py:1514-1572
     def crop_et0_coefficient(self) -> Tensor                                            # self.et0_coefficient
-# state "wsimod.days_after_sow", "wsimod.crop_cover", "wsimod.ground_cover": (..., n_growing), rows (land, "surfaces.<s>")
-# drivers "wsimod.GrowingSurface.<p>" (..., n) for GROWING_DEFAULTS and PerviousSurface's; ".crop_factor_stages" (..., n, S)
-# Case.crash (D13); wsimod_until_crash (D13)
+# drivers "wsimod.GrowingSurface.<p>" (..., n) for GROWING_DEFAULTS and PerviousSurface's (D17)
 ```
 
-- [ ] **Step 1: Write the failing tests** in `test_growing.py`. Each WSIMOD-side test uses `importorskip`, with a stub parent supplying `t` and `monthyear` from WSIMOD's `to_datetime`.
+- [ ] **Step 1: Write the failing tests** in `test_growing.py`. These are unit tests against WSIMOD's own object, with no cases. Each WSIMOD-side test uses `importorskip`, with a stub parent supplying `t` and `monthyear` from WSIMOD's `to_datetime`.
   - `test_quick_interp_equals_wsimods`: random sorted `xp` and `yp`, the default calendar `[0, 1, 365, 366, 365]`, and the wrap `xp = [1, 365]`, `yp = [0.3, 1]` at `x = 1`, which gives `0.30000000000000004` (L23).
+  - `test_gradcheck_on_quick_interp`: `torch.autograd.gradcheck` with respect to `yp` (spec, Verification 4).
   - `test_calc_crop_cover_equals_wsimods_every_day[spring|autumn|default|wrap]`: calendars (90, 250), (280, 200), (1, 365) and `crop_factor_stage_dates = [1, 365]`, with five-point `crop_factor_stages` and `ET_depletion_factor = 0.5`. Every day of 2003–2005, with `smc` drawn either side of `RAW`. `days_after_sow` (−1 for `None`), both covers, `crop_factor` and `et0_coefficient` are equal every day.
   - `test_every_year_shifts_the_day_after_february` (L1): the adjusted day is 59 on 2003-02-28 and on 2003-03-01, 364 on 2003-12-31, and 60 on 2004-03-01.
   - `test_the_sowing_day_has_no_crop`: on the sowing day `days_after_sow == 0` and the covers are unchanged. The next day they are interpolated.
   - `test_an_autumn_calendar_has_no_cover_all_year` (L2, Y15): the maximum `crop_cover` over days 1–365 is `0.0` for (280, 200) and `0.9` for (90, 250).
   - `test_the_stress_zero_denominator_gives_zero` (L3, Y17): `ET_depletion_factor = 1`, `smc ≤ wp_m`. `Ks = 0`, `et0_coefficient = 0`, and the event is true. WSIMOD raises `ZeroDivisionError` at `land.py:1566`.
   - `test_stress_either_side_of_raw`: `root_zone_depletion` just below `RAW` gives `Ks = 1`, and at `RAW` it gives `max(0, (TAW − RAW)/((1 − p)·TAW))`, which equals 1 there.
-  - `test_calendar_refusals` (parametrised, `match=`):
+  - `test_calendar_refusals` (parametrised, `match=`; D7):
     - stage lengths differ (`"crop_factor_stages"`);
-    - `crop_factor_stage_dates = [0, 300]` on dates past day 300 (`"crop_factor_stage_dates.*<first label>"`);
-    - a duplicate pair of dates (`"divides by zero"`);
-    - `sowing_day: 90.5` (`"sowing_day"`), while `90.0` is accepted;
+    - `crop_factor_stage_dates = [0, 300]` on dates past day 300 (`"crop_factor_stage_dates.*<the first date that raises>"`);
+    - `crop_factor_stage_dates = [365, 365]` (`"divides by zero.*2003-10-01"`);
+    - `sowing_day: 90.5` (`"sowing_day"`) and `harvest_day: 250.5` (`"harvest_day"`), while `90.0` is accepted;
     - `adsorption_nr_maxiter: -1` and `2.5`.
-  - `test_step_cannot_leave_the_network_dates` (D7): `model.step` at `t = len(dates) * 86400` raises 3a's `ValueError`.
+
+    A companion assertion: `[0, 100, 100, 365]` is accepted and interpolates as WSIMOD's `quick_interp` does on every day of 2003–2005.
   - `test_growing_refusals` (parametrised, `match=`):
     - `depth` configured (`"depth"`, L17), and `depth` as an override (`"depth"`);
     - `wilting_point > field_capacity` and `=` (`"wilting_point"`, L4, Y44);
@@ -431,17 +423,63 @@ class GrowingSurface(PerviousSurface):
   - `test_fertiliser_and_manure_data_are_needed_with_nitrate` (Y49): a growing surface on a network listing `nitrate` without `nhx-fertiliser` data is refused, `match="nhx-fertiliser"`, with `pollutants=True` and with `False`. Without `nitrate`, no such data are needed. With them, quantity-only lists them as ignored.
   - `test_a_growing_et0_coefficient_is_unread` (L22, Y39).
   - `test_growing_overrides_equal_wsimods`: each of the 31 names and `rooting_depth`, applied to WSIMOD's object with `apply_overrides` and to noodl's spec. The attributes, `capacity`, `field_capacity_m`, `wilting_point_m`, the calendar, `TAW` and `RAW` are equal, and the derived values equal construction's bitwise (spec, Loading and overrides).
-  - `test_crop_factor_stages_padding_is_inert` (Y33, D16): two surfaces with 2 and 5 stages give a driver `(2, 5)`, and the shorter row's padding is 0. `initial_drivers` with a padding entry of 0.1 is refused at bind, naming the surface and index 2.
-  - `test_the_crop_state_exists_in_quantity_only`: `state_labels("wsimod.days_after_sow")` holds `("land", "surfaces.g")` in both modes, starting at −1.
   - The harvest branch's dead store (L26) is not ported. The docstring of `calc_crop_cover` says so.
   - `test_config.py:415`: the `GrowingSurface` row becomes accepted. `IrrigationSurface`, `GardenSurface` and `VariableAreaSurface` stay refused with `"3c"` (D1).
+- [ ] **Step 2:** Run `test_growing.py` and `test_config.py`. Expected: FAIL.
+- [ ] **Step 3:** Implement. The `calc_crop_cover` decisions are D6's plus `depletion` (`dmax`), `unstressed` and `stress_floor` (`dmax(0.0, ·)`), and `stress_zero_denominator` (`(1 − p)·TAW == 0`, the guard: `Ks = 0`) (spec vocabulary). `ihacres` reads `crop_et0_coefficient()` through `get_climate()`.
+- [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Docs: the class, the calendar, its quirks (L1 naming the individual-files loader, Y42; L2, L23), the stress guard and the refusals. Regenerate the catalogue.
+- [ ] **Step 5:** Commit: `feat(wsimod): GrowingSurface with WSIMOD's crop calendar and cover`.
+
+### Task 5b: The crop state, the land harness and the crash-case machinery
+
+**Implementer:** most capable (the state layout, the harness and the crash harness are what every later case relies on).
+
+**Files:**
+- Modify:
+  - `land.py`: `store_paths_of` (D5), `Surface.driver_columns` (D16);
+  - `day.py` (D4, D16, D23):
+    - `STATE_KEYS` gains `"wsimod.days_after_sow"`, `"wsimod.crop_cover"` and `"wsimod.ground_cover"`;
+    - `_FLAT_KEYS`, `_NOT_HELD`, `_STATE_TEXT`, `_STATE_UNITS`;
+    - the `_state_layout` branches, `_SURFACE_FIELDS`, the `_driver_layout` padding;
+  - `tests/verification/_wsimod_reference.py`: `_store_paths`, `_wsimod_store` (`None` → −1), the capture of the crop state before and after each `Land.run`, `_SURFACE_FIELDS`;
+  - `tests/apps/wsimod/_replay.py`;
+  - `tests/verification/_wsimod_cases.py`: `Case.crash`, `_growing`, the cases `growing_no_nitrate` and `growing_default_depletion`;
+  - `tests/verification/_wsimod_parity.py`: `wsimod_until_crash` (D13);
+  - `tests/verification/test_wsimod_parity.py`: `test_case_runs_where_wsimod_crashes` (D13);
+  - tests: `tests/apps/wsimod/test_growing.py`, `test_build.py`;
+  - docs.
+
+**Interfaces:**
+- Consumes: `GrowingSurface`, `CalendarDay` (Task 5a).
+- Produces:
+
+```python
+# state "wsimod.days_after_sow", "wsimod.crop_cover", "wsimod.ground_cover": flat, one row (land, "surfaces.<s>") each (D4)
+# driver "wsimod.GrowingSurface.crop_factor_stages" (..., n, S), padded by _driver_layout (D16)
+Land.store_paths_of(surfaces, *, nutrients: bool = False) -> tuple[str, ...]   # D5
+@dataclass(frozen=True) class Case: ...; crash: tuple[str, str] | None = None   # D13
+def wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]   # D13
+```
+
+- [ ] **Step 1: Write the failing tests:**
+  - `test_crop_factor_stages_padding_is_inert` (Y33, D16): two surfaces with 2 and 5 stages give a driver `(2, 5)`, and the shorter row's padding is 0. `initial_drivers` with a padding entry of 0.1 is refused at bind, naming the surface and index 2.
+  - `test_the_crop_state_exists_in_quantity_only`: `state_labels("wsimod.days_after_sow")` holds `("land", "surfaces.g")` in both modes, starting at −1.
+  - `test_step_cannot_leave_the_network_dates` (D7): `model.step` at `t = len(dates) * 86400` raises 3a's `ValueError`.
+  - `test_et0_coef_is_recorded_for_every_non_impervious_surface` (D23): `results.surface["et0_coef"]` equals the parameter on a `PerviousSurface` and the day's value on a growing one. `crop_factor` is NaN except on growing surfaces.
   - Cases (D21):
     - `growing_no_nitrate`: one `GrowingSurface` (90/250, `ET_depletion_factor = 0.5`, five-point stages) and an `ImperviousSurface`, with pollutants `phosphate` and `temperature`, dry and wet deposition (straight into the tank), `days=540`, and `replay=("land",)`;
-    - `growing_default_depletion` (`crash=("ZeroDivisionError", "land.py:1566")`): the default `ET_depletion_factor = 1` on a soil that dries under `et0 = 0.01`.
-- [ ] **Step 2:** Run `test_growing.py`, `test_config.py` and `test_build.py`. Expected: FAIL.
-- [ ] **Step 3:** Implement. The `calc_crop_cover` decisions are D6's plus `depletion` (`dmax`), `unstressed` and `stress_floor` (`dmax(0.0, ·)`), and `stress_zero_denominator` (`(1 − p)·TAW == 0`, the guard: `Ks = 0`) (spec vocabulary). `ihacres` reads `crop_et0_coefficient()` through `get_climate()`.
-- [ ] **Step 4:** Run the wsimod subset. Expected: PASS: `growing_no_nitrate` at parity in both modes with its replay bitwise, and the crash test passing. Add the cases to the listed-features test. Docs: the class, the calendar, its quirks (L1 naming the individual-files loader, Y42; L2, L23), the stress guard and the refusals. Regenerate the catalogue.
-- [ ] **Step 5:** Commit: `feat(wsimod): GrowingSurface with WSIMOD's crop calendar and cover`.
+    - `growing_default_depletion`, `crash=("ZeroDivisionError", "land.py:1566")`. The recipe:
+      - pollutants `phosphate` and `temperature`, with no `nitrate`, because the pool does not exist yet;
+      - the default `ET_depletion_factor = 1`;
+      - a tank that starts **near field capacity**, not empty (an empty one crashes on day 0 and gives no parity days);
+      - drying under `et0 = 0.01` and no rain.
+
+      It crashes when the soil reaches the wilting point, around day 11.
+  - `test_case_runs_where_wsimod_crashes[growing_default_depletion]` (D13), with parity on the days before the crash and the event on the crash day.
+- [ ] **Step 2:** Run `test_growing.py`, `test_build.py` and `test_wsimod_parity.py -k growing`. Expected: FAIL.
+- [ ] **Step 3:** Implement D4's crop keys, D5, D13, D16 and D23.
+- [ ] **Step 4:** Run the wsimod subset, which also checks `et0_coef` on every existing pervious-surface case. Expected: PASS: `growing_no_nitrate` at parity in both modes, its replay bitwise, and the crash test passing. Add the cases to the listed-features test, which pins the `wsimod=False` set. Docs: the crop state.
+- [ ] **Step 5:** Commit: `feat(wsimod): the crop state, the land harness and WSIMOD crash cases`.
 
 ### Task 6: The pool on the surface: inputs, `pull_storage` and the flushing (`land.py:1293-1324`, `:1433-1710`, `:2267-2311`)
 
@@ -450,7 +488,7 @@ class GrowingSurface(PerviousSurface):
 **Files:**
 - Modify:
   - `src/noodl/apps/wsimod/growing.py`: the pool, `pull_storage`, `effective_precipitation_flushing`, `fertiliser`, `manure`, `adjust_vqip_to_liquid`, the deposition overrides, the nitrate validation, `initial_soil_storage`;
-  - `day.py` (D4): `"wsimod.nutrient_pool"`, `_TRAILING`, and the pool drivers through `driver_columns` (D16);
+  - `day.py` (D4): `"wsimod.nutrient_pool"` (flat, `slot.shape = (5, 2)`), and the pool drivers through `driver_columns` (D16);
   - `classes.py`;
   - `run.py`: `"pull_storage_no_din"`;
   - `engine.py`: sites;
@@ -460,7 +498,7 @@ class GrowingSurface(PerviousSurface):
   - docs.
 
 **Interfaces:**
-- Consumes: `NutrientPool` (Task 4), `GrowingSurface` (Task 5), `Surface.dry_/wet_deposition_to_tank` and `forcing` (Task 3), `Tank.pull_storage` (3a).
+- Consumes: `NutrientPool` (Task 4), `GrowingSurface` and the crop state's layout (Tasks 5a, 5b), `Surface.dry_/wet_deposition_to_tank` and `forcing` (Task 3), `Tank.pull_storage` (3a).
 - Produces:
 
 ```python
@@ -474,7 +512,7 @@ class GrowingSurface:
     def dry_deposition_to_tank(self, vqip, *, active) -> Tensor                          # :2267-2288
     def wet_deposition_to_tank(self, vqip, *, active) -> Tensor                          # :2290-2311
 NUTRIENT_POLLUTANTS = ("ammonia", "nitrite", "nitrate", "phosphate", "org-nitrogen", "org-phosphorus", "solids", "temperature")
-# state "wsimod.nutrient_pool" (..., n_growing, 5, 2), rows (land, "surfaces.<s>.nutrient_pool"), unit kg
+# state "wsimod.nutrient_pool" flat (..., 10 * n_growing), rows (land, "surfaces.<s>.nutrient_pool", <pool>, <N|P>), unit kg (D4)
 # drivers "wsimod.<Class>.nutrient_pool.<p>" (..., n, 2), columns ("N", "P"); "...fraction_dry_n_to_dissolved_inorganic" (..., n)
 ```
 
@@ -493,6 +531,7 @@ NUTRIENT_POLLUTANTS = ("ammonia", "nitrite", "nitrate", "phosphate", "org-nitrog
     - a surface key `degrhpar` is refused in the configuration;
     - an override `{"degrhpar": ...}` is refused, naming `NutrientPool`.
   - `test_without_nitrate_there_is_no_pool`: no `"wsimod.nutrient_pool"` rows and no pool drivers, and dry deposition enters the tank whole.
+  - `test_the_pool_state_has_ten_labelled_rows` (D4): `state_labels("wsimod.nutrient_pool")` lists `("land", "surfaces.g.nutrient_pool", "fast_pool", "N")` first and `(…, "adsorbed_inorganic_pool", "P")` tenth, and a dump-then-load reproduces the engine's `(5, 2)` tensor exactly.
 - [ ] **Step 2:** Run `test_growing.py`. Expected: FAIL.
 - [ ] **Step 3:** Implement. The `din = 0` guard is the decision `S/pull_storage/no_din`, and the species go through safe denominators under its mask. `inflows += [effective_precipitation_flushing, fertiliser, manure]` (D20).
 - [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Regenerate the catalogue. Docs: the pool, its state and drivers, the pool–tank gap (L8), and "WSIMOD needs initial inorganic N or a non-zero first-month input" (Y48).
@@ -537,22 +576,20 @@ class GrowingSurface:
 - [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Docs: the factors' jump (L12, Y19), the nitrate-only removals (L9) and the tracking event (L10).
 - [ ] **Step 5:** Commit: `feat(wsimod): soil factors, transformation, crop uptake and denitrification`.
 
-### Task 8: Erosion and adsorption (`land.py:1928-2094`, `:2154-2265`)
+### Task 8a: Erosion (`land.py:1928-2094`)
 
-**Implementer:** most capable (the unrolled Newton loop and its lagged test, erosion's operand order).
+**Implementer:** most capable (erosion's operand order, its four switches and the pool split).
 
 **Files:**
-- Modify: `src/noodl/apps/wsimod/growing.py`, `run.py` (D10), `engine.py`, `tests/verification/_wsimod_parity.py` (`_UNDATED`, D10), `tests/apps/wsimod/test_growing.py`, docs.
+- Modify: `src/noodl/apps/wsimod/growing.py`, `run.py` (`"erosion_pool_short"`, D10), `engine.py`, `tests/verification/_wsimod_parity.py` (`_UNDATED["erosion_pool_short"]`, D10), `tests/apps/wsimod/test_growing.py`, docs.
 
 **Interfaces:**
-- Consumes: `NutrientPool.get_erodable_P`, `erode_P`, `extract`, `receive` (Task 4); `CalendarDay.erosion_sine` (Task 5); `log_python`, `log10_python`, `sin_python` (Task 1); `exp_python`, `pow_python`.
+- Consumes: `NutrientPool.get_erodable_P`, `erode_P` (Task 4); `CalendarDay.erosion_sine` (Task 5a); `log10_python`, `sin_python` (Task 1); `pow_python`.
 - Produces:
 
 ```python
 class GrowingSurface:
-    adsorption_nr_maxiter: int                                                # structural (D17)
     def erosion(self, *, active) -> tuple[Tensor, Tensor]                     # :1928-2094; adds to ie/ss/perc
-    def adsorption(self, *, active) -> tuple[Tensor, Tensor]                  # :2154-2265; Y25 unrolled
 ```
 
 - [ ] **Step 1: Write the failing tests** (`importorskip` where WSIMOD is driven):
@@ -564,6 +601,30 @@ class GrowingSurface:
 
     The three outflow VQIPs (their `solids`, `phosphate` and `org-phosphorus`), the pools and `in_` are equal. `erodingflow = 0` returns empty. The short pool records `"erosion_pool_short"` on exactly the draws where WSIMOD prints "weird nutrients" (captured with `capsys`).
   - `test_erosion_uses_the_raw_day_in_its_sine`: on 2003-03-01, the sine is `math.sin(2 * 3.141592653589793 * ((60 - 70) / 365))`, with the raw day 60, not the adjusted 59.
+  - `test_gradcheck_on_one_erosion_call`: away from the guards, with respect to `erodibility`, `sreroexp`, `srfilt` and the pools.
+- [ ] **Step 2:** Run `test_growing.py`. Expected: FAIL.
+- [ ] **Step 3:** Implement. `** sreroexp` and `** 1.3` use `pow_python`, the `log10` uses `log10_python`, and `sin(slope / 100)` uses `sin_python`. The decisions are `rain`, `runoff`, `transport`, `enrichment_cap`, `flow` and `phosphorus`. Insert `erosion` into `processes` between `calc_crop_uptake` and `denitrification` (D20).
+- [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Docs: erosion's quirks (the eroded masses bypass the tank; the raw day) and its event.
+- [ ] **Step 5:** Commit: `feat(wsimod): the growing surface's erosion`.
+
+### Task 8b: Adsorption (`land.py:2154-2265`)
+
+**Implementer:** most capable (the unrolled Newton loop and its lagged test).
+
+**Files:**
+- Modify: `src/noodl/apps/wsimod/growing.py`, `run.py` (`"adsorption_shortcut"`, `"freundlich_flow_adjusted"`, D10), `engine.py`, `tests/verification/_wsimod_parity.py` (`_UNDATED["adsorption_shortcut"]`, D10), `tests/apps/wsimod/test_growing.py`, docs.
+
+**Interfaces:**
+- Consumes: `NutrientPool.extract`, `receive` (Task 4); `_pull_tracked` (Task 7); `log_python` (Task 1); `exp_python`, `pow_python`.
+- Produces:
+
+```python
+class GrowingSurface:
+    adsorption_nr_maxiter: int                                                # structural (D17)
+    def adsorption(self, *, active) -> tuple[Tensor, Tensor]                  # :2154-2265; Y25 unrolled
+```
+
+- [ ] **Step 1: Write the failing tests** (`importorskip` where WSIMOD is driven):
   - `test_adsorption_equals_wsimods` (parametrised):
     - the empty pool (`pool_ == 0`);
     - the shortcut (`ads.P = 0`), where `"adsorption_shortcut"` is true and WSIMOD prints its warning;
@@ -576,54 +637,80 @@ class GrowingSurface:
   - `test_the_newton_test_lags_one_iteration`: on a crafted case, WSIMOD's loop and noodl's both run `k + 1` passes, where the residual was below `limit` after `k`. The count is asserted from the decisions.
   - `test_a_short_pool_records_freundlich_flow_adjusted` (L11): a request above `DI.P` (adsorption) or `ads.P` (desorption) gives the event true, and WSIMOD prints nothing.
   - `test_a_batch_of_newton_exits_equals_its_single_calls` (Review Focus 1): four instances exit by residual, by step, by `maxiter`, and by the shortcut. Each is bitwise equal to its single call.
-  - `test_gradcheck_on_one_adsorption_and_one_erosion_call`: a fixed iteration count, away from the guards, with respect to `kfr`, `nfr`, `kadsdes`, the pools, `erodibility`, `sreroexp` and `srfilt`.
-  - `test_the_adsorption_limit_has_zero_gradient`: the gradient with respect to `adosorption_nr_limit` is exactly 0.
+  - `test_gradcheck_on_one_adsorption_call`: a fixed iteration count, away from the guards, with respect to `kfr`, `nfr`, `kadsdes` and the pools.
+  - `test_the_adsorption_limit_has_zero_gradient`: `adosorption_nr_limit` enters only comparisons, so its gradient (`allow_unused=True`) satisfies `grad is None or torch.equal(grad, torch.zeros_like(grad))`.
 - [ ] **Step 2:** Run `test_growing.py`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
-  - Each power uses `pow_python`, `log10` uses `log10_python`, `sin(slope / 100)` uses `sin_python`, `log(conc_sol)` and `log(kfr)` use `log_python`, and `exp` uses `exp_python`.
+  - `log(conc_sol)` and `log(kfr)` use `log_python`, `exp` uses `exp_python`, and every power uses `pow_python`.
   - The Newton loop runs `adsorption_nr_maxiter` iterations under `running = active & ~shortcut & (abs(fxn) > limit)`. The `break` and `xn_1 ≤ 0` are masks inside the iteration. A stopped instance keeps `xn`, `xn_1` and `fxn` (`write`).
-  - Append `erosion` and `adsorption` to `processes` (D20).
-- [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Docs: erosion's quirks (eroded masses bypass the tank; raw day), the Newton lag, the shortcut and the two events.
-- [ ] **Step 5:** Commit: `feat(wsimod): erosion and Freundlich adsorption with an unrolled Newton loop`.
+  - Append `adsorption` to `processes`, last (D20).
+- [ ] **Step 4:** Run the wsimod subset. Expected: PASS. Docs: the Newton lag, the shortcut and the two events.
+- [ ] **Step 5:** Commit: `feat(wsimod): Freundlich adsorption with an unrolled Newton loop`.
 
-### Task 9: The growing cases, the land replay and the print admission (Y3, Y35, Y41, Y45, Y48)
+### Task 9a: The growing cases at parity, and the pool-gap tests (Y3, Y45)
 
-**Implementer:** most capable (cases that reach every branch within the default horizon, and the admission's measurement).
+**Implementer:** most capable (cases that reach every branch within the default horizon).
 
 **Files:**
 - Modify:
-  - `tests/verification/_wsimod_cases.py`: the cases below, and `Case.crash` on the crash cases;
+  - `tests/verification/_wsimod_cases.py`: `growing_spring`, `growing_autumn`, `growing_decay`;
   - `tests/verification/_wsimod_reference.py`: the capture of the factors, `crop_factor` and `et0_coefficient` before and after each `Land.run`;
   - `tests/apps/wsimod/_replay.py`;
-  - `tests/verification/_wsimod_parity.py`: `store_bounded_prints`, D12;
-  - `tests/verification/test_wsimod_parity.py`: `GROWING_PRINT_C`, the branch test, L8, L9;
+  - `tests/verification/test_wsimod_parity.py`: L8, L9 and L1;
   - `tests/verification/test_wsimod_replay.py`;
   - docs: the verification rows.
 
 **Interfaces:**
-- Consumes: every growing function (Tasks 5–8), `wsimod_until_crash` and `Case.crash` (Task 5), `Case.slow_days` (3b).
-- Produces: `assert_matches_wsimod(..., store_bounded_prints: Mapping[str, float] = {})` (D12); `GROWING_PRINT_C: int`; the cases `growing_spring`, `growing_autumn`, `growing_decay`, `growing_no_din`, `growing_zero_n`, `growing_nitrite_only` and `growing_empty_soil`.
+- Consumes: every growing function (Tasks 5a–8b), `Case.slow_days` (3b).
+- Produces: the cases `growing_spring`, `growing_autumn` and `growing_decay`.
 
 - [ ] **Step 1: Write the cases** (spec, Verification 3; D21):
   - `growing_spring`: one `GrowingSurface` (sowing 90, harvest 250, `ET_depletion_factor = 0.5`, five-point `crop_factor_stages`), with fertiliser and manure data, dry and wet deposition, `initial_soil_storage`, and the eight pollutants. It runs for `days=540` with `slow_days=1096`, and `replay=("land",)`. The forcing has rain above 5 mm with runoff, dry spells that stress the crop, and soil temperatures below 0, in `(0, 5]` and above 5 °C, all within the first 540 days.
   - `growing_autumn`: sowing 280, harvest 200, a season crossing the new year, and the autumn uptake temperature function.
   - `growing_decay`: the full 12 pollutants and `decays` on ammonia and nitrite. `"nutrient_pool_not_tracking"` is true on some day.
-  - The crash cases (D13):
-    - `growing_no_din`: `("ZeroDivisionError", "land.py:1460")`, a zero-N tank, no deposition, rain on day 0;
-    - `growing_zero_n`: `(…, "land.py:1758")`, a zero-N tank with zero first-month inputs, crashing on day 0;
-    - `growing_nitrite_only`: `(…, "land.py:1758")`;
-    - `growing_empty_soil`: `(…, "land.py:1899")`, `ET_depletion_factor = 0.5`, an empty soil and a sown crop.
 - [ ] **Step 2: Write the tests:**
-  - The generic `test_case_matches_wsimod[<case>-<mode>]`, `test_case_matches_wsimod_on_its_slow_days[growing_spring-*]` (slow), `test_replay_matches_wsimod[<case>-land]`, `test_quantity_only_equals_the_pollutant_run_volumes[<case>]`, the mass-balance test, and the parts test of Task 1 all run on the three cases. The parity calls pass `store_bounded_prints={"land": GROWING_PRINT_C}` where measured.
-  - `test_growing_spring_reaches_every_branch` (`slow`). From the decisions, on the 540-day prefix and on the full horizon, each transformation, uptake, erosion, denitrification and adsorption site of the vocabulary is active at least once, with both outcomes where it has two, and so is each factor branch.
+  - The generic `test_case_matches_wsimod[<case>-<mode>]`, `test_case_matches_wsimod_on_its_slow_days[growing_spring-*]` (slow), `test_replay_matches_wsimod[<case>-land]`, `test_quantity_only_equals_the_pollutant_run_volumes[<case>]`, the mass-balance test, and the parts test of Task 1 all run on the three cases.
+  - Some pollutant-mode parity items may fail only on WSIMOD's round-off "mass balance error" lines (Y35). Mark each such item `pytest.mark.xfail(strict=True, reason="the Y41 admission is Task 9b")`, as in 3b's D1, and list them in the progress file. Any other failure is a defect.
   - `test_the_pools_are_flushed_twice` (L8, Y45): on `growing_spring`, noodl's daily tank–pool gap (`tank phosphate − DI.P − DO.P`, and the N analogue) equals WSIMOD's from the replay capture, bitwise. The test asserts that the gap is non-zero; it asserts no hard-coded ratio.
   - `test_the_tank_columns_keep_their_sign` (L9): on `growing_spring` and `growing_decay`, it records whether any tank column went negative, asserts the same answer from WSIMOD's capture, and writes that answer into the assertion message.
   - `test_growing_spring_spans_the_leap_shift` (L1): the run's dates include 2004-02-29 and two common-year 1 March days, and `crop_factor` equals WSIMOD's on each.
-  - `test_case_runs_where_wsimod_crashes[<case>]` (D13) over the four crash cases and `growing_default_depletion`.
-  - `test_the_store_bounded_prints[<case>]`: a mapped case's admitted lines satisfy D12's bound. A case whose measured count is zero is not mapped, and its parity call proves zero lines.
+  - `test_the_growing_cases_exercise_what_they_are_named_for`: `growing_autumn` reaches the autumn `temp_func` and `days_after_sow − 25`, and `growing_decay` raises `"nutrient_pool_not_tracking"`.
+- [ ] **Step 3:** Run the wsimod subset, and `-m slow` on `test_wsimod_parity.py test_wsimod_replay.py`. Expected: PASS, bitwise, apart from the strict xfails above. Add the cases to the listed-features test. Docs: the verification rows.
+- [ ] **Step 4:** Commit: `test(wsimod): growing-surface cases against WSIMOD`.
+
+### Task 9b: The crash cases, branch coverage and the print admission (Y35, Y41, Y48)
+
+**Implementer:** most capable (the crash recipes and the admission's measurement).
+
+**Files:**
+- Modify:
+  - `tests/verification/_wsimod_cases.py`: the four crash cases;
+  - `tests/verification/_wsimod_parity.py`: `store_bounded_prints` (D12);
+  - `tests/verification/test_wsimod_parity.py`: `GROWING_PRINT_C`, the branch test, the crash parametrisation; Task 9a's xfail marks are removed;
+  - docs: the verification rows and the admission.
+
+**Interfaces:**
+- Consumes: Task 9a's cases; `wsimod_until_crash` and `Case.crash` (Task 5b).
+- Produces: `assert_matches_wsimod(..., store_bounded_prints: Mapping[str, float] = {})` (D12); `GROWING_PRINT_C: int`; the cases `growing_no_din`, `growing_zero_n`, `growing_nitrite_only` and `growing_empty_soil`.
+
+- [ ] **Step 1: Write the crash cases** (D13). Every one uses the eight pollutants, a 2003-10-01 start (raw day 274) and a zero-N tank. The call order decides which division fires first, so each recipe is exact:
+
+  | Case | `crash` | Recipe | Crash day |
+  |---|---|---|---|
+  | `growing_no_din` | `("ZeroDivisionError", "land.py:1460")` | `V > 0`; no deposition; zero first-month fertiliser and manure; **rain on day 0**, so that `ihacres` pulls through the soil (`:985-996`) | 0 |
+  | `growing_zero_n` | `("ZeroDivisionError", "land.py:1758")` | `V > 0`; no deposition; zero first-month inputs; **no rain on day 0** | 0 |
+  | `growing_nitrite_only` | `("ZeroDivisionError", "land.py:1758")` | as `growing_zero_n`, with the tank holding only nitrite | 0 |
+  | `growing_empty_soil` | `("ZeroDivisionError", "land.py:1899")` | `V = 0`; `ET_depletion_factor = 0.5`; **dry deposition on**, which supplies tank N at volume 0 (call order 2); `sowing_day = 274`, so `days_after_sow > 0` on day 1; no rain | 1 |
+
+  D13's "days before the crash day" parity is non-vacuous only for `growing_empty_soil` (day 0) and `growing_default_depletion` (Task 5b). Each case asserts its crash day.
+- [ ] **Step 2: Write the tests:**
+  - `test_case_runs_where_wsimod_crashes[<case>]` (D13) over the four cases and `growing_default_depletion`.
+  - `test_growing_spring_reaches_every_branch` (`slow`). From the decisions, on the 540-day prefix and on the full horizon, each transformation, uptake, erosion, denitrification and adsorption site of the vocabulary is active at least once, with both outcomes where it has two, and so is each factor branch.
+  - `test_the_store_bounded_prints[<case>]`: a mapped case's admitted lines satisfy D12's bound, and a volume line is never admitted. A case whose measured count is zero is not mapped, and its parity call proves zero lines.
+  - Remove Task 9a's xfail marks. The parity calls pass `store_bounded_prints={"land": GROWING_PRINT_C}` where measured.
 - [ ] **Step 3: Measure (D12).** For each case, compute `max |x| / (ε S)` over its printed lines and record it in the progress file. Set `GROWING_PRINT_C` to the ceiling of the maximum, with the per-case values in its comment. If it exceeds 4, stop and report the cause before setting it.
-- [ ] **Step 4:** Run the wsimod subset, and `-m slow` on `test_wsimod_parity.py test_wsimod_replay.py`. Expected: PASS, bitwise. Run `--durations=30` and record the 3c items; cut a default horizon if any is among the 30 slowest. Add the cases to the listed-features test. Docs: the verification rows with measured values, the admission and its `c`.
-- [ ] **Step 5:** Commit: `test(wsimod): growing-surface cases against WSIMOD, every branch and the crash rows`.
+- [ ] **Step 4:** Run the wsimod subset, and `-m slow` on `test_wsimod_parity.py test_wsimod_replay.py`. Expected: PASS, with no xfail left (`git grep -n "is Task 9b" tests` is empty). Run `--durations=30` and record the 3c items; cut a default horizon if any is among the 30 slowest. Docs: the crash rows, the admission and its `c`.
+- [ ] **Step 5:** Commit: `test(wsimod): crash cases, branch coverage and the store-bounded print admission`.
 
 ### Task 10: Batches, stepping, state and quantity-only structure (3c-i)
 
@@ -636,9 +723,13 @@ class GrowingSurface:
 - Consumes: every 3c-i class, driver and state key (Tasks 2–9); `initial_state` and `initial_drivers` (3a, D4).
 
 - [ ] **Step 1: Write the tests:**
-  - `test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs[growing_spring|surface_deposition]` (first 100 days). Four instances with different `kfr`, `uptake1`, `ET_depletion_factor`, `crop_factor_stages`, a pool rate, and a fertiliser forcing column. On some day the decisions show two instances taking different Newton iteration counts and different uptake caps (Review Focus 1). Each instance equals its single run.
+  - `test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs[growing_spring|surface_deposition]` (first 100 days), with four instances whose varied drivers depend on the case:
+    - on `growing_spring`: `kfr`, `uptake1`, `ET_depletion_factor`, `crop_factor_stages`, a pool rate and a fertiliser forcing column. On some day the decisions show two instances taking different Newton iteration counts and different uptake caps (Review Focus 1);
+    - on `surface_deposition`: `pollutant_load` (phosphate), one deposition forcing column and `area`, with no Newton assertion.
+
+    Each instance equals its single run.
   - `test_step_by_step_equals_wsimod_run[growing_spring]` (60 days): the new state keys are carried through `model.step`.
-  - `test_the_3c_state_round_trips`. `initial_state(values=...)` set by label on `"wsimod.nutrient_pool"` (D4's nested form), `"wsimod.days_after_sow"`, `"wsimod.crop_cover"` and `"wsimod.ground_cover"` reaches day 0.
+  - `test_the_3c_state_round_trips`. `initial_state(values=...)` set by label on `"wsimod.nutrient_pool"` (one row per pool and nutrient, D4), `"wsimod.days_after_sow"`, `"wsimod.crop_cover"` and `"wsimod.ground_cover"` reaches day 0.
   - `test_a_warm_start_mid_season_crosses_the_harvest` (Review Focus 4): run `growing_spring` for 300 days (to 2004-07-26, mid-season, `days_after_sow > 0`), then warm-start a second model at day 300 from the last state. Its next 60 days cross the harvest (raw day 250, 2004-09-06, run day 341). The continuation equals days 300–360 of one 360-day run, `torch.equal`, and `days_after_sow == −1` after the harvest day.
   - `test_quantity_only_volumes_never_depend_on_3c_pollutant_values`: on `growing_spring` and `surface_deposition`, vary every driver a quantity-only run lists as ignored (the pool rates, uptake, erosion, adsorption, denitrification, and the deposition, fertiliser and manure forcing). The volumes are `torch.equal`.
   - `test_quantity_only_lists_the_3c_parameters`: those names are in `model.ignored_by_quantity_only`. `ET_depletion_factor`, `rooting_depth` and `crop_factor_stages` are not.
@@ -669,7 +760,7 @@ class GrowingSurface:
   | `pollutant_load` (phosphate) | `surface_deposition` | the out-arc phosphate |
   | the Land's `temperature` forcing | `growing_spring`, a window in 6–20 °C | the final `DI.N`, through `tdf` |
 
-  `test_the_adsorption_limit_gradient_is_zero_through_a_run`: `adosorption_nr_limit`'s gradient on `growing_spring` is exactly 0. Mark slow any entry whose run exceeds 10 s, as 3a's `SLOW` set does.
+  `test_the_adsorption_limit_gradient_is_zero_through_a_run`: `adosorption_nr_limit`'s gradient on `growing_spring` (`allow_unused=True`) satisfies `grad is None or torch.equal(grad, torch.zeros_like(grad))`. Mark slow any entry whose run exceeds 10 s, as 3a's `SLOW` set does.
 - [ ] **Step 2:** Run them, and `-m slow`. Expected: PASS. Record the worst relative agreement per parameter in the progress file.
 - [ ] **Step 3:** Commit: `test(wsimod): gradients through the growing surface and its pool`.
 
@@ -689,7 +780,7 @@ class GrowingSurface:
   - docs: `docs/formats/wsimod.md`.
 
 **Interfaces:**
-- Consumes: `SurfaceSpec.constructed_variables`/`constructed_load` (Task 3), `_read_csv`, `_inline_data` (3a), the growing overrides (Task 5).
+- Consumes: `SurfaceSpec.constructed_variables`/`constructed_load` (Task 3), `_read_csv`, `_inline_data` (3a), the growing overrides (Task 5a).
 - Produces: `_apply_overrides(..., surface=True)` replaces `SurfaceSpec.data` with the override's data (`land.py:413-421`).
 
 - [ ] **Step 1: Write the failing tests:**
@@ -718,7 +809,7 @@ class GrowingSurface:
   - `src/noodl/apps/wsimod/growing.py`: `IrrigationSurface`;
   - `land.py`: `Land.apply_irrigation`, `store_paths_of`;
   - `classes.py`: `_CONSTRUCTORS`, `_OVERRIDES` (`irrigation_coefficient`), `SURFACE_SCHEMAS`, `OUT_OF_SCOPE`;
-  - `day.py`: `"wsimod.surface_climate"` (D4, D5);
+  - `day.py`: `"wsimod.surface_climate"` (flat, `slot.shape = (2,)`; D4, D5);
   - `engine.py`: sites;
   - `tests/verification/_wsimod_reference.py`: the capture of `Land.apply_irrigation` with its pulls and replies, and `surface_climate`;
   - `tests/apps/wsimod/_replay.py`;
@@ -727,7 +818,7 @@ class GrowingSurface:
   - docs.
 
 **Interfaces:**
-- Consumes: `GrowingSurface` and the pool (Tasks 5–6), `Node.pull_distributed` (3a), D6's `crop` decision.
+- Consumes: `GrowingSurface`, the crop state and the pool (Tasks 5a–6), `Node.pull_distributed` (3a), D6's `crop` decision.
 - Produces:
 
 ```python
@@ -736,7 +827,7 @@ class IrrigationSurface(GrowingSurface):
     def irrigate(self, *, active: Tensor) -> None          # land.py:2347-2381; pool update only with nitrate (Y20)
 class Land:
     def apply_irrigation(self, *, active: Tensor) -> None  # every IrrigationSurface.irrigate in surface order
-# state "wsimod.surface_climate" (..., n_climate, 2), columns evaporation, precipitation, unit m3
+# state "wsimod.surface_climate" flat (..., 2 * n_climate), rows (land, "surfaces.<s>", "evaporation"|"precipitation"), unit m3 (D4)
 # driver "wsimod.IrrigationSurface.irrigation_coefficient" (..., n), default 0.1
 IRRIGATION_TYPES = ("River", "Node", "Groundwater", "Reservoir")
 ```
@@ -745,7 +836,7 @@ IRRIGATION_TYPES = ("River", "Node", "Groundwater", "Reservoir")
   - `test_irrigate_equals_wsimods` (`importorskip`): a WSIMOD `IrrigationSurface` whose parent has a scripted `pull_distributed`. It covers days before sowing, the sowing day (no irrigation), dry days with demand, saturated days (`cmd ≤ FA`: demand 0, and a zero-volume pull is still made), and a supply carrying nutrients. Storage, pools and the pull requests are equal.
   - `test_irrigation_without_nitrate_leaves_the_pool_alone` (L13, Y20).
   - `test_irrigated_nitrite_enters_the_tank_and_not_the_pool`.
-  - `test_the_climate_is_carried` (D5): `apply_irrigation` before `Land.run` reads the previous day's flows (0 on day 0), and `state_labels("wsimod.surface_climate")` holds `("land", "surfaces.irr")`.
+  - `test_the_climate_is_carried` (D5): `apply_irrigation` before `Land.run` reads the previous day's flows (0 on day 0), and `state_labels("wsimod.surface_climate")` holds `("land", "surfaces.irr", "evaporation")` and `("land", "surfaces.irr", "precipitation")`.
   - `test_irrigation_coefficient_override_equals_wsimods`.
   - Cases:
     - `irrigation`: an `IrrigationSurface` fed by a `River`, a `Groundwater` and a `Reservoir` through the `Land`'s in-arcs (spec, Verification 3), with `replay=("land",)`;
@@ -802,7 +893,7 @@ class GardenSurface(GrowingSurface):
 - Modify: `src/noodl/apps/wsimod/growing.py`, `classes.py` (`OUT_OF_SCOPE` keeps only `EnfieldFoulSewer`; `current_surface_area` is a constructor keyword, refused as an override, Y50), `tests/verification/_wsimod_cases.py` (case `variable_area`), `tests/apps/wsimod/test_growing.py`, `test_config.py`, docs.
 
 **Interfaces:**
-- Consumes: `PerviousSurface.get_climate()` (Task 5), erosion's unscaled rain (Task 8).
+- Consumes: `PerviousSurface.get_climate()` (Task 5a), erosion's unscaled rain (Task 8a).
 - Produces:
 
 ```python
@@ -837,7 +928,11 @@ class VariableAreaSurface(GrowingSurface):
 - [ ] **Step 1: Write the tests:**
   - `test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs` gains `[irrigation|garden|variable_area]`, with different `irrigation_coefficient`, `gardening_efficiency` and `current_surface_area`.
   - `test_step_by_step_equals_wsimod_run` gains `[irrigation|garden]`.
-  - `test_the_climate_state_round_trips`: `initial_state(values={"wsimod.surface_climate": {("land", "surfaces.irr"): {"evaporation": 3.0, "precipitation": 1.0}}})` sets day 0's garden demand or irrigation to `max(3 − 1, 0) …`, equal to a run warm-started from a state holding those flows.
+  - `test_the_climate_state_round_trips[irrigation_early|garden]`. In the default orchestration `Land.run` overwrites the flows before `irrigate` reads them, so only these two cases read the carried value on day 0. `initial_state(values={"wsimod.surface_climate": {("land", "surfaces.<s>", "evaporation"): 3.0, ("land", "surfaces.<s>", "precipitation"): 1.0}})` then gives:
+    - on `irrigation_early`, a day-0 demand of `max(3 − 1, 0) * irrigation_coefficient`;
+    - on `garden`, a day-0 check that answers `2.0`.
+
+    Each equals a run warm-started from a state holding those flows.
   - Gradient `Spec` entries:
     - `irrigation_coefficient` on `irrigation` (the soil storage);
     - `current_surface_area` on `variable_area` (the out-arc volume);
@@ -895,72 +990,84 @@ class VariableAreaSurface(GrowingSurface):
 
 | Row | noodl | Test (task) |
 |---|---|---|
-| L1 leap test always true | reproduced | `test_every_year_shifts_the_day_after_february` (5); `test_growing_spring_spans_the_leap_shift` (9) |
-| L2 unsorted calendar | reproduced | `test_an_autumn_calendar_has_no_cover_all_year`, `test_calc_crop_cover_equals_wsimods_every_day` (5); `growing_autumn` (9) |
-| L3 `Ks` zero denominator | `Ks = 0`, event | `test_the_stress_zero_denominator_gives_zero` (5); `growing_default_depletion` crash (5, 9) |
-| L4 `TAW ≤ 0` | refused | `test_growing_refusals[wilting_point>|=]` (5) |
-| L5 `pull_storage` `din = 0` | species 0, event | `test_pull_storage_without_din_gives_no_species` (6); `growing_no_din` (9) |
-| L6 transformation `nitrate + ammonia = 0` | proportion 0, event | `test_soil_pool_transformation_equals_wsimods` (7); `growing_zero_n`, `growing_nitrite_only` (9) |
-| L7 uptake `V = 0` | 0, event | `test_crop_uptake_from_an_empty_soil_is_zero` (7); `growing_empty_soil` (9) |
-| L8 double flush | reproduced | `test_flushing_extracts_the_outflows_again` (6); `test_the_pools_are_flushed_twice` (9) |
-| L9 nitrate-only removals, bypasses | reproduced, event | `growing_spring`, `growing_decay`, `test_the_tank_columns_keep_their_sign` (9) |
+| L1 leap test always true | reproduced | `test_every_year_shifts_the_day_after_february` (5a); `test_growing_spring_spans_the_leap_shift` (9a) |
+| L2 unsorted calendar | reproduced | `test_an_autumn_calendar_has_no_cover_all_year`, `test_calc_crop_cover_equals_wsimods_every_day` (5a); `growing_autumn` (9a) |
+| L3 `Ks` zero denominator | `Ks = 0`, event | `test_the_stress_zero_denominator_gives_zero` (5a); `growing_default_depletion` crash (5b, 9b) |
+| L4 `TAW ≤ 0` | refused | `test_growing_refusals[wilting_point>|=]` (5a) |
+| L5 `pull_storage` `din = 0` | species 0, event | `test_pull_storage_without_din_gives_no_species` (6); `growing_no_din` (9b) |
+| L6 transformation `nitrate + ammonia = 0` | proportion 0, event | `test_soil_pool_transformation_equals_wsimods` (7); `growing_zero_n`, `growing_nitrite_only` (9b) |
+| L7 uptake `V = 0` | 0, event | `test_crop_uptake_from_an_empty_soil_is_zero` (7); `growing_empty_soil` (9b) |
+| L8 double flush | reproduced | `test_flushing_extracts_the_outflows_again` (6); `test_the_pools_are_flushed_twice` (9a) |
+| L9 nitrate-only removals, bypasses | reproduced, event | `growing_spring`, `growing_decay`, `test_the_tank_columns_keep_their_sign` (9a) |
 | L10 dead tracking check | event | `test_a_clamped_pull_records_the_event` (7) |
-| L11 reversed Freundlich test | event | `test_a_short_pool_records_freundlich_flow_adjusted` (8) |
+| L11 reversed Freundlich test | event | `test_a_short_pool_records_freundlich_flow_adjusted` (8b) |
 | L12 `T/5` factor | reproduced | `test_the_soil_factors_equal_wsimods` (7) |
 | L13 irrigation reads five keys | pool only with nitrate | `test_irrigation_without_nitrate_leaves_the_pool_alone`, `irrigation_without_nutrients` (13) |
 | L14 load override ignored, shared default | per surface, unread | `test_a_load_override_without_a_load_is_unread`, `surface_overrides` (12) |
 | L15 data override not rebuilt | unread; removal refused | `test_deposition_data_added_by_override_are_unread`, `test_surface_override_refusals` (12) |
 | L16 float `initial_soil_storage` | refused | `test_initial_soil_storage_refusals` (6) |
-| L17 `depth` on a growing surface | refused | `test_growing_refusals[depth]` (5) |
+| L17 `depth` on a growing surface | refused | `test_growing_refusals[depth]` (5a) |
 | L18 two gardens | last one; unread | `test_the_last_garden_takes_the_handlers`, `garden` (14) |
 | L19 garden water at 0 °C | reproduced | `test_the_garden_water_is_at_zero_degrees`, `garden` (14) |
 | L20 pool parameters unreachable | drivers; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` (6) |
 | L21 `allocate_residue` | not ported; data refused | `test_surface_data_refusals[residue]` (3) |
-| L22 overwritten `et0_coefficient` | unread | `test_a_growing_et0_coefficient_is_unread` (5) |
-| L23 `quick_interp` wrap and crash | wrap reproduced; crash refused | `test_quick_interp_equals_wsimods`, `test_calendar_refusals` (5) |
+| L22 overwritten `et0_coefficient` | unread | `test_a_growing_et0_coefficient_is_unread` (5a) |
+| L23 `quick_interp` wrap and crash | wrap reproduced; crash refused | `test_quick_interp_equals_wsimods`, `test_calendar_refusals` (5a) |
 | L24 erosion needs `solids` | refused | `test_nitrate_needs_the_eight_pollutants[solids]` (6) |
 | L25 dry without wet | refused | `test_surface_data_refusals[nhx-wet]` (3) |
-| L26 dead store | not ported | the `calc_crop_cover` docstring (5) |
+| L26 dead store | not ported | the `calc_crop_cover` docstring (5a) |
 
 ## Self-review
 
 - **Spec coverage, by section.**
-  - Goal and Scope › In: deposition (3); `GrowingSurface` (5–8); `NutrientPool` (4); `IrrigationSurface` and `Land.apply_irrigation` (13); `GardenSurface` and the `Demand` handlers (14); `VariableAreaSurface` (15); `Tank.pull_pollutants` (1); the surface `data_input_dict` override (12).
+  - Goal and Scope › In: deposition (3); `GrowingSurface` (5a–8b); `NutrientPool` (4); `IrrigationSurface` and `Land.apply_irrigation` (13); `GardenSurface` and the `Demand` handlers (14); `VariableAreaSurface` (15); `Tank.pull_pollutants` (1); the surface `data_input_dict` override (12).
   - Scope › Out: residue (3, L21); `NutrientPool.apply_overrides` (6, L20); `RiparianBuffer` (1, Y10); `change_impervious_area` (not touched).
-  - The refusal table, each row: `classes.py:416-420` (5, 13–15); `config.py:332-339` (12); the `land.py` deposition rows (2, 3); the garden rows (14); `apply_irrigation` (13); `storage.py:896`, `:1079-1085` (1); the docs, fixtures and script rows (2, 17); the test rows (1, 2, 3, 5, 12). Task 17's grep closes the table.
-  - Approach rules 1–6: Global Constraints; D3 (1); D7 (5); the structural switches (D9, D17, D20); the `(5, 2)` pool (4, D4); the unrolled Newton loop (8); integer zeros (4, 7).
-  - The equations, in sections: deposition (3); construction (5, 6); call order (5–8, D20; pinned by `growing_spring`, 9); `calc_crop_cover` and `quick_interp` (5); `pull_storage` (6); flushing, fertiliser and manure (6); transformation, factors, uptake and denitrification (7); erosion and adsorption (8); irrigation (13); garden (14); variable area (15).
+  - The refusal table, each row: `classes.py:416-420` (5a, 13–15); `config.py:332-339` (12); the `land.py` deposition rows (2, 3); the garden rows (14); `apply_irrigation` (13); `storage.py:896`, `:1079-1085` (1); the docs, fixtures and script rows (2, 17); the test rows (1, 2, 3, 5a, 12). Task 17's grep closes the table.
+  - Approach rules 1–6: Global Constraints; D3 (1); D7 (5a); the structural switches (D9, D17, D20); the `(5, 2)` pool (4, D4); the unrolled Newton loop (8b); integer zeros (4, 7).
+  - The equations, in sections: deposition (3); construction (5a, 6); call order (5a–8b, D20; pinned by `growing_spring`, 9a); `calc_crop_cover` and `quick_interp` (5a); `pull_storage` (6); flushing, fertiliser and manure (6); transformation, factors, uptake and denitrification (7); erosion (8a) and adsorption (8b); irrigation (13); garden (14); variable area (15).
   - The rest:
-    - State (4, 5, 6, 13; D4, D5);
-    - Inputs (3, 5, 6, 13, 15; D8, D16, D17);
-    - Mass balance (1, D11; the parts tests in 1 and 9);
-    - Interaction › Classes (D2), Validation (3, 5, 6, 12; D18), Loading (5, 12), Vocabulary and events (each task; D10), the harness (3, 5, 6, 9, 13, 14), the demos (2);
+    - State (5b, 6, 13; D4, D5);
+    - Inputs (3, 5a, 5b, 6, 13, 15; D8, D16, D17);
+    - Mass balance (1, D11; the parts tests in 1 and 9a);
+    - Interaction › Classes (D2), Validation (3, 5a, 6, 12; D18), Loading (5a, 12), Vocabulary and events (each task; D10), the harness (3, 5b, 6, 9a, 9b, 13, 14), the demos (2);
     - Defects (the table above);
-    - Differentiability (gradchecks in 1, 4, 5–8; the gradient tasks 11 and 16; docs in 17);
-    - Verification 1 (4–8, 13–15), 2 (2, 9), 3 (3, 5, 9, 12–15), 4 (11, 16), refusals and structure (10, 16);
+    - Differentiability (gradchecks in 1, 4, 5a, 7, 8a, 8b; the gradient tasks 11 and 16; docs in 17);
+    - Verification 1 (4–8b, 13–15), 2 (2, 9a, 9b), 3 (3, 5b, 9a, 9b, 12–15), 4 (11, 16), refusals and structure (10, 16);
     - Delivery (D1);
     - Documentation (each task; 17).
 - **Rulings.**
-  - Scope and approach: Y1/Y9 (all tasks, grep in 17); Y2 (Global Constraints); Y3 (9 and the per-task cases); Y4 (the defect table); Y5/Y12 (5, 6, 13); Y6 (start point); Y7/Y31 (D1); Y8 (tiers).
-  - Y10–Y20: Y10 (1); Y11 (1, D11); Y13/Y42 (5, 17); Y14 (5, D7); Y15 (5, 9); Y16 (6, 7, 9); Y17/Y44 (5); Y18/Y46 (6, 7); Y19 (7); Y20 (13).
-  - Y21–Y30: Y21 (3, 12, D9); Y22 (12); Y23 (3, D8); Y24 (6); Y25 (8); Y26 (1, D3); Y27 (5, 6); Y28 (14); Y29 (14); Y30 (2).
-  - Y32–Y40: Y32 (5, D23); Y33 (5, D16); Y34 (D10); Y35/Y41 (9, D12); Y36 (3); Y37 (6); Y38 (2, 3); Y39 (5); Y40 (9, `growing_decay`).
-  - Y43–Y50: Y43 (3); Y45 (9); Y47 (5, D7); Y48 (6 docs, 9); Y49 (5, `growing_no_nitrate`); Y50 (Global Constraints: the end-of-day rule and torch.equal; Y50's `current_surface_area` clause in 15).
+  - Scope and approach: Y1/Y9 (all tasks, grep in 17); Y2 (Global Constraints); Y3 (9a, 9b and the per-task cases); Y4 (the defect table); Y5/Y12 (5b, 6, 13; D4 with the spec's State table amended); Y6 (start point); Y7/Y31 (D1); Y8 (tiers).
+  - Y10–Y20: Y10 (1); Y11 (1, D11); Y13/Y42 (5a, 17); Y14 (5a, D7); Y15 (5a, 9a); Y16 (6, 7, 9a); Y17/Y44 (5a); Y18/Y46 (6, 7); Y19 (7); Y20 (13).
+  - Y21–Y30: Y21 (3, 12, D9); Y22 (12); Y23 (3, D8); Y24 (6); Y25 (8b); Y26 (1, D3); Y27 (5a, 6); Y28 (14); Y29 (14); Y30 (2).
+  - Y32–Y40: Y32 (5b, D23); Y33 (5b, D16); Y34 (D10); Y35/Y41 (9b, D12); Y36 (3); Y37 (6); Y38 (2, 3); Y39 (5a); Y40 (9a, `growing_decay`).
+  - Y43–Y50: Y43 (3); Y45 (9a); Y47 (5b, D7); Y48 (6 docs, 9b); Y49 (5a, and `growing_no_nitrate` in 5b); Y50 (Global Constraints: the end-of-day rule and torch.equal; Y50's `current_surface_area` clause in 15).
 - **Type consistency.**
-  - `NutrientPool.extract(pool, amount, *, active, order)` is used by 6, 7 and 8 with the pool indices `FAST…ADS` of Task 4.
-  - `_pull_tracked` is defined in 7 and used in 7 and 8. Task 6 has no `pull_pollutants` call.
-  - `CalendarDay.erosion_sine` is produced in 5 and read in 8.
-  - `get_climate()` is introduced in 5 and overridden in 15.
-  - `Case.crash` and `wsimod_until_crash` are introduced in 5 and used in 9 and 13.
-  - `store_bounded_prints` is introduced and used in 9.
-  - `surface_climate` is introduced in 13 and extended in 14. `Land.store_paths_of(..., nutrients=)` is introduced in 5 and used by the harness from 5 on.
-  - `Ctx.part` and `PART_NAMES` are introduced in 1 and extended by 3, 6, 7 and 8.
-- **Proportion.** The plan is about 60 % of the spec's length and carries no function bodies, only signatures, the values the spec pins, test names and assertions.
+  - `NutrientPool.extract(pool, amount, *, active, order)` is used by 6, 7 and 8b, with the pool indices `FAST…ADS` of Task 4.
+  - `_pull_tracked` is defined in 7 and used in 7 and 8b. Task 6 has no `pull_pollutants` call.
+  - `CalendarDay.erosion_sine` is produced in 5a and read in 8a. `get_climate()` is introduced in 5a and overridden in 15.
+  - `Case.crash` and `wsimod_until_crash` are introduced in 5b and used in 9b and 13.
+  - `store_bounded_prints` is introduced and used in 9b. Task 9a's strict xfails name 9b, and 9b removes them.
+  - `Land.store_paths_of(..., nutrients=)` and the flat crop keys are introduced in 5b. The pool key follows in 6 and `surface_climate` in 13 (extended in 14), all in D4's flat layout with `slot.shape` `()`, `(5, 2)` and `(2,)`.
+  - `Ctx.part` and `PART_NAMES` are introduced in 1 and extended by 3, 6, 7, 8a and 8b.
+- **Review fixes (Fable plan review, findings 1–12).**
+  - 1: D4 is flat, and the spec's State table is amended in the same commit.
+  - 2: D7 and the `[365, 365]` row.
+  - 3: the crash recipes in 5b and 9b.
+  - 4: Tasks 5a/5b, 8a/8b and 9a/9b.
+  - 5: the D16 sentinel.
+  - 6: D12 covers additive pollutants only, with `S` including the residence tanks.
+  - 7: `test_gradcheck_on_quick_interp`, and the `harvest_day` row.
+  - 8: Task 16 names `irrigation_early` and `garden`.
+  - 9: Task 10's per-case drivers.
+  - 10: the `None`-tolerant zero gradients.
+  - 11: no torch-differs assertion.
+  - 12: the trailer names the implementer's model; the within-month sentence; "the first date that raises".
+- **Proportion.** The plan is about 60 % of the spec's length. It carries no function bodies: only signatures, the values the spec pins, test names and assertions.
 
 ## Spec gaps and contradictions (with the provisional decision)
 
 1. **Y47's step-time refusal cannot happen.** `model.step` is confined to the network's dates (3a D16, `day.py:1042-1062`), and the build checks every one of them. D7 therefore writes no step-time check. A test pins that `model.step` cannot leave the dates. If dates past the configuration ever become steppable, the check moves to `calendar_day` lookup then.
-2. **Y41's constant `c` cannot be fixed in a plan.** Task 9 measures it, and D12 sets it to the ceiling of the measured maximum (expected 2, from the review's ≈1.4). Task 9 stops if it exceeds 4.
-3. **The spec's GrowingSurface validation does not say whether `PerviousSurface`'s checks apply** (area 0, porosity against field capacity, `ihacres_p`, soil weights). `_validate_surface` returns early for every class but `PerviousSurface`. D18: they apply, with `rooting_depth` as the physical depth, because WSIMOD crashes on them as it does for a pervious surface.
+2. **Y41's constant `c` cannot be fixed in a plan.** Task 9b measures it, and D12 sets it to the ceiling of the measured maximum (expected 2, from the review's ≈1.4). Task 9b stops if it exceeds 4.
+3. **The spec's GrowingSurface validation does not say whether `PerviousSurface`'s checks apply** (area 0, porosity against field capacity, `ihacres_p`, soil weights). `_validate_surface` returns early for every class but `PerviousSurface`. D18: they apply, with `rooting_depth` as the physical depth (which `surface_derived` must be told), because WSIMOD crashes on them as it does for a pervious surface.
 4. **"The overrides" in Y7's 3c-ii is ambiguous.** D1 keeps `GrowingSurface`'s attribute overrides (`land.py:1376-1431`) with the class, in 3c-i. It moves only the `data_input_dict` override, L14/L15 and the `surface_overrides` case to 3c-ii.
 5. **`et0_coef` is recorded by WSIMOD for every non-impervious surface** (`model.py:1150`), so recording it (Y32) adds a compared field to every existing pervious-surface case too (D23). These comparisons are expected to be bitwise: a pervious surface's value is its constant parameter.

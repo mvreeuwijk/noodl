@@ -847,10 +847,10 @@ rows in the state layout's order, `Land`s in configuration order and surfaces in
 
 | Key | Shape | What it holds (WSIMOD attribute) | Labels, unit |
 |---|---|---|---|
-| `"wsimod.nutrient_pool"` | (..., n_growing, 5, 2) | each growing surface's five `NutrientStore.storage`s (`np.py:125-136`), present only when `nitrate` is a configured pollutant and pollutants are on | rows `(land, "surfaces.<name>.nutrient_pool")`; pools `fast_pool`, `humus_pool`, `dissolved_inorganic_pool`, `dissolved_organic_pool`, `adsorbed_inorganic_pool`; nutrients `N`, `P`; `kg` |
+| `"wsimod.nutrient_pool"` | (..., 10 · n_growing), flat | each growing surface's five `NutrientStore.storage`s (`np.py:125-136`), present only when `nitrate` is a configured pollutant and pollutants are on; the engine's pool tensor stays `(..., 5, 2)`, and the state holds it as 10 labelled rows (the slot layout of `arc_queue_since` and the River lags) | rows `(land, "surfaces.<name>.nutrient_pool", <pool>, <N\|P>)`, pools in the order `fast_pool`, `humus_pool`, `dissolved_inorganic_pool`, `dissolved_organic_pool`, `adsorbed_inorganic_pool`, each with `N`, then `P`; `kg` |
 | `"wsimod.days_after_sow"` | (..., n_growing) | `days_after_sow` (`land.py:1261`, `:1531-1544`), with **−1 for `None`** | rows `(land, "surfaces.<name>")`; `d` |
 | `"wsimod.crop_cover"`, `"wsimod.ground_cover"` | (..., n_growing) | `crop_cover`, `ground_cover` (`:1262-1263`), which persist outside the season | as above; `-` |
-| `"wsimod.surface_climate"` | (..., n_climate, 2) | the `evaporation` and `precipitation` **volumes** of every `GardenSurface` and `IrrigationSurface` (`:1029-1044`, read by `:2352`, `:2411`) | rows `(land, "surfaces.<name>")`, columns `evaporation`, `precipitation`; `m3` |
+| `"wsimod.surface_climate"` | (..., 2 · n_climate), flat | the `evaporation` and `precipitation` **volumes** of every `GardenSurface` and `IrrigationSurface` (`:1029-1044`, read by `:2352`, `:2411`) | rows `(land, "surfaces.<name>", "evaporation")` and `(land, "surfaces.<name>", "precipitation")`; `m3` |
 
 - `n_growing` counts every surface of class `GrowingSurface` or a subclass. The crop keys exist
   in quantity-only runs too, because the calendar drives the crop's evaporation factor and so
