@@ -9,6 +9,13 @@ are ``torch.where`` on detached decisions), so each point is also checked off th
 is the same in the base and the two ``+-h`` runs, and no active decision has
 ``|margin| <= 1e-6 * scale`` (``scale`` the largest arc flow of the base run) in any of the
 three, except margin-invariant decisions (see ``_jumps``).
+3b adds the decay constants and exponents, the WTW process constants, exponents and liquor
+multipliers, the soil-temperature weights, the River's biochemistry and the temperature forcing
+(Task 15). Each is checked below the decay cap and the River's 50 % caps (a capped process takes
+half the DIN or the organic nitrogen whatever its rate: no gradient), off the ``T <= 0`` and dry
+guards; negative WTW solids are an event, not a kink. The
+River's decisions compare masses (kg), so its margins are measured against the largest arc mass
+(``margin_scale="mass"``) instead of the largest arc flow (m3).
 This file is also the whole-model check of the hand-written gradients of ``pow_half``,
 ``exp_python`` and ``pow_python`` (bitwise Python math).
 """
@@ -46,7 +53,15 @@ class Spec:
         tuple  # ("driver", key, label[, column]) | ("scale", key[, column]) | ("state", key, label)
     )
     scalar: tuple  # ("flow", arc) | ("tank", node, attribute) | ("quality", arc, pollutant)
+    # | ("final", node, attribute, pollutant): a store's mass after the last day
     point: float | None = None  # the parameter's value; the configured one by default
+    # the unit of the decisions' margins: "flow" is the largest arc flow of the base run (m3),
+    # "mass" its largest additive-pollutant arc mass (kg). The river's biochemistry compares
+    # masses (kg of nitrogen and phosphorus, 1e-5 to 1), which a volume scale (tens of m3) would
+    # put above every margin.
+    margin_scale: str = "flow"
+    # other driver values held fixed in every run: ((key, label, value), ...)
+    also: tuple = ()
 
 
 def _model(case: str, pollutants: bool):
@@ -72,6 +87,14 @@ def _configured(model, spec: Spec) -> float:
     return float(layout.template[row, list(layout.columns).index(spec.set[3])])
 
 
+def _fixed(spec: Spec) -> dict:
+    """``spec.also`` as ``initial_drivers``'s ``values``."""
+    values: dict = {}
+    for key, label, fixed in spec.also:
+        values.setdefault(key, {})[label] = fixed
+    return values
+
+
 def _inputs(model, spec: Spec, p):
     kind = spec.set[0]
     if kind == "state":
@@ -80,10 +103,12 @@ def _inputs(model, spec: Spec, p):
     if kind == "driver":
         _, key, label, *column = spec.set
         value = {label: p} if not column else {label: {column[0]: p}}
-        return initial_state(model), initial_drivers(model, values={key: value})
+        values = _fixed(spec)
+        values.setdefault(key, {}).update(value)
+        return initial_state(model), initial_drivers(model, values=values)
     # "scale": p multiplies the forcing series (one column of the concentrations)
     _, key, *column = spec.set
-    drivers = initial_drivers(model)
+    drivers = initial_drivers(model, values=_fixed(spec) or None)
     series = drivers[key]
     if column:
         index = list(model.wsimod_day.drivers[key].columns).index(column[0])
@@ -101,6 +126,12 @@ def _value(model, results, scalar):
         return results.arc_flow[:, results.arc_names.index(scalar[1])].sum()
     if kind == "tank":
         return results.tank_storage[-1, results.tank_names.index((scalar[1], scalar[2]))]
+    if kind == "final":  # a store's mass after the last day, from the state (a decay tank is
+        # not in the tank_* results, X40)
+        _, node, attribute, pollutant = scalar
+        day = model.wsimod_day
+        row = day.state_labels("wsimod.storage").index((node, attribute))
+        return day.last_state["wsimod.storage"][row, 1 + list(day.p.names).index(pollutant)]
     index = list(model.wsimod_day.p.names).index(scalar[2])
     return results.arc_quality[:, results.arc_names.index(scalar[1]), index].sum()
 
@@ -123,8 +154,9 @@ def _records(decisions):
 
 
 def _jumps(runs, scale):
-    """``(same, margin)`` for the base, ``+h`` and ``-h`` runs' decision records: whether every
-    active decision has the same outcome in the three, and the smallest ``|margin|`` over them.
+    """``(same, margin, where)`` for the base, ``+h`` and ``-h`` runs' decision records: whether
+    every active decision has the same outcome in the three, the smallest ``|margin|`` over them
+    and the (day, site, call, round) it belongs to.
 
     A decision whose margin differs by at most ``NOISE * scale`` between the ``+h`` and ``-h``
     runs does not depend on the parameter within the step, and is no jump. It is a comparison
@@ -136,7 +168,7 @@ def _jumps(runs, scale):
     A decision active in some runs only is a different outcome, unless it too compares
     quantities at rounding level (the branch that opened it was rounding noise)."""
     base, up, down = runs
-    same, margin = True, float("inf")
+    same, margin, where = True, float("inf"), None
     for key in set().union(*runs):
         found = [run.get(key) for run in runs]
         if None in found:  # active in some runs only: a call the noise of another decision opened
@@ -149,8 +181,10 @@ def _jumps(runs, scale):
         elif len({f[0] for f in found}) > 1:
             same = False
         else:
-            margin = min(margin, *(abs(f[1]) for f in found))
-    return same, margin
+            smallest = min(abs(f[1]) for f in found)
+            if smallest < margin:
+                margin, where = smallest, key
+    return same, margin, where
 
 
 def check(spec: Spec) -> dict:
@@ -166,7 +200,10 @@ def check(spec: Spec) -> dict:
         up, _, up_decisions = _run(model, spec, torch.tensor(point + h, dtype=F64))
         down, _, down_decisions = _run(model, spec, torch.tensor(point - h, dtype=F64))
     scale = float(results.arc_flow.detach().abs().max())
-    same, margin = _jumps([_records(d) for d in (base, up_decisions, down_decisions)], scale)
+    if spec.margin_scale == "mass":
+        additive = model.wsimod_day.p.volume_or_additive_mask[1:]
+        scale = float(results.arc_quality.detach().abs()[..., additive].max())
+    same, margin, where = _jumps([_records(d) for d in (base, up_decisions, down_decisions)], scale)
     return {
         "point": point,
         "scalar": float(value),
@@ -175,12 +212,44 @@ def check(spec: Spec) -> dict:
         "scale": scale,
         "same_outcomes": same,
         "margin": margin,
+        "where": where,
     }
 
 
 # quickstart's first months are dry: 200 days reach the land's response
 _Q = dict(case="quickstart", days=200, pollutants=False)
 _RURAL, _URBAN = ("my_land", "rural"), ("my_land", "urban")
+
+
+def _river(parameter, pollutant, point, *fixed, **kwargs) -> Spec:
+    """``river_nutrients`` for 120 days: the final ``pollutant`` mass of ``r_low`` against
+    ``parameter`` (its configured value unless ``point``). ``fixed`` are the other rates of
+    ``r_low`` held at the given values, to keep their 50 % caps off the scalar: a capped
+    process takes half the DIN, ``min(rate, 0.5 din)``, whatever its rate, so it carries no
+    gradient. The configured rates (``_R_LOW_OVERRIDES``) bind every cap in the last weeks."""
+    return Spec(
+        "river_nutrients",
+        120,
+        True,
+        ("driver", f"wsimod.River.{parameter}", "r_low")
+        if parameter
+        else ("scale", "wsimod.temperature"),
+        ("final", "r_low", "tank", pollutant),
+        point,
+        margin_scale="mass",
+        also=tuple((f"wsimod.River.{name}", "r_low", value) for name, value in fixed),
+        **kwargs,
+    )
+
+
+# DIN-limited rates: denitrification 2e-7 and macrophyte uptake 1e-6 (configured 2e-4 and 1e-2)
+# stay below 0.5 din on every day of the run; production 1e-2 (configured 5e-2) likewise
+_SMALL_DENITRIFICATION, _SMALL_UPTAKE, _SMALL_PRODUCTION = (
+    ("denpar_w", 2e-7),
+    ("muptNpar", 1e-6),
+    ("prodNpar", 1e-2),
+)
+
 SPECS = {
     "Arc.capacity": Spec(
         "capacity_first_come",
@@ -324,10 +393,162 @@ SPECS = {
         ("driver", "wsimod.Demand.pollutant_load", "town", "phosphate"),
         ("quality", "town_to_sea", "phosphate"),
     ),
+    # --- 3b: decay, treatment, soil temperature, the river's biochemistry (Task 15) ---
+    "Storage.decays.constant": Spec(
+        # the case's flow drains the pond within two days (and the later days' water carries
+        # almost no phosphate): decay acts on the day-1 phosphate the pond holds at its end
+        "decay_storage",
+        1,
+        True,
+        ("driver", "wsimod.Storage.decays.constant", "pond", "phosphate"),
+        ("final", "pond", "tank", "phosphate"),
+    ),
+    "Storage.decays.exponent": Spec(
+        # the case's flow drains the pond within two days (and the later days' water carries
+        # almost no phosphate): decay acts on the day-1 phosphate the pond holds at its end
+        "decay_storage",
+        1,
+        True,
+        ("driver", "wsimod.Storage.decays.exponent", "pond", "phosphate"),
+        ("final", "pond", "tank", "phosphate"),
+    ),
+    "RiverReservoir.decays.constant": Spec(
+        "decay_storage",
+        3,  # the reservoir holds phosphate through the first days only
+        True,
+        ("driver", "wsimod.RiverReservoir.decays.constant", "rr", "phosphate"),
+        ("final", "rr", "tank", "phosphate"),
+    ),
+    "RiverReservoir.decays.exponent": Spec(
+        "decay_storage",
+        3,  # the reservoir holds phosphate through the first days only
+        True,
+        ("driver", "wsimod.RiverReservoir.decays.exponent", "rr", "phosphate"),
+        ("final", "rr", "tank", "phosphate"),
+    ),
+    "DecayArc.decays.constant": Spec(
+        "decay_arc",
+        12,
+        True,
+        ("driver", "wsimod.DecayArc.decays.constant", "src2_to_j", "phosphate"),
+        ("quality", "j_to_feed", "phosphate"),
+    ),
+    "WWTW.process_parameters.constant": Spec(
+        "wtw_treatment",
+        20,
+        True,
+        ("driver", "wsimod.WWTW.process_parameters.constant", "works", "phosphate"),
+        ("quality", "works_to_river", "phosphate"),
+    ),
+    "WWTW.process_parameters.exponent": Spec(
+        "wtw_treatment",
+        20,
+        True,
+        ("driver", "wsimod.WWTW.process_parameters.exponent", "works", "phosphate"),
+        ("quality", "works_to_river", "phosphate"),
+    ),
+    "WWTW.liquor_multiplier": Spec(
+        "wtw_treatment",
+        20,
+        True,
+        ("driver", "wsimod.WWTW.liquor_multiplier", "works", "phosphate"),
+        ("quality", "works_to_river", "phosphate"),
+    ),
+    "soil_temp_w_prev": Spec(
+        "soil_temperature",
+        40,
+        True,
+        ("driver", "wsimod.PerviousSurface.soil_temp_w_prev", ("moor", "heath")),
+        ("quality", "moor_to_aquifer", "temperature"),
+    ),
+    "soil_temp_w_air": Spec(
+        "soil_temperature",
+        40,
+        True,
+        ("driver", "wsimod.PerviousSurface.soil_temp_w_air", ("moor", "heath")),
+        ("quality", "moor_to_aquifer", "temperature"),
+    ),
+    "soil_temp_w_deep": Spec(
+        "soil_temperature",
+        40,
+        True,
+        ("driver", "wsimod.PerviousSurface.soil_temp_w_deep", ("moor", "heath")),
+        ("quality", "moor_to_aquifer", "temperature"),
+    ),
+    "temperature (decay)": Spec(
+        "decay_storage",
+        1,
+        True,
+        ("scale", "wsimod.temperature"),
+        ("final", "pond", "tank", "phosphate"),
+    ),
+    "temperature (decay, reservoir)": Spec(
+        "decay_storage",
+        3,
+        True,
+        ("scale", "wsimod.temperature"),
+        ("final", "rr", "tank", "phosphate"),
+    ),
+    "temperature (treatment)": Spec(
+        "wtw_treatment",
+        20,
+        True,
+        ("scale", "wsimod.concentration", "temperature"),
+        ("quality", "works_to_river", "phosphate"),
+    ),
+    # the nitrate scalar: production off its cap (0.01); the org-nitrogen scalar: production on
+    # its cap, which takes 0.5 din, so that denitrification and uptake reach org-N through din
+    "River.denpar_w [nitrate]": _river(
+        "denpar_w", "nitrate", 2e-7, _SMALL_PRODUCTION, _SMALL_UPTAKE
+    ),
+    "River.denpar_w [org-nitrogen]": _river("denpar_w", "org-nitrogen", 2e-7, _SMALL_UPTAKE),
+    "River.halfsatINwater [nitrate]": _river(
+        "halfsatINwater", "nitrate", 1e-2, _SMALL_DENITRIFICATION, _SMALL_PRODUCTION, _SMALL_UPTAKE
+    ),
+    "River.halfsatINwater [org-nitrogen]": _river(
+        "halfsatINwater", "org-nitrogen", None, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+    ),
+    "River.prodNpar [nitrate]": _river(
+        "prodNpar", "nitrate", 1e-2, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+    ),
+    "River.prodNpar [org-nitrogen]": _river(
+        "prodNpar", "org-nitrogen", 1e-2, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+    ),
+    "River.muptNpar [nitrate]": _river(
+        "muptNpar", "nitrate", 1e-6, _SMALL_DENITRIFICATION, _SMALL_PRODUCTION
+    ),
+    "River.muptNpar [org-nitrogen]": _river(
+        "muptNpar", "org-nitrogen", 1e-6, _SMALL_DENITRIFICATION
+    ),
+    "River.T_wdays [nitrate]": _river(
+        "T_wdays", "nitrate", None, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+    ),
+    "River.T_wdays [org-nitrogen]": _river(
+        # 3 puts a production switch (minprodN = 0, day 11) within 1e-6 of the margin scale
+        "T_wdays",
+        "org-nitrogen",
+        4.5,
+        _SMALL_DENITRIFICATION,
+        _SMALL_UPTAKE,
+        _SMALL_PRODUCTION,
+    ),
+    "temperature (river) [nitrate]": _river(
+        None, "nitrate", None, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+    ),
+    "temperature (river) [org-nitrogen]": _river(
+        # 0.8 to 1.15 each put a production switch (minprodN = 0, days 9 to 22) within 1e-6
+        None,
+        "org-nitrogen",
+        1.2,
+        _SMALL_DENITRIFICATION,
+        _SMALL_UPTAKE,
+        _SMALL_PRODUCTION,
+    ),
 }
 
 
-# the quickstart runs take about 20 s each: three stay in the default selection, the rest are slow
+# the quickstart runs take about 20 s each: three stay in the default selection, the rest are slow;
+# so are the 3b runs listed below them
 SLOW = {
     "PerviousSurface.ihacres_p",
     "PerviousSurface.et0_coefficient",
@@ -335,6 +556,22 @@ SLOW = {
     "Land.subsurface_residence_time",
     "Land.percolation_residence_time",
     "precipitation",
+    # 3b: each family keeps its cheapest entry in the default selection (the decays of the pond, the
+    # reservoir and the arc, the works' treatment, one soil weight, River.denpar_w [nitrate]); the
+    # other river runs take 120 days of two rivers, 10 s and more each
+    "soil_temp_w_air",
+    "soil_temp_w_deep",
+    "River.denpar_w [org-nitrogen]",
+    "River.halfsatINwater [nitrate]",
+    "River.halfsatINwater [org-nitrogen]",
+    "River.prodNpar [nitrate]",
+    "River.prodNpar [org-nitrogen]",
+    "River.muptNpar [nitrate]",
+    "River.muptNpar [org-nitrogen]",
+    "River.T_wdays [nitrate]",
+    "River.T_wdays [org-nitrogen]",
+    "temperature (river) [nitrate]",
+    "temperature (river) [org-nitrogen]",
 }
 
 
