@@ -445,6 +445,8 @@ def _store_paths(node) -> tuple[str, ...]:
     cls = NODE_CLASSES[type(node).__qualname__]
     if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
         return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
+    if type(getattr(node, "tank", None)).__name__ == "DecayTank":  # D8: a per-day store
+        return (*cls.store_paths, "tank.total_decayed")
     return cls.store_paths
 
 
@@ -477,7 +479,8 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     """Record every call into the named nodes while ``model`` runs (spec, Verification 1).
 
     Wraps each target's orchestration methods (the slots that name it, and ``distribute`` when
-    it is in the river order), its four handler entry points, and the ``send_*`` methods of the
+    it is in the river order), its ``end_timestep`` (stores before and after: a ``DecayTank``
+    decays there), its four handler entry points, and the ``send_*`` methods of the
     arcs it calls (out-arcs push, in-arcs pull). Every argument is deep-copied at entry, before
     WSIMOD can mutate it (spec, Protocol, Request mutation). A call into a target that is
     already in a captured call is refused (D22); the error is raised again at exit, because
@@ -591,6 +594,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
         }
         if name in getattr(model, "river_discharge_order", []):
             steps.add("distribute")
+        steps.add("end_timestep")  # model.py:1172-1174
         for method in sorted(steps):
             node_wrapper(node, method, handler=False)
         for method in _HANDLERS:

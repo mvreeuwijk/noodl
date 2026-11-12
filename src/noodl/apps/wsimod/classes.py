@@ -243,8 +243,9 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     "Sewer": frozenset(  # sewer.py:118-143
         {"capacity", "chamber_area", "chamber_floor", "pipe_time", "pipe_timearea"}
     ),
-    # storage.py:78-104: ``decays`` is read there too, but a decaying store is refused (3b)
-    "Storage": frozenset({"capacity", "area", "datum"}),
+    # storage.py:78-104: ``decays`` merges per pollutant (``dict.update``), and is refused on a
+    # node built with ``decays: None``
+    "Storage": frozenset({"capacity", "area", "datum", "decays"}),
     "Groundwater": frozenset(  # storage.py:205-220
         {"residence_time", "infiltration_threshold", "infiltration_pct"}
     ),
@@ -275,7 +276,7 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     # warning), so only ``area`` and ``depth`` reach the tank; ``Tank.apply_overrides``
     # (tanks.py:55-68) then takes ``datum``.
     "Tank": frozenset({"datum"}),
-    "DecayTank": frozenset(),  # ``decays`` (tanks.py:430-440): refused (3b)
+    "DecayTank": frozenset({"decays"}),  # tanks.py:430-440 (a Surface's merge is refused: Task 8)
     "Surface": frozenset({"surface", "pollutant_load", "area", "depth"}),
     # land.py:623-643; ``depth`` is popped and ignored (a printed error)
     "ImperviousSurface": frozenset({"et0_to_e", "pore_depth"}),

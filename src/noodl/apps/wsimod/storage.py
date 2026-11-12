@@ -11,8 +11,15 @@ Every method takes the caller's ``active`` mask. The tank's state is written onl
 (D3), and a data-dependent branch is a :meth:`Ctx.decide` (D12). WSIMOD's warning prints are
 events (D13).
 
-``decays`` must be ``None`` (:meth:`Storage.validate`): a dict, ``{}`` included, builds a
-``DecayTank`` (``storage.py:53``, ``:300``), which is sub-project 3b.
+``decays`` ``None`` builds a plain ``Tank``; a dict, ``{}`` included, builds a ``DecayTank``
+(``storage.py:53-59``) that decays its storage at the end of the day
+(:mod:`noodl.apps.wsimod.tanks`). Each node binds its tank's
+:class:`~noodl.apps.wsimod.decay.Decay` from its bound ``decays.constant`` and
+``decays.exponent`` and the day's ``temperature`` (D15), and refuses a changed inert entry on a
+node whose ``decays`` does not list the pollutant (X9). A ``Groundwater`` and a
+``QueueGroundwater`` read their temperature only from a ``filename`` override
+(``storage.py:202-203``, ``:291-292``), which a later task of sub-project 3b adds; a ``decays``
+dict on them is refused until then.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
@@ -28,9 +36,10 @@ from torch.autograd.function import once_differentiable
 
 from noodl.apps.wsimod.arcs import _put_row, check_travel_time
 from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
+from noodl.apps.wsimod.decay import Decay, DecaySpec, check_inert, read_decays
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
-from noodl.apps.wsimod.tanks import QueueTank, Tank, bind_timearea
+from noodl.apps.wsimod.tanks import DecayTank, QueueTank, Tank, bind_timearea
 from noodl.apps.wsimod.vqip import (
     Pollutants,
     extract_vqip,
@@ -152,8 +161,12 @@ class Storage(Node):
     carried_paths: ClassVar[tuple[str, ...]] = ("tank.storage",)
     step_methods: ClassVar[tuple[str, ...]] = ("distribute",)
     distributes: ClassVar[tuple[str, ...]] = ("out",)  # distribute's push_distributed
-    # storage.py:76: the storage change is the engine's, from the stores (D11)
-    mass_balance: ClassVar[dict[str, str]] = {}
+    # storage.py:76: the storage change is the engine's, from the stores (D11); a DecayTank's
+    # decayed mass leaves the system (tanks.py:449-457)
+    mass_balance: ClassVar[dict[str, str]] = {"DecayTank.decayed": "out"}
+    # whether a ``decays`` dict is accepted (a Groundwater's and a QueueGroundwater's temperature
+    # comes from a ``filename`` override only, X11: later tasks)
+    supports_decays: ClassVar[bool] = True
     # parameter name -> WSIMOD default, the node's own numeric parameters (bind replaces them)
     parameter_defaults: ClassVar[dict[str, float]] = {}
 
@@ -166,7 +179,19 @@ class Storage(Node):
             name: _f64(values.get(name, default))
             for name, default in self.parameter_defaults.items()
         }
+        # X9, X34: the decays drivers are dense over the K pollutants; a pollutant the
+        # configuration does not list is inert (constant 0, exponent 1)
+        self.decay_spec = self._decay_spec(values.get("decays"))
+        configured = self.decay_spec
+        self.defaults["decays.constant"] = _f64(
+            [configured.constant.get(n, 0.0) if configured else 0.0 for n in self.p.names]
+        ).reshape(self.p.K)
+        self.defaults["decays.exponent"] = _f64(
+            [configured.exponent.get(n, 1.0) if configured else 1.0 for n in self.p.names]
+        ).reshape(self.p.K)
         self.tank = self._make_tank(values)
+        if isinstance(self.tank, DecayTank):  # D8: a per-day store the replay compares
+            self.store_paths = (*type(self).store_paths, "tank.total_decayed")
         self._set_handlers()
 
     # --- construction -----------------------------------------------------------------------
@@ -179,10 +204,18 @@ class Storage(Node):
             return self.p.to_vqip(known)
         return _f64(initial)
 
+    def _decay_spec(self, decays: Mapping | None) -> DecaySpec | None:
+        """The configured ``decays`` (checked by the reader and again by :meth:`validate`) on the
+        run's pollutants: a quantity-only run decays nothing, as it carries no pollutant."""
+        if decays is None:
+            return None
+        known = {k: v for k, v in decays.items() if k in self.p.names}
+        return read_decays(f"node {self.name!r}", known, self.p)
+
     def _make_tank(self, values: Mapping) -> Tank:
-        """``storage.py:53-59``: a plain tank (``decays`` is ``None``)."""
-        return Tank(
-            self.p,
+        """``storage.py:53-59``: a plain tank for ``decays`` ``None``, a ``DecayTank`` for a dict
+        (``{}`` included: it decays nothing but reads the temperature at the end of the day)."""
+        kwargs = dict(
             capacity=_f64(values.get("capacity", 0)),
             area=_f64(values.get("area", 0)),
             datum=_f64(values.get("datum", 0)),
@@ -190,6 +223,11 @@ class Storage(Node):
             owner=self.name,
             path="tank",
         )
+        if values.get("decays") is None:
+            return Tank(self.p, **kwargs)
+        spec = self.decay_spec
+        decay = Decay(self.p, spec, site=f"node:{self.name}/tank") if spec.keys else None
+        return DecayTank(self.p, parent=self, decay=decay, **kwargs)
 
     def _set_handlers(self) -> None:
         """``storage.py:70-73``."""
@@ -231,6 +269,37 @@ class Storage(Node):
             for name in ("capacity", "area", "datum"):
                 if name in self.params:
                     setattr(tank, name, self.params[name])
+        self._bind_decay()
+
+    def configured_parameters(self, date: datetime) -> dict[str, Tensor]:
+        """The day's ``temperature`` forcing of a node with a ``decays`` dict (the replay loads
+        it, as :meth:`WsimodDay._bind` does from the driver)."""
+        if self.spec.parameters.get("decays") is None:
+            return {}
+        return {"temperature": _f64(self.spec.data[("temperature", date)])}
+
+    def _bind_decay(self) -> None:
+        """Bind the tank's :class:`Decay` from the day's ``decays.*`` and ``temperature`` (D15,
+        R5). A node without decay, or whose ``decays`` does not list a pollutant, refuses a
+        changed inert entry by name (X9); a quantity-only run has no pollutant to decay."""
+        if self.p.K == 0:
+            return
+        where = f"node {self.name!r}"
+        constant, exponent = self._param("decays.constant"), self._param("decays.exponent")
+        decay = getattr(self.tank, "decay", None)
+        if decay is None:
+            check_inert(
+                where,
+                "decays.constant/exponent",
+                torch.zeros(self.p.K, dtype=torch.bool),
+                constant,
+                exponent,
+                self.p.names,
+            )
+            return
+        if "temperature" not in self.params:
+            raise KeyError(f"{where}: no ('temperature', t) forcing (core.py:484-487)")
+        decay.bind(self.ctx, constant, exponent, self.params["temperature"])
 
     def _param(self, name: str) -> Tensor:
         return self.params.get(name, self.defaults[name])
@@ -277,16 +346,27 @@ class Storage(Node):
     # --- validation -------------------------------------------------------------------------
     @classmethod
     def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
-        """``decays`` other than ``None`` builds a ``DecayTank`` (``storage.py:53``, ``:300``)
-        and is refused (3b). A quantity-only run ignores a VQIP ``initial_storage``'s
-        pollutants."""
+        """``decays`` (the merged dict, D6) is read again: an override entry without
+        ``exponent`` crashes WSIMOD too. A node with a ``decays`` dict reads ``temperature`` on
+        every date (``core.py:484-487``). A quantity-only run ignores a VQIP
+        ``initial_storage``'s pollutants."""
         super().validate(spec, network, pollutants=pollutants)
         decays = spec.parameters.get("decays")
+        where = f"node {spec.name!r}"
         if decays is not None:
-            raise ValueError(
-                f"node {spec.name!r}: 'decays' {decays!r} is not supported (decay is "
-                "sub-project 3b); use decays: None"
-            )
+            if not cls.supports_decays:
+                raise ValueError(
+                    f"{where}: 'decays' {decays!r} is not supported on a {cls.__name__} yet: "
+                    "its temperature comes from a 'filename' override only (storage.py:202-203, "
+                    ":291-292), which sub-project 3b adds later"
+                )
+            read_decays(where, decays, network.pollutants)
+            for date, label in zip(network.dates, network.date_labels, strict=True):
+                if ("temperature", date) not in spec.data:
+                    raise ValueError(
+                        f"{where} has no 'temperature' forcing on {label} (its DecayTank reads "
+                        "it at the end of every day, core.py:484-487)"
+                    )
         initial = spec.parameters.get("initial_storage", 0)
         if not pollutants and isinstance(initial, Mapping):
             if any(k != "volume" for k in initial):
@@ -304,6 +384,7 @@ class Groundwater(Storage):
     to sewers above a threshold."""
 
     wsimod_type: ClassVar[str] = "Groundwater"
+    supports_decays: ClassVar[bool] = False  # its temperature needs a filename override (X11)
     step_methods: ClassVar[tuple[str, ...]] = ("infiltrate", "distribute")
     parameter_defaults: ClassVar[dict[str, float]] = {
         "residence_time": 200,
@@ -366,6 +447,7 @@ class QueueGroundwater(Storage):
     """
 
     wsimod_type: ClassVar[str] = "Groundwater"
+    supports_decays: ClassVar[bool] = False  # its temperature needs a filename override (X11)
     store_paths: ClassVar[tuple[str, ...]] = (
         "tank.storage",
         "tank.active_storage",
@@ -687,7 +769,9 @@ class River(Storage):
     from with a minimum residual flow.
 
     Biochemistry runs when ``"nitrate"`` is a pollutant (``:917-924``): that is sub-project 3b,
-    and :meth:`validate` refuses it, so :meth:`calculate_discharge` is a no-op. The tank's
+    and :meth:`validate` refuses it, so :meth:`calculate_discharge` is a no-op. A ``decays`` dict
+    builds a ``DecayTank`` as for any :class:`Storage`: the tank decays at the end of the day,
+    from the river's own ``temperature`` forcing (``storage.py:53-59``). The tank's
     ``area`` and ``capacity`` are derived (:func:`river_derived`) and re-derived by :meth:`bind`.
     The ``("RiparianBuffer", "volume")`` check (``:589``, ``:938-949``) belongs to 3c.
     """

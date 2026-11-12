@@ -30,6 +30,9 @@ __all__ = [
     "river_order",
 ]
 
+# the storage-family classes whose ``decays`` dict builds a DecayTank that reads the node's
+# temperature at the end of the day (the groundwaters' temperature is a filename override's)
+DECAYING_STORAGE = ("Storage", "Reservoir", "RiverReservoir", "River")
 # model.py:697-735: the WSIMOD types (after the renames) whose arcs give the river order
 _RIVER_TYPES = ("River", "Node", "Waste", "Reservoir")
 # The tags a check can be asked under in 3a: the default, a Sewer's and a WWTW's "Sewer",
@@ -284,7 +287,9 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
     """``{variable: nodes reading it}`` in configuration order (spec, Forcing checks).
 
     ``Land`` reads ``precipitation``, ``et0`` and ``temperature`` (``land.py:451-460``; the
-    temperature also for the surfaces' end-of-day decay, ``core.py:485-487``), a
+    temperature also for the surfaces' end-of-day decay, ``core.py:485-487``), a decaying
+    ``Storage``, ``Reservoir``, ``RiverReservoir`` or ``River`` (``temperature``, the same
+    end-of-day read; the groundwaters' temperature is a ``filename`` override's, later), a
     ``ResidentialDemand`` ``temperature`` (``demand.py:321``) and a ``Catchment`` ``flow`` and
     every pollutant of the configuration (``catchment.py:59-74``). A variable no node reads is
     absent.
@@ -297,6 +302,8 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
             variables = ("temperature",)
         elif spec.cls == "Catchment":
             variables = ("flow", *network.pollutants.names)
+        elif spec.cls in DECAYING_STORAGE and spec.parameters.get("decays") is not None:
+            variables = ("temperature",)  # the DecayTank's end of day (core.py:484-487)
         else:
             continue
         for variable in variables:

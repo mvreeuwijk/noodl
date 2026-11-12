@@ -97,8 +97,11 @@ refused by name.
   a pollutant that is not additive or not listed, a `volume` `exponent` and an `exponent` of 0 or
   below are refused when the model is built (WSIMOD never reads the first two, and `0 **
   negative` raises).
-- `decays` must be `None` on the Storage family (any dict, even `{}`, builds a `DecayTank`) and
-  empty on a surface; anything else is refused by name (sub-project 3b).
+- `decays` is `None` (a plain tank) or a dict (a `DecayTank`, `{}` included) on `Storage`,
+  `Reservoir`, `RiverReservoir` and `River`: a key per decaying pollutant, each with exactly
+  `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
+  forcing on every date. On a `Groundwater` or `QueueGroundwater` a dict is refused until their
+  `filename` override is accepted, and a surface's must be empty (sub-project 3b).
 - Classes WSIMOD has that are not read are refused by name with where they go:
   `DecayArc` and `DecayArcAlt` (sub-project 3b), `GrowingSurface`, `IrrigationSurface`,
   `GardenSurface` and `VariableAreaSurface` (3c), and `EnfieldFoulSewer`, whose
@@ -144,7 +147,9 @@ compute derived quantities.
   reads them.
 - A `QueueGroundwater` override of `number_of_timesteps` (a key of its `QueueTank`, not a
   constructor keyword of the node) is refused.
-- An override of `decays` is refused (decay is sub-project 3b).
+- An override of `decays` on the Storage family merges per pollutant, as `dict.update` does
+  (an entry replaces the pollutant's whole dict, so it needs both keys); it is refused on a node
+  built with `decays: None` (`storage.py:96-100`) and on a surface (sub-project 3b).
 - `filename` (a node) and `data_input_dict` (a surface) are refused: WSIMOD opens an override's
   file relative to the current working directory, not the configuration directory
   (`nodes.py:93-99`, `land.py:413-421`).

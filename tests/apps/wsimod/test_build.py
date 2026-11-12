@@ -455,6 +455,21 @@ def test_quantity_only_driver_shapes():
         assert template.shape == (count, 1)
         assert model.wsimod_day.drivers[f"wsimod.{cls}.liquor_multiplier"].columns == ("volume",)
     assert not any(".process_parameters." in key for key in drivers)
+    # O2, X34: no decays.* driver in a quantity-only run of decay_storage; the pollutant run has
+    # (n, K) rows for every node of each storage-family class, inert where nothing decays
+    mapping = CASES["decay_storage"].build()
+    model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=False)
+    assert not any(".decays." in key for key in drivers)
+    model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=True)
+    k = len(mapping["pollutants"])
+    for cls in ("Storage", "Reservoir", "RiverReservoir", "River"):
+        for field, inert in (("constant", 0.0), ("exponent", 1.0)):
+            template = drivers[f"wsimod.{cls}.decays.{field}"]
+            assert template.shape == (1, k)
+            assert model.wsimod_day.drivers[f"wsimod.{cls}.decays.{field}"].columns == tuple(
+                mapping["pollutants"]
+            )
+            assert (template == inert).sum() >= 1  # a pollutant the node does not decay
     # the pollutant run: volume then the additive pollutants, and the constants and exponents
     network = read_wsimod_config(DATA / "oxford", config_name="config_no_deposition.yml")
     model, _, drivers = build_model(network, pollutants=True)

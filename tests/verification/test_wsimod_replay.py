@@ -90,6 +90,30 @@ def test_the_cases_reach_the_branches_they_are_built_for():
     assert len(routes) == CASES["node_chain"].days and any(unrouted) and not all(unrouted)
 
 
+def test_decay_storage_reaches_the_cap_and_a_factor_of_exactly_one():
+    """Review Focus 4: ``res`` (constant 0.9) is capped on some warm days and not others, and
+    ``riv`` (constant 1) at exactly 20 degC has the raw factor ``1 * exponent ** 0 == 1``, which
+    the cap leaves alone (``1.0 > 1`` is false); its stored factor is 1 and its decayed phosphate
+    is its whole storage. ``pond`` decays the non-additive ``do``; ``ammonia`` is undecayed."""
+    spec = CASES["decay_storage"]
+    day = WsimodDay(read_wsimod_config(spec.build()), pollutants=True)
+    day.record_decisions = True
+    capped: dict[str, list[bool]] = {}
+    for k, ctx, engine in day.run_days(days=spec.days):
+        for d in ctx.decisions:
+            if "make_decay/cap" in d.site:
+                capped.setdefault(d.site, []).append(bool(d.outcome))
+        if k == 3:
+            factor = engine.nodes["riv"].tank.decay.factor
+            assert float(factor[1]) == 1.0  # phosphate: exactly 1, uncapped
+            assert capped["node:riv/tank/make_decay/cap:phosphate"][3] is False
+            decayed = engine.nodes["pond"].tank.decay.factor
+            assert float(decayed[3]) > 0 and float(decayed[2]) == 0.0  # do decays, ammonia not
+    assert any(capped["node:res/tank/make_decay/cap:phosphate"])
+    assert not all(capped["node:res/tank/make_decay/cap:phosphate"])
+    assert "node:pond/tank/make_decay/cap:ammonia" not in capped
+
+
 def test_the_replay_notices_a_difference():
     """A reply moved by 1e-11 x scale, or a reordered arc script, fails the replay."""
     spec = CASES["three_out_arcs"]
@@ -625,7 +649,7 @@ def _replay_class(demo, config, mode, cls, days, *, every_day, decisions=None):
         if spec.cls != cls:
             continue
         calls = captured_calls[spec.name]
-        if not calls:
+        if all(c.method == "end_timestep" for c in calls):  # WSIMOD called nothing but the end
             uncalled.add(spec.name)
             continue
         keep = None if every_day else set(sample_days(calls))

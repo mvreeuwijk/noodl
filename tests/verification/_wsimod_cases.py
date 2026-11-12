@@ -1574,6 +1574,128 @@ def _node_type_override() -> dict:
     )
 
 
+_DECAY_POLLUTANTS = {
+    "pollutants": ["phosphate", "ammonia", "do", "temperature"],
+    "additive_pollutants": ["phosphate", "ammonia"],
+    "non_additive_pollutants": ["do", "temperature"],
+}
+_DECAY_DAYS = 40
+
+
+def _decay_temperatures(days: int, seed: int, *, exactly_20: int | None = None) -> dict:
+    """Air temperatures in [12, 28], so the decay factor crosses its reference at 20 degC;
+    day ``exactly_20`` (if any) is 20.0 itself, where ``exponent ** 0 == 1``."""
+    rng = random.Random(seed)
+    data = {("temperature", date): round(rng.uniform(12.0, 28.0), 4) for date in _dates(days)}
+    if exactly_20 is not None:
+        data[("temperature", _dates(days)[exactly_20])] = 20.0
+    return data
+
+
+def _decay_catchment(name: str, days: int, seed: int) -> dict:
+    """A catchment that also carries dissolved oxygen (``do``, non-additive)."""
+    rng = random.Random(seed)
+    data = {}
+    for date in _dates(days):
+        data[("flow", date)] = round(rng.uniform(5.0, _FLOW_MAX), 6)
+        data[("phosphate", date)] = round(rng.uniform(1e-3, 1e-2), 8)
+        data[("ammonia", date)] = round(rng.uniform(1e-3, 5e-2), 8)
+        data[("do", date)] = round(rng.uniform(6.0, 10.0), 4)
+        data[("temperature", date)] = round(rng.uniform(4.0, 20.0), 4)
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _stocked_do(volume: float) -> dict:
+    return {**_stocked(volume), "do": 8.0}
+
+
+def _decay_storage() -> dict:
+    """A ``Storage``, a ``Reservoir``, a ``RiverReservoir`` and a ``River`` (no nitrate), each
+    with a ``decays`` dict and its own temperature forcing, which crosses 20 degC
+    (``DecayTank.end_timestep_decay``, ``tanks.py:442-447``).
+
+    - ``pond`` decays ``phosphate`` and the non-additive ``do`` and leaves ``ammonia`` and
+      ``temperature`` alone;
+    - ``res`` has a constant of 0.9, so ``constant * exponent ** (T - 20)`` exceeds 1 on warm days
+      and the cap binds; an override merges ``ammonia`` into its ``decays``
+      (``storage.py:101``);
+    - ``rr`` decays two pollutants with a ``decays`` entry whose factor is small;
+    - ``riv`` has a constant of 1 and a day at exactly 20 degC: its factor is exactly 1, which
+      the cap leaves alone (Python's ``min(1.0, 1)`` is ``1.0``).
+    """
+    days = _DECAY_DAYS
+    return {
+        **_DECAY_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _decay_catchment("src", days, 31),
+            _store("head", "Node"),
+            _store(
+                "pond",
+                "Storage",
+                capacity=80.0,
+                initial_storage=_stocked_do(30.0),
+                decays={
+                    "phosphate": {"constant": 0.05, "exponent": 1.07},
+                    "do": {"constant": 0.04, "exponent": 1.05},
+                },
+                data_input_dict=_decay_temperatures(days, 32),
+            ),
+            _store(
+                "res",
+                "Reservoir",
+                capacity=60.0,
+                initial_storage=_stocked_do(20.0),
+                decays={"phosphate": {"constant": 0.9, "exponent": 1.08}},
+                data_input_dict=_decay_temperatures(days, 33),
+            ),
+            _store(
+                "rr",
+                "RiverReservoir",
+                capacity=50.0,
+                initial_storage=_stocked_do(15.0),
+                environmental_flow=5.0,
+                decays={
+                    "phosphate": {"constant": 0.02, "exponent": 1.03},
+                    "ammonia": {"constant": 0.03, "exponent": 1.1},
+                },
+                data_input_dict=_decay_temperatures(days, 34),
+            ),
+            _river(
+                "riv",
+                damp=0.3,
+                initial_storage=_stocked_do(10.0),
+                decays={"phosphate": {"constant": 1.0, "exponent": 1.05}},
+                data_input_dict=_decay_temperatures(days, 35, exactly_20=3),
+            ),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_head", "src", "head"),
+            _arc("head_to_pond", "head", "pond", capacity=40.0),
+            _arc("pond_to_res", "pond", "res", capacity=15.0),
+            _arc("res_to_rr", "res", "rr", capacity=12.0),
+            _arc("rr_to_riv", "rr", "riv", capacity=10.0),
+            _arc("riv_to_sea", "riv", "sea"),
+        ],
+        "overrides": {
+            "nodes": {
+                "res": {
+                    "type_": "Reservoir",
+                    "name": "res",
+                    "decays": {"ammonia": {"constant": 0.02, "exponent": 1.03}},
+                }
+            }
+        },
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Storage": "distribute"},
+            {"Reservoir": "distribute"},
+            {"RiverReservoir": "satisfy_environmental"},
+        ],
+    }
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -1806,6 +1928,12 @@ CASES: dict[str, Case] = {
         days=_STORAGE_DAYS,
         scale=_largest_volume(_float_accuracy_override()),
         replay=("buf",),
+    ),
+    "decay_storage": Case(
+        build=_decay_storage,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_storage()),
+        replay=("pond", "res", "rr", "riv"),
     ),
     "node_type_override": Case(
         build=_node_type_override,

@@ -192,6 +192,23 @@ def test_an_absent_pollutant_is_untouched():
         ({"phosphate": {"constant": 1, "exponent": 1, "rate": 2}}, "rate"),
         ({"phosphate": {"constant": 1, "exponent": 0}}, "exponent"),
         ({"phosphate": {"constant": 1, "exponent": -1}}, "exponent"),
+        # a non-number names where and the key, not a bare TypeError
+        (
+            {"phosphate": {"constant": "x", "exponent": 1}},
+            r"node N: decays\['phosphate'\] constant",
+        ),
+        (
+            {"phosphate": {"constant": None, "exponent": 1}},
+            r"node N.*constant None is not a number",
+        ),
+        (
+            {"phosphate": {"constant": 1, "exponent": "1.1"}},
+            r"node N.*exponent '1.1' is not a number",
+        ),
+        (
+            {"phosphate": {"constant": 1, "exponent": [1]}},
+            r"node N.*exponent \[1\] is not a number",
+        ),
     ],
 )
 def test_read_decays_refusals(decays, match):

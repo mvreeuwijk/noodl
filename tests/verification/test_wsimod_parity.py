@@ -430,7 +430,7 @@ def test_the_cases_cover_every_listed_feature():
     queue_tank_time_zero wtw_zero_input impervious_only pervious_only evaporation_clamp
     temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
     batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
-    node_type_override""".split()
+    node_type_override decay_storage""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",

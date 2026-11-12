@@ -34,6 +34,7 @@ from noodl.apps.wsimod.constants import (
     POLLUTANTS,
     UNBOUNDED_CAPACITY,
 )
+from noodl.apps.wsimod.decay import read_decays
 from noodl.apps.wsimod.vqip import Pollutants
 
 __all__ = [
@@ -243,10 +244,10 @@ def _checked_parameters(
     return parameters
 
 
-def _refuse_decays(where: str, decays: object) -> None:
-    """The Storage family needs ``decays: None`` (any dict, even ``{}``, builds a
-    ``DecayTank``) and a Surface an empty one: decay is sub-project 3b."""
-    raise ValueError(f"{where}: 'decays' {decays!r} is not supported (decay is sub-project 3b)")
+def _refuse_decays(where: str, decays: object, reason: str = "decay is sub-project 3b") -> None:
+    """A ``decays`` this task does not port yet: a Surface's and a ``QueueGroundwater``'s
+    (Tasks 8 and 9) and a ``Groundwater``'s (Task 7)."""
+    raise ValueError(f"{where}: 'decays' {decays!r} is not supported ({reason})")
 
 
 def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) -> None:
@@ -314,6 +315,14 @@ def _apply_overrides(
             if not isinstance(value, Mapping):
                 raise ValueError(f"{where}: {key} must be a mapping")
             parameters[key] = {**parameters[key], **copy.deepcopy(dict(value))}
+        elif key == "decays":  # dict.update per pollutant (storage.py:101, tanks.py:439)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{where}: decays must be a mapping")
+            if parameters.get("decays") is None:  # storage.py:96-100
+                raise ValueError(
+                    f"{where}: cannot override decays on a node initialised without decays"
+                )
+            parameters[key] = {**parameters[key], **copy.deepcopy(dict(value))}
         elif key == "process_parameters":
             if not isinstance(value, Mapping):
                 raise ValueError(f"{where}: process_parameters must be a mapping")
@@ -343,6 +352,8 @@ def _override_node(node: NodeSpec, entry: dict, where: str) -> None:
             override,
             f"{where}, surface {surface_name!r}",
         )
+        if match.parameters["decays"]:  # a surface's decay is Task 8
+            _refuse_decays(f"{where}, surface {surface_name!r}", match.parameters["decays"])
         match.name = override.get("surface", match.name)  # land.py:396
 
 
@@ -402,8 +413,23 @@ def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSp
             for s in _items(entry.pop("surfaces"), f"{where} surfaces")
         ]
     parameters = _checked_parameters(entry, schema, where)
-    if parameters.get("decays") is not None:  # storage.py:53, :300 build a DecayTank
-        _refuse_decays(where, parameters["decays"])
+    decays = parameters.get("decays")
+    if decays is not None:  # storage.py:53, :300 build a DecayTank
+        if cls == "Groundwater":
+            _refuse_decays(
+                where,
+                decays,
+                "a Groundwater's decay reads temperature from a 'filename' override only "
+                "(storage.py:202-203), which Task 7 adds",
+            )
+        if cls == "QueueGroundwater":
+            _refuse_decays(
+                where,
+                decays,
+                "a QueueGroundwater's decay reads temperature from a 'filename' override only "
+                "(storage.py:291-292), which Task 9 adds",
+            )
+        read_decays(where, decays, pollutants)
     if "process_parameters" in parameters:
         _refuse_partial_wtw(where, parameters, pollutants)
         _fill_wtw_defaults(parameters, pollutants)

@@ -352,7 +352,10 @@ def replay(
         node.load_stores(
             {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
         )
-        if call.method in type(node).step_methods:
+        if call.method == "end_timestep":
+            node.end_timestep()
+            reply = None
+        elif call.method in type(node).step_methods:
             reply = getattr(node, call.method)(active=active)
         else:
             vqip = None if call.vqip is None else to_vqip(p, call.vqip)

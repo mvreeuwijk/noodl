@@ -7,7 +7,9 @@ dates (D16) through the closure, which owns every ``"wsimod.*"`` state key:
    values reset (W68, W75);
 2. day ``k``'s slice of every driver is bound: the parameters ``"wsimod.<Class>.<parameter>"``
    (rows: the nodes of that configured class, D6), ``"wsimod.<SurfaceClass>.<parameter>"``
-   (rows: the surfaces of every ``Land``), ``"wsimod.Arc.capacity"`` and
+   (rows: the surfaces of every ``Land``), the storage family's
+   ``"wsimod.<Class>.decays.constant"`` and ``".exponent"`` ``(n, K)`` (all-inert rows for a
+   node without decays, absent in a quantity-only run; X9, X34), ``"wsimod.Arc.capacity"`` and
    ``"wsimod.Arc.preference"`` (rows: every arc), and the forcing series
    ``"wsimod.precipitation"``, ``"wsimod.et0"``, ``"wsimod.temperature"`` ``(..., T,
    n_readers)``, ``"wsimod.flow"`` ``(..., T, n_catchments)`` and ``"wsimod.concentration"``
@@ -66,6 +68,7 @@ from noodl.apps.wsimod.structure import (
     orchestration_plan,
     river_order,
 )
+from noodl.apps.wsimod.tanks import DecayTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from noodl.refs import Field
 
@@ -341,7 +344,7 @@ class WsimodDay:
             for slot in self._slots
             if slot.key == "wsimod.storage"
             for label in [self._labels["wsimod.storage"][slot.start]]
-            if not label[1].startswith("surface:")
+            if not label[1].startswith("surface:") and self._recorded_tank(*label)
         ]
         self.surface_names = [
             (spec.name, surface.name)
@@ -356,6 +359,15 @@ class WsimodDay:
             d.key: self._driver_field(d) for d in self._drivers.values() if self._fits(d)
         }
         self.inputs = (*self._drivers, *STATE_KEYS)
+
+    def _recorded_tank(self, node: str, attribute: str) -> bool:
+        """Whether ``record_all`` reports the tank: it lists ``Tank``, ``QueueTank`` and
+        ``ResidenceTank`` by their exact class (``model.py:1123``), so a ``DecayTank`` drops out
+        of the ``tank_*`` results while its storage stays in the state (X40)."""
+        tank = self.engine.nodes[node]
+        for part in attribute.split("."):
+            tank = getattr(tank, part)
+        return not isinstance(tank, DecayTank)
 
     def to(self, device=None, dtype: torch.dtype | None = None) -> WsimodDay:
         """``Model.to`` hook: the port is float64 on the CPU only (bitwise equality with

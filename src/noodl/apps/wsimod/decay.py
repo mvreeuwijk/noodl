@@ -14,6 +14,7 @@ entries at absent keys are inert ``(0, 1)`` and refused otherwise (:func:`check_
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -40,7 +41,8 @@ def read_decays(where: str, decays: Mapping | None, pollutants: Pollutants) -> D
     """The configured ``decays`` of ``where``; ``None`` for ``decays: None`` (D6).
 
     Refuses by name a key that is not a configured pollutant (``volume`` included), an entry
-    whose keys are not exactly ``constant`` and ``exponent``, and ``exponent <= 0``
+    whose keys are not exactly ``constant`` and ``exponent``, a ``constant`` or ``exponent``
+    that is not a number, and ``exponent <= 0``
     (``core.py:513-515`` raises or returns a ``complex`` there)."""
     if decays is None:
         return None
@@ -57,6 +59,12 @@ def read_decays(where: str, decays: Mapping | None, pollutants: Pollutants) -> D
                 f"{where}: decays[{key!r}] must have exactly the keys 'constant' and "
                 f"'exponent', got {got}"
             )
+        for field in ("constant", "exponent"):
+            if isinstance(pars[field], str) or not isinstance(pars[field], numbers.Real):
+                raise ValueError(
+                    f"{where}: decays[{key!r}] {field} {pars[field]!r} is not a number "
+                    "(WSIMOD multiplies it, core.py:513-515)"
+                )
         if not float(pars["exponent"]) > 0:
             raise ValueError(
                 f"{where}: decays[{key!r}] exponent {pars['exponent']!r} must be > 0 "
@@ -134,6 +142,10 @@ class Decay:
             )
         self.constant, self.exponent = constant, exponent
         raw = constant * pow_python(exponent, temperature[..., None] - DECAY_REFERENCE_TEMPERATURE)
+        # every column at the day's batch shape, whatever the drivers' own (a batched capacity
+        # leaves the decays unbatched)
+        shape = torch.broadcast_shapes(raw.shape[:-1], ctx.shape)
+        raw = torch.broadcast_to(raw, (*shape, self.p.K))
         all_true = torch.ones(ctx.shape, dtype=torch.bool)
         columns = []
         for i, name in enumerate(self.p.names):

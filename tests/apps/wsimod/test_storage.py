@@ -13,10 +13,12 @@ import random
 import pytest
 import torch
 
+from noodl.apps.wsimod import build_model, initial_drivers, initial_state
 from noodl.apps.wsimod.arcs import ARC_CLASSES
 from noodl.apps.wsimod.config import ArcSpec, NodeSpec, read_wsimod_config
 from noodl.apps.wsimod.engine import Ctx, make_node
 from noodl.apps.wsimod.node import NODE_CLASSES, Waste
+from noodl.apps.wsimod.run import wsimod_run
 from noodl.apps.wsimod.storage import (
     Groundwater,
     QueueGroundwater,
@@ -29,6 +31,7 @@ from noodl.apps.wsimod.storage import (
     river_derived,
     riverrc,
 )
+from noodl.apps.wsimod.structure import forcing_readers
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from tests.apps.wsimod._replay import ScriptedArc, StoreNode
 from tests.verification._wsimod_reference import ArcCall
@@ -155,40 +158,140 @@ def test_pow_half_is_pythons_pow_bitwise_with_a_zero_slope_at_zero():
 
 
 # --- decays ---------------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "cls", ["Storage", "Groundwater", "Reservoir", "QueueGroundwater", "RiverReservoir"]
-)
-def test_a_decays_dict_on_a_storage_node_is_refused(cls):
-    network = read_wsimod_config(
-        {
-            "pollutants": [],
-            "additive_pollutants": [],
-            "non_additive_pollutants": [],
-            "dates": ["2000-01-01"],
-            "nodes": [{"name": "n", "type_": cls, "decays": None}],
-            "arcs": [],
-        }
-    )
+DECAYS = {"phosphate": {"constant": 0.1, "exponent": 1.02}}
+POLLUTANT_LISTS = {
+    "pollutants": ["phosphate", "ammonia"],
+    "additive_pollutants": ["phosphate", "ammonia"],
+    "non_additive_pollutants": [],
+}
+
+
+def _decaying(type_="Storage", *, decays=DECAYS, days=3, missing=(), overrides=None, **values):
+    """A node ``r`` of ``type_`` with ``decays`` (``None`` included) and a temperature forcing
+    on every date but those at the indices ``missing``."""
+    dates = [f"2000-01-{k + 1:02d}" for k in range(days)]
+    data = {("temperature", d): 15.0 for k, d in enumerate(dates) if k not in missing}
+    node = {"name": "r", "type_": type_, "decays": decays, "data_input_dict": data, **values}
+    mapping = {
+        **POLLUTANT_LISTS,
+        "dates": dates,
+        "nodes": [node, {"name": "sink", "type_": "Waste"}],
+        "arcs": [],
+        "orchestration": [],
+    }
+    if overrides is not None:
+        mapping["overrides"] = {"nodes": {"r": overrides}}
+    return mapping
+
+
+@pytest.mark.parametrize("cls", ["Groundwater", "QueueGroundwater"])
+def test_a_decays_dict_on_a_groundwater_is_refused_until_its_filename_override(cls):
+    network = read_wsimod_config(_decaying(cls, decays=None))
     spec = network.nodes[0]
     assert NODE_CLASSES[cls].validate(spec, network, pollutants=True) == []  # None is valid
-    for decays in ({}, {"phosphate": {"constant": 0.1, "exponent": 1.1}}):
-        spec.parameters["decays"] = decays
-        with pytest.raises(ValueError, match=r"decays.*3b"):
-            NODE_CLASSES[cls].validate(spec, network, pollutants=True)
+    spec.parameters["decays"] = DECAYS
+    with pytest.raises(ValueError, match=r"decays.*filename"):
+        NODE_CLASSES[cls].validate(spec, network, pollutants=True)
+    with pytest.raises(ValueError, match=r"decays.*filename"):
+        read_wsimod_config(_decaying(cls, decays={}))
 
 
-def test_the_reader_refuses_decays_on_a_storage_node_too():
-    with pytest.raises(ValueError, match=r"decays.*3b"):
-        read_wsimod_config(
-            {
-                "pollutants": [],
-                "additive_pollutants": [],
-                "non_additive_pollutants": [],
-                "dates": ["2000-01-01"],
-                "nodes": [{"name": "n", "type_": "Storage", "decays": {}}],
-                "arcs": [],
-            }
-        )
+@pytest.mark.parametrize("cls", ["Storage", "Reservoir", "RiverReservoir", "River"])
+def test_storage_with_decays_reads_its_temperature(cls):
+    """The DecayTank reads ``("temperature", t)`` at the end of every day (``core.py:484-487``),
+    also with an empty ``decays``; a node with ``decays: None`` needs none."""
+    for decays in (DECAYS, {}):
+        missing = r"node 'r' has no 'temperature' forcing on 2000-01-02"
+        with pytest.raises(ValueError, match=missing):
+            build_model(read_wsimod_config(_decaying(cls, decays=decays, missing=(1, 2))))
+        build_model(read_wsimod_config(_decaying(cls, decays=decays)))
+    build_model(read_wsimod_config(_decaying(cls, decays=None, missing=(0, 1, 2))))
+
+
+def test_a_decaying_storage_family_node_is_a_temperature_reader():
+    network = read_wsimod_config(_decaying("Reservoir", decays={}))
+    assert forcing_readers(network)["temperature"] == ["r"]
+    network = read_wsimod_config(_decaying("Reservoir", decays=None))
+    assert "temperature" not in forcing_readers(network)
+
+
+def test_the_decays_drivers_are_dense_with_inert_rows_for_a_node_without_decays():
+    """X9, X34: ``(n, K)`` rows, the node's own decays where listed, ``(0, 1)`` elsewhere."""
+    mapping = _decaying("Storage")
+    mapping["nodes"].insert(1, {"name": "plain", "type_": "Storage", "decays": None})
+    model, _, drivers = build_model(read_wsimod_config(mapping))
+    constant = drivers["wsimod.Storage.decays.constant"]
+    exponent = drivers["wsimod.Storage.decays.exponent"]
+    assert model.wsimod_day.drivers["wsimod.Storage.decays.constant"].labels == ["r", "plain"]
+    assert constant.tolist() == [[0.1, 0.0], [0.0, 0.0]]
+    assert exponent.tolist() == [[1.02, 1.0], [1.0, 1.0]]
+
+
+def test_a_decays_override_merges_into_a_dict_and_is_refused_on_none():
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    merged = {"ammonia": {"constant": 0.2, "exponent": 1.0}}
+    override = {"type_": "Storage", "name": "r", "decays": merged}
+    mapping = _decaying("Storage", overrides=override)
+    ours = read_wsimod_config(mapping).nodes[0].parameters["decays"]
+    theirs = wsimod_model(mapping).nodes["r"].decays
+    assert ours == theirs == {**DECAYS, **merged}
+    # a decays-None node refuses it, as WSIMOD does (storage.py:96-100)
+    with pytest.raises(ValueError, match="decays"):
+        read_wsimod_config(_decaying("Storage", decays=None, overrides=override))
+    with pytest.raises(ValueError, match="decays"):
+        wsimod_model(_decaying("Storage", decays=None, overrides=override))
+    # an entry replaces the pollutant's whole dict (dict.update), so a lone constant is refused
+    # by build_model after the merge, as WSIMOD's make_decay would crash on the missing exponent
+    partial = {"type_": "Storage", "name": "r", "decays": {"phosphate": {"constant": 0.3}}}
+    network = read_wsimod_config(_decaying("Storage", overrides=partial))
+    assert network.nodes[0].parameters["decays"] == {"phosphate": {"constant": 0.3}}
+    with pytest.raises(ValueError, match="exponent"):
+        build_model(network)
+
+
+def test_a_decays_none_node_refuses_a_changed_inert_driver():
+    """D15: ``Reservoir.bind`` refuses a ``decays.*`` entry other than ``(0, 1)`` on a node
+    without ``decays`` (and on a pollutant its ``decays`` does not list), naming node and
+    pollutant."""
+    model, _, _ = build_model(read_wsimod_config(_decaying("Reservoir", decays=None)))
+    for key, pollutant, value in (
+        ("wsimod.Reservoir.decays.constant", "phosphate", 0.1),
+        ("wsimod.Reservoir.decays.exponent", "ammonia", 1.1),
+    ):
+        drivers = initial_drivers(model, values={key: {"r": {pollutant: value}}})
+        with pytest.raises(ValueError, match=rf"node 'r'.*{key.rsplit('.', 1)[1]}.*{pollutant}"):
+            model.step(initial_state(model), drivers, dt=86400.0, t=0.0)
+    # a listed pollutant takes any value; an unlisted one stays inert
+    model, _, _ = build_model(read_wsimod_config(_decaying("Reservoir")))
+    key = "wsimod.Reservoir.decays.constant"
+    drivers = initial_drivers(model, values={key: {"r": {"phosphate": 0.3}}})
+    model.step(initial_state(model), drivers, dt=86400.0, t=0.0)
+    drivers = initial_drivers(model, values={key: {"r": {"ammonia": 0.3}}})
+    with pytest.raises(ValueError, match="ammonia"):
+        model.step(initial_state(model), drivers, dt=86400.0, t=0.0)
+
+
+def test_a_decaying_storage_decays_at_the_end_of_the_day_and_closes_the_balance():
+    """``DecayTank.end_timestep_decay``: ``phosphate`` falls by ``constant * exponent ** (T -
+    20)`` of its storage; the decayed mass is the ``"DecayTank.decayed"`` term and leaves the
+    system, so the balance closes; ``total_decayed`` is a per-day store, not carried."""
+    initial = {"volume": 10.0, "phosphate": 4.0, "ammonia": 1.0}
+    network = read_wsimod_config(_decaying("Storage", initial_storage=initial))
+    model, state, drivers = build_model(network)
+    result = wsimod_run(model, state, drivers)
+    factor = 0.1 * 1.02 ** (15.0 - 20.0)
+    decayed = result.mass_balance.terms["DecayTank.decayed"]
+    assert decayed[0].tolist() == [0.0, 4.0 * factor, 0.0]
+    assert float(result.mass_balance.residual.abs().max()) < 1e-12
+    node = model.wsimod_day.engine.nodes["r"]
+    assert "tank.total_decayed" in node.store_paths
+    assert "tank.total_decayed" not in node.carried_paths
+    # WSIMOD's record_all lists Tank, QueueTank and ResidenceTank only: the DecayTank drops out
+    # of the tank_* results while its storage stays in the state (X40)
+    assert model.wsimod_day.tank_names == []
+    assert model.wsimod_day.state_labels("wsimod.storage") == [("r", "tank")]
 
 
 def _validate(cls, **parameters):

@@ -295,6 +295,11 @@ class DecayTank(Tank):
         super().__init__(pollutants, **kwargs)
         self.total_decayed = empty(pollutants, ())
 
+    def stores(self) -> dict[str, Tensor]:
+        """``storage`` and the per-day ``total_decayed`` (D8): reset at every ``end_timestep``,
+        so the owner does not carry it, but the replay compares it."""
+        return {**super().stores(), "total_decayed": self.total_decayed}
+
     def end_timestep(self) -> None:
         if self.decay is None:
             if "temperature" not in self.parent.params:
