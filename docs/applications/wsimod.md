@@ -300,6 +300,26 @@ call's gains and losses.
 - Mineralisation with no dissolved nitrogen removes nitrogen from `org-nitrogen` and adds it
   nowhere: the loss is in `bio_out` and the event `"river_nitrogen_lost"` says so.
 - `minprodN` of `-0.0` takes the mineralisation branch and moves nothing.
+- `calculate_discharge` **assigns** `bio_in`/`bio_out` (`storage.py:923-924`), so an
+  orchestration that calls it twice a day leaves WSIMOD's own node balance missing the first
+  call's terms, and WSIMOD prints a mass-balance error for the river on every such day. The
+  processes run twice in noodl too (X16); its terms add both calls and its balance closes.
+
+**Verified by two whole-model cases** (`tests/verification/_wsimod_cases.py`). `river_nutrients`
+is two rivers in a chain fed by catchments with all six pollutants, one river overridden to
+`max_temp_lag = 5`, `max_phosphorus_lag = 300` and raised rates, and a reservoir abstracting
+from the upstream river. Its forcing places every branch inside its first 400 days: a frost spell
+(`T <= 0` after relaxation), days between 0 and 5 degC, a drought in which the abstraction drains
+the upstream river to exactly 0 (the dry guard), a DIN-free refill with a cold snap (mineralisation
+with `din = 0`: `"river_nitrogen_lost"`), a phosphate pulse that carries the low-P river's
+365-day mean across the `totalphosfcn` guard, warming and cooling seasons (production and
+mineralisation), and every 50 % cap binding on some days and not on others. The default suite
+runs its first 400 days at value parity, bitwise, without decisions (X39); `-m slow` runs all
+1100 days (three turns of the 366-slot register, the pulse leaving it so `totalphosfcn` returns
+to 0) and asserts each branch from the recorded decisions on the 400-day prefix and on the full
+run (D24). `river_double_discharge` calls `calculate_discharge` twice a day: the values are at
+parity, WSIMOD prints its River mass-balance error on every day and noodl's residual is 0; the
+parity harness takes those prints as the one named exception to its print check (D17, X32).
 
 **The registers and warm starts.** The state keys `"wsimod.river_temperature_lag"` (degC) and
 `"wsimod.river_phosphorus_lag"` (kg) hold the two registers, rows `(river, i)`, slot 0 the
@@ -603,7 +623,8 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `Surface.run` converts `total_decayed` at every call | transcribed: a second `Land.run` on one day converts the same mass twice | case `land_run_twice` |
 | `QueueGroundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, refused by name without one (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; case `decay_queue_groundwater` |
 | `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; cases `decay_queue_groundwater` and `decay_queue_groundwater_n0` |
-| River biochemistry: the "365-day" phosphorus mean adds 366 entries; every window divides by its full length from day 1; `totalphosfcn` compares a mass with concentrations; mineralisation without dissolved nitrogen destroys nitrogen | reproduced (X14); the loss is in `bio_out` and the event `"river_nitrogen_lost"` (X15) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_mineralisation_without_din_destroys_nitrogen_and_says_so` |
+| River biochemistry: the "365-day" phosphorus mean adds 366 entries; every window divides by its full length from day 1; `totalphosfcn` compares a mass with concentrations; mineralisation without dissolved nitrogen destroys nitrogen | reproduced (X14); the loss is in `bio_out` and the event `"river_nitrogen_lost"` (X15) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_mineralisation_without_din_destroys_nitrogen_and_says_so`; case `river_nutrients` (the DIN-free stretch, the low-P river crossing the `totalphosfcn` guard, more than 366 days under `-m slow`) |
+| `River.calculate_discharge` assigns `bio_in`/`bio_out` (`storage.py:923-924`): a second call a day drops the first call's terms from WSIMOD's node check, which prints an error | the processes run twice as in WSIMOD; noodl's terms add both calls and its balance closes (X16, X32) | case `river_double_discharge`: WSIMOD prints on every day (the named exception to the print check, D17), noodl's residual is 0 |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
@@ -722,10 +743,15 @@ has to be debugged, not admitted.
   worst difference is exactly 0 for every node of both demos and for all 36 cases in both modes,
   and no admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
   day (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
-  equal noodl's residual plus the dropped water. The system mass balance closes within
-  `1e-12 * scale` every day, and every day the residual equals the evaporation clamp's gap (0
-  without a clamp). A quantity-only run's volumes equal the pollutant run's exactly
-  (`torch.equal`).
+  equal noodl's residual plus the dropped water, with one named exception (W90/W91, X32):
+  `river_double_discharge`, where WSIMOD's River balance misses the first of two daily
+  `calculate_discharge` calls and prints on every day while noodl's residual is 0; the harness
+  requires those prints on every day and compares them with nothing (D17). The system mass
+  balance closes within `1e-12 * scale` every day, and every day the residual equals the
+  evaporation clamp's gap (0 without a clamp). A quantity-only run's volumes equal the pollutant
+  run's exactly (`torch.equal`). The River biochemistry cases: `river_nutrients` runs its first
+  400 days by default and all 1100 under `-m slow`, when the decisions are recorded and every
+  branch is asserted (X39, D24); `river_double_discharge` runs its 40 days by default.
 - **Crashes** (`test_case_runs_where_wsimod_crashes_*`): the three cases where WSIMOD raises
   (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`, `nonresidential_demand`) run in
   noodl, finite and balanced.
@@ -741,6 +767,8 @@ has to be debugged, not admitted.
 | oxford | 365 | quantity-only, pollutant mode | 0 | yes | 36 s, 37 s |
 | oxford | 1456 | quantity-only, pollutant mode | 0 | `-m slow` | 142 s, 146 s |
 | 36 cases | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
+| `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s, 8 s a mode (26 s on a loaded machine) |
+| `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | 8 s, 21 s a mode; 22 s for the branch assertions |
 | 22 gradients | 3 to 200 | quantity-only | 5.9e-8 relative | 16 of 22 (six `-m slow`) | |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
@@ -753,4 +781,8 @@ modified; the committed forcing is WSIMOD's (BSD-3, `tests/data/wsimod/LICENSE-W
 
 **Suite composition.** The wsimod row of the test table (the default selection) takes
 about 160 s with `-n 4` (816 tests), within the 10-minute budget, so no test is cut. `pytest -m slow` on the
-row adds the full `oxford` run, the full per-node replays and the six slow gradients.
+row adds the full `oxford` run, the full per-node replays and the six slow gradients. The one
+cut so far is `river_nutrients` (X39): its default items run 400 of its 1100 days (about 8 s a
+mode; its 366-slot phosphorus register is summed one slot at a time every day, which is the cost)
+and are still among the row's 30 slowest; the 1100-day run and the branch assertions from the
+recorded decisions are `-m slow` (8 s, 21 s and 22 s).

@@ -69,6 +69,7 @@ __all__ = [
     "capture_events",
     "capture_node_calls",
     "extract_topology",
+    "pad_register",
     "record_wsimod_run",
     "reset_wsimod_globals",
     "wsimod_model",
@@ -427,6 +428,32 @@ class NodeCall:
 
 
 _HANDLERS = ("pull_set", "push_set", "pull_check", "push_check")
+# a River's biochemistry stores (storage.py:561-599), in the order noodl's River lists them
+_RIVER_BIOCHEMISTRY_PATHS = ("lagged_temperatures", "lagged_total_phosphorus", "bio_in", "bio_out")
+
+
+def pad_register(values: Sequence[float], size: int) -> torch.Tensor:
+    """WSIMOD's lag list (``lagged_temperatures``, ``lagged_total_phosphorus``) as noodl's
+    fixed-size register: the list in the last ``len(values)`` slots, ``+0.0`` in front (X17).
+    A list longer than the register is refused."""
+    if len(values) > size:
+        raise ValueError(f"pad_register: {len(values)} values do not fit {size} slots")
+    register = torch.zeros(size, dtype=torch.float64)
+    if len(values):
+        register[size - len(values) :] = torch.tensor(
+            [float(v) for v in values], dtype=torch.float64
+        )
+    return register
+
+
+def _runs_biochemistry(node) -> bool:
+    """Whether ``node`` is a WSIMOD ``River`` whose ``calculate_discharge`` runs the
+    biochemistry (``"nitrate" in constants.POLLUTANTS``, ``storage.py:919``)."""
+    from wsimod.core import constants
+
+    return type(node).__qualname__ == "River" and "nitrate" in constants.POLLUTANTS
+
+
 _ARC_METHODS = {  # the end of the arc that makes the call (arcs.py:112-228)
     "send_push_request": "in_port",
     "send_push_check": "in_port",
@@ -450,6 +477,11 @@ def _store_paths(node) -> tuple[str, ...]:
         return (*cls.store_paths, "tank.total_decayed")
     if tank == "DecayQueueTank":  # D8: carried, extracted at the next end of day
         return (*cls.store_paths, "tank.internal_arc.total_decayed")
+    if _runs_biochemistry(node):  # the registers (carried) and the per-day bio_in/bio_out
+        paths = cls.store_paths
+        if tank == "DecayTank":
+            paths = (*paths, "tank.total_decayed")
+        return (*paths, *_RIVER_BIOCHEMISTRY_PATHS)
     return cls.store_paths
 
 
@@ -485,8 +517,12 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     it is in the river order), its ``end_timestep`` (stores before and after: a ``DecayTank``
     decays there), its four handler entry points, and the ``send_*`` methods of the
     arcs it calls (out-arcs push, in-arcs pull). Every argument is deep-copied at entry, before
-    WSIMOD can mutate it (spec, Protocol, Request mutation). A call into a target that is
-    already in a captured call is refused (D22); the error is raised again at exit, because
+    WSIMOD can mutate it (spec, Protocol, Request mutation). A ``River`` with biochemistry
+    records its two lag lists and ``bio_in``/``bio_out`` among the stores (as WSIMOD's lists and
+    dicts; :func:`pad_register` makes a register of a list), and the day's
+    ``data_input_dict[("temperature", t)]`` as ``pre["forcing.temperature"]``, so the replay
+    can check it binds the temperature WSIMOD read (``storage.py:750``). A call into a target
+    that is already in a captured call is refused (D22); the error is raised again at exit, because
     WSIMOD's ``query_handler`` swallows exceptions and retries (``nodes.py:335-343``).
     Everything is restored on exit.
     """
@@ -503,6 +539,13 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
             out[f"arcs.{arc.name}.vqip_in"] = copy.deepcopy(arc.vqip_in)
             out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
         return out
+
+    def forcing(node) -> dict[str, float]:
+        """The day's forcing the call reads: a biochemistry River's
+        ``get_data_input("temperature")`` (``storage.py:750``)."""
+        if _runs_biochemistry(node):
+            return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
+        return {}
 
     def install(obj, attr: str, make) -> None:
         own = attr in vars(obj)
@@ -532,7 +575,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                     vqip=copy.deepcopy(vqip),
                     tag=copy.deepcopy(tag),
                     reply=None,
-                    pre=snapshot(node),
+                    pre={**snapshot(node), **forcing(node)},
                     post={},
                     arc_calls=[],
                 )

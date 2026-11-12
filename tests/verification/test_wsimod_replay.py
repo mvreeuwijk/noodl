@@ -35,7 +35,7 @@ from tests.apps.wsimod._replay import (  # noqa: E402
     replay_arc,
     to_vqip,
 )
-from tests.verification._wsimod_cases import CASES  # noqa: E402
+from tests.verification._wsimod_cases import _NUTRIENT_POLLUTANTS, CASES  # noqa: E402
 from tests.verification._wsimod_reference import (  # noqa: E402
     ArcDay,
     capture_arc_calls,
@@ -45,6 +45,8 @@ from tests.verification._wsimod_reference import (  # noqa: E402
     wsimod_reference,
 )
 
+_RIVER_POLLUTANTS = _NUTRIENT_POLLUTANTS["pollutants"]
+
 
 def _days(network, days: int):
     """Step ``network`` with its own pollutants through the day driver
@@ -53,6 +55,9 @@ def _days(network, days: int):
 
 
 PAIRS = [(case, name) for case, spec in CASES.items() if spec.wsimod for name in spec.replay]
+# W15: a case longer than this is replayed on its sampled days (``sample_days``); the others, up
+# to 40 days, on every day. Only ``river_nutrients`` (400 days) is longer.
+REPLAY_EVERY_DAY_UP_TO = 120
 
 
 @functools.cache
@@ -66,9 +71,16 @@ def captured(case: str):
 
 @pytest.mark.parametrize(("case", "name"), PAIRS, ids=[f"{c}-{n}" for c, n in PAIRS])
 def test_replay_matches_wsimod(case, name):
+    """Every captured call of the node replayed bitwise, in both modes; a long case on its
+    sampled days (W15). A River with biochemistry (``river_nutrients``) has its two lag
+    registers loaded from WSIMOD's lists before each call and compared after it."""
     spec = CASES[case]
     calls = captured(case)[name]
     assert calls, f"WSIMOD made no call into {name!r}"
+    if spec.days > REPLAY_EVERY_DAY_UP_TO:
+        keep = set(sample_days(calls))
+        calls = [c for c in calls if c.day in keep]
+        assert 60 < len(keep) < spec.days
     network = read_wsimod_config(spec.build())
     for mode in spec.modes:
         pollutants = network.pollutants if mode == "pollutants" else QUANTITY_ONLY
@@ -154,6 +166,47 @@ def test_decay_queue_groundwater_water_waits_in_slot_zero_for_distribute(case):
         if d.site == "node:gw/tank/internal_arc/make_decay/cap:ammonia"
     ]
     assert any(capped) and not all(capped)
+
+
+def test_the_river_nutrients_capture_holds_wsimods_lag_lists_and_forcing():
+    """The capture of a River with biochemistry records both lag lists as WSIMOD's lists, which
+    fill to ``max_temp_lag + 1`` and ``max_phosphorus_lag + 1`` entries (21 and 366 for ``r_up``,
+    6 and 301 for the overridden ``r_low``) and then turn over, ``bio_in``/``bio_out``, and the
+    day's temperature forcing. The replay loads and compares all of them: a captured register
+    slot moved by one ulp, or a changed forcing, fails the replay naming the call."""
+    calls = captured("river_nutrients")
+    mapping = CASES["river_nutrients"].build()
+    for river, sizes in (("r_up", (21, 366)), ("r_low", (6, 301))):
+        configured = next(n for n in mapping["nodes"] if n["name"] == river)["data_input_dict"]
+        discharges = [c for c in calls[river] if c.method == "calculate_discharge"]
+        assert len(discharges) == CASES["river_nutrients"].days
+        for c in discharges:
+            assert len(c.pre["lagged_temperatures"]) == min(c.day, sizes[0]), c.day
+            assert len(c.pre["lagged_total_phosphorus"]) == min(c.day, sizes[1]), c.day
+            assert len(c.post["lagged_temperatures"]) == min(c.day + 1, sizes[0])
+            assert len(c.post["lagged_total_phosphorus"]) == min(c.day + 1, sizes[1])
+            assert (
+                c.pre["forcing.temperature"] == configured[("temperature", mapping["dates"][c.day])]
+            )
+            assert set(c.pre["bio_out"]) == {"volume", *_RIVER_POLLUTANTS}
+        assert any(c.post["bio_out"]["nitrate"] > 0 for c in discharges)
+        ends = [c for c in calls[river] if c.method == "end_timestep"]
+        assert all(c.post["bio_in"]["org-nitrogen"] == 0 for c in ends)
+    network = read_wsimod_config(CASES["river_nutrients"].build())
+    scale = CASES["river_nutrients"].scale
+    early = [c for c in calls["r_up"] if c.day < 30]
+    assert replay(network, "r_up", copy.deepcopy(early), scale=scale) == 0.0
+    changed = copy.deepcopy(early)
+    call = next(c for c in changed if c.method == "calculate_discharge" and c.day == 20)
+    slot = call.pre["lagged_total_phosphorus"]
+    slot[-1] = math.nextafter(slot[-1], math.inf)
+    with pytest.raises(Mismatch, match=r"r_up call \d+ \(day 20, calculate_discharge"):
+        replay(network, "r_up", changed, scale=scale)
+    changed = copy.deepcopy(early)
+    call = next(c for c in changed if c.method == "calculate_discharge" and c.day == 20)
+    call.pre["forcing.temperature"] += 1.0
+    with pytest.raises(Mismatch, match=r"day 20, calculate_discharge.*forcing temperature"):
+        replay(network, "r_up", changed, scale=scale)
 
 
 def test_the_replay_notices_a_difference():

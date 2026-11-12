@@ -126,6 +126,7 @@ def assert_matches_wsimod(
     quality: bool,
     admitted: Sequence[Admission] = (),
     print_days: Sequence[int] | None = None,
+    expected_mass_balance_prints: Sequence[str] = (),
 ) -> dict:
     """Assert noodl's run equals WSIMOD's within ``BOUND * scale`` on every day (module text).
 
@@ -146,6 +147,13 @@ def assert_matches_wsimod(
     ``mass balance error`` lines equal, in order, noodl's ``residual + dropped`` on the days it
     exceeds the bound (ruling W86: the evaporation-clamp gap and the water a node drops below
     ``FLOAT_ACCURACY``). The demos print nothing.
+
+    ``expected_mass_balance_prints`` (D17, X32) names the nodes whose ``mass balance error``
+    lines WSIMOD is expected to print on **every** day while noodl's own balance closes: a
+    ``River`` whose ``calculate_discharge`` runs twice a day (``river_double_discharge``), where
+    WSIMOD's assigned ``bio_in``/``bio_out`` drop the first call's terms. Those lines, for any
+    pollutant, are asserted present on every day (``print_days`` is required) and are left out
+    of the residual comparison; every other line is checked as before.
 
     Returns ``{"worst": the largest absolute difference, "scale": the scale of its series,
     "admissions": the admissions used}``.
@@ -220,7 +228,9 @@ def assert_matches_wsimod(
                 worst, worst_scale = top, float(scale[at])
 
     names = diagnostics["node_names"]
-    _check_prints(ours, theirs, diagnostics, case, names, print_days)
+    _check_prints(
+        ours, theirs, diagnostics, case, names, print_days, tuple(expected_mass_balance_prints)
+    )
     return {"worst": worst, "scale": worst_scale, "admissions": used}
 
 
@@ -231,6 +241,7 @@ def _check_prints(
     case: str,
     names,
     print_days: Sequence[int] | None,
+    expected_mass_balance_prints: tuple[str, ...] = (),
 ):
     """Every print of WSIMOD is one of the kinds above and agrees with noodl's records (module
     text, D13); an unknown print is refused.
@@ -241,7 +252,10 @@ def _check_prints(
     node drops below ``FLOAT_ACCURACY`` (``Land.run``'s percolation push-back), which noodl
     counts as ``"dropped"`` and so closes. A ``QueueArc``'s drop is inside an arc, in no node's
     balance: it is left out (``dropped - dropped_arcs``). With ``print_days`` each error line must
-    also fall on its day. Any other line, or a missing one, fails.
+    also fall on its day. Any other line, or a missing one, fails. The lines of a node in
+    ``expected_mass_balance_prints`` (D17) are the exception: WSIMOD's own balance of that node
+    is wrong by construction (X16, X32), so they are required on every day, for whatever
+    pollutant, and compared with nothing.
 
     Limits of the comparison: WSIMOD's check is per node and relative (the values normalised by
     the largest power of ten, against ``1e-11``), noodl's expectation is the system sum against
@@ -320,12 +334,28 @@ def _check_prints(
     significant = volume.abs() > BOUND * scale
     expected = volume[significant]
     errors, error_days = [], []
+    unknown = [n for n in expected_mass_balance_prints if n not in names]
+    if unknown:
+        raise AssertionError(f"{case}: expected mass balance prints of unknown nodes {unknown}")
+    if expected_mass_balance_prints and print_days is None:
+        raise ValueError(f"{case}: expected_mass_balance_prints needs print_days (D17)")
+    expected_days: dict[str, set[int]] = {n: set() for n in expected_mass_balance_prints}
     for k, line in enumerate(printed):
         if m := _MASS_BALANCE.fullmatch(line):
+            if m.group(3) in expected_days:  # D17: WSIMOD's own balance is wrong there
+                expected_days[m.group(3)].add(print_days[k])
+                continue
             error_days.append(-1 if print_days is None else print_days[k])
             if m.group(1) != "volume" or m.group(3) not in names:
                 raise AssertionError(f"{case}: WSIMOD printed {line!r}")
             errors.append(float(m.group(2)))
+    for node, days in expected_days.items():
+        missing = sorted(set(range(len(theirs.dates))) - days)
+        if missing:
+            raise AssertionError(
+                f"{case}: WSIMOD printed no mass balance error for {node!r} on day "
+                f"{missing[0]} ({theirs.dates[missing[0]]}); one is expected on every day (D17)"
+            )
     if len(errors) != len(expected) or (
         errors
         and float((expected - torch.tensor(errors, dtype=torch.float64)).abs().max())
@@ -369,8 +399,11 @@ class _DayTaggedStdout(io.StringIO):
         return super().write(text)
 
 
-def wsimod_reference_by_day(source) -> tuple[WsimodReference, list[int]]:
-    """``wsimod_reference(source)`` plus the day (0-based) of each line of its ``printed``.
+def wsimod_reference_by_day(
+    source, *, days: int | None = None
+) -> tuple[WsimodReference, list[int]]:
+    """``wsimod_reference(source, days=days)`` plus the day (0-based) of each line of its
+    ``printed``.
 
     The run is WSIMOD's own (``record_wsimod_run``), its stdout going to a writer that tags each
     line with a day counter; the counter is bumped by the first node's ``end_timestep``, and every
@@ -389,7 +422,7 @@ def wsimod_reference_by_day(source) -> tuple[WsimodReference, list[int]]:
     saved = _wsimod_reference.io
     _wsimod_reference.io = types.SimpleNamespace(StringIO=lambda: _DayTaggedStdout(day, lines))
     try:
-        reference = record_wsimod_run(model)
+        reference = record_wsimod_run(model, days=days)
     finally:
         _wsimod_reference.io = saved
     if [line for _, line in lines] != reference.printed:

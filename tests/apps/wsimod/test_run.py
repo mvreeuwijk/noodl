@@ -324,11 +324,12 @@ def test_the_mass_balance_closes_by_hand():
 
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_the_mass_balance_closes_on_every_case(name, mode):
-    """Every case, both modes: the residual is within ``1e-12 * scale`` on every day;
-    ``evaporation_clamp`` apart, whose residual is the clamp gap (W75, tested below)."""
+    """Every case, both modes, over its default ``days``: the residual is within ``1e-12 *
+    scale`` on every day; ``evaporation_clamp`` apart, whose residual is the clamp gap (W75,
+    tested below)."""
     model, state, drivers = _case(name, mode)
     diagnostics: dict = {}
-    results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
+    results = wsimod_run(model, state, drivers, days=CASES[name].days, diagnostics=diagnostics)
     event = diagnostics["events"]["inaccurate_evaporation"].any(dim=-1)
     if name == "evaporation_clamp":
         assert bool(event.any())  # its residual is the clamp gap: the tests below
@@ -684,7 +685,7 @@ def test_consecutive_balance_windows_meet(name, mode):
     """X8: a day's window ends at the state ``end_timestep`` leaves, which is the next day's
     loaded state, so consecutive windows meet exactly."""
     model, _, _ = _case(name, mode)
-    records = _completed_records(model.wsimod_day)
+    records = _completed_records(model.wsimod_day, days=CASES[name].days)
     assert len(records) == CASES[name].days
     for d in range(len(records) - 1):
         assert torch.equal(records[d + 1].storage_start, records[d].storage_end), (name, d)
@@ -699,7 +700,7 @@ def test_end_timestep_records_no_decision_and_no_maxiter(name, mode):
     day.record_decisions = True
     seen = []
     try:
-        for _, ctx, _ in day.run_days():
+        for _, ctx, _ in day.run_days(days=CASES[name].days):
             seen.append((ctx, len(ctx.decisions), dict(ctx.maxiter)))
     finally:
         day.record_decisions = False

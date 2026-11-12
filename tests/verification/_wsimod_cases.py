@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import functools
+import math
 import random
 import tempfile
 from collections.abc import Callable, Mapping
@@ -25,15 +26,20 @@ __all__ = ["CASES", "Case"]
 
 @dataclass(frozen=True)
 class Case:
-    """A purpose-built case (D8). A case with a River declares pollutant lists without nitrate."""
+    """A purpose-built case (D8). A case with a River declares pollutant lists without nitrate
+    unless it is built for the River's biochemistry (``river_nutrients``,
+    ``river_double_discharge``)."""
 
     build: Callable[[], dict]  # the mapping
-    days: int  # 30-120
+    days: int  # the default run: 30-120, 400 for river_nutrients (X39)
     scale: float  # the largest volume in the forcing
     replay: tuple[str, ...] = ()  # nodes the replay test captures
     replay_arcs: tuple[str, ...] = ()  # user Decay* arcs the arc replay captures (D16)
     modes: tuple[str, ...] = ("quantity", "pollutants")
     wsimod: bool = True  # False: noodl-only (a WSIMOD crash), Task 17
+    # D24: the full horizon of a case whose default run is a prefix of its dates; a test marked
+    # ``slow`` runs it. ``None``: the default run is the whole case.
+    slow_days: int | None = None
 
 
 # A short pollutant list: one additive, one more additive, one non-additive.
@@ -2032,6 +2038,223 @@ def _land_run_twice() -> dict:
     return _nitrifying_land(twice=True)
 
 
+# --- River biochemistry (Task 13; spec, Purpose-built cases) -----------------------------------
+_NUTRIENT_ADDITIVE = ["phosphate", "org-phosphorus", "ammonia", "nitrate", "org-nitrogen"]
+_NUTRIENT_POLLUTANTS = {  # the six the biochemistry reads (storage.py:738-898)
+    "pollutants": ["temperature", *_NUTRIENT_ADDITIVE],
+    "additive_pollutants": _NUTRIENT_ADDITIVE,
+    "non_additive_pollutants": ["temperature"],
+}
+_RIVER_NUTRIENTS_DAYS = 400  # the default run (X39): the 366-slot register has turned over
+_RIVER_NUTRIENTS_SLOW_DAYS = 1100  # three turns of the register, three winters (D24)
+# The designed days of ``river_nutrients`` (R3: every branch inside the first 400 days).
+_FROST = range(25, 46)  # air at -6 degC: the river water relaxes to T <= 0 (frozen)
+_P_PULSE = range(60, 90)  # src_up's phosphate x150: r_up's 365-day P mean crosses the guard
+_DROUGHT = range(120, 127)  # src_up flows nothing: res drains r_up to exactly 0 (dry)
+_DIN_FREE = range(120, 171)  # src_up carries no ammonia and no nitrate: r_up's din is 0
+_COLD_SNAP = range(130, 151)  # air 8 degC below the season: cooling, so r_up mineralises
+_NUTRIENT_CONCENTRATIONS = {  # kg/m3; src_up is the low-P catchment
+    "src_up": {
+        "phosphate": 2.5e-7,
+        "org-phosphorus": 1e-7,
+        "ammonia": 0.005,
+        "nitrate": 0.015,
+        "org-nitrogen": 1.5e-4,
+    },
+    "src_low": {
+        "phosphate": 2e-3,
+        "org-phosphorus": 1e-3,
+        "ammonia": 0.005,
+        "nitrate": 0.015,
+        "org-nitrogen": 0.005,
+    },
+}
+# r_low's overrides (storage.py:620-644), all 13 attributes; ``max_temp_lag = 5``
+# makes both temperature windows the whole 6-slot register, so its 10-day mean always exceeds
+# its 20-day mean and it produces whenever it is warm; its rates are raised so that its caps bind
+# with ordinary concentrations; ``bulk_density`` is unread (D10).
+_R_LOW_OVERRIDES = {
+    "max_temp_lag": 5,
+    "max_phosphorus_lag": 300,
+    "denpar_w": 2e-4,
+    "prodNpar": 0.05,
+    "prodPpar": 0.01,
+    "uptake_PNratio": 0.5,
+    "muptNpar": 0.01,
+    "muptPpar": 0.002,
+    "T_wdays": 3,
+    "halfsatINwater": 2e-3,
+    "hsatTP": 1e-4,
+    "limpppar": 2e-4,
+    "bulk_density": 1500,
+}
+
+
+def _nutrient_air(days: int, seed: int) -> list[float]:
+    """Air temperatures: a year's sinusoid (about -1 to 21 degC, coldest on day 15) with noise,
+    the frost spell and the cold snap written in."""
+    rng = random.Random(seed)
+    out = []
+    for k in range(days):
+        value = 10.0 - 11.0 * math.cos(2 * math.pi * (k - 15) / 365) + rng.uniform(-0.8, 0.8)
+        if k in _FROST:
+            value = -6.0 + rng.uniform(-0.5, 0.5)
+        elif k in _COLD_SNAP:
+            value -= 8.0
+        out.append(round(value, 4))
+    return out
+
+
+def _nutrient_catchment(
+    name: str, days: int, seed: int, air: list[float], *, profile: str | None = None
+) -> dict:
+    """A catchment with the six pollutants at ``_NUTRIENT_CONCENTRATIONS[profile]`` (default
+    its name's): a seasonal flow with noise (``src_up``: the drought and the DIN-free stretch,
+    and the phosphate pulse), water a degree warmer than the air and never below 0.5 degC."""
+    rng = random.Random(seed)
+    base = _NUTRIENT_CONCENTRATIONS[name if profile is None else profile]
+    data = {}
+    for k, date in enumerate(_dates(days)):
+        flow = 30.0 - 10.0 * math.cos(2 * math.pi * (k - 45) / 365) + rng.uniform(-4.0, 4.0)
+        if name == "src_low":
+            flow = 0.6 * flow
+        if name == "src_up" and k in _DROUGHT:
+            flow = 0.0
+        data[("flow", date)] = round(flow, 6)
+        data[("temperature", date)] = round(max(air[k] + 1.0, 0.5), 4)
+        for pollutant, concentration in base.items():
+            value = concentration * rng.uniform(0.8, 1.2)
+            if name == "src_up":
+                if pollutant == "phosphate" and k in _P_PULSE:
+                    value *= 150.0
+                if pollutant in ("ammonia", "nitrate") and k in _DIN_FREE:
+                    value = 0.0
+            data[(pollutant, date)] = float(f"{value:.6e}")
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _nutrient_stocked(volume: float, source: str, temperature: float) -> dict:
+    """An ``initial_storage`` VQIP at the catchment ``source``'s concentrations."""
+    return {
+        "volume": volume,
+        "temperature": temperature,
+        **{p: c * volume for p, c in _NUTRIENT_CONCENTRATIONS[source].items()},
+    }
+
+
+def _river_nutrients() -> dict:
+    """Two rivers in a chain with WSIMOD's biochemistry live (``"nitrate"`` a pollutant),
+    1100 days, every branch inside the first 400 (R3, X39).
+
+    ``src_up`` -> ``r_up`` -> ``r_low`` -> ``sea``, and ``src_low`` -> ``r_low``. ``r_up``
+    (``kt = 1.16``, routing coefficient 0.33, area 1000 m2) is the low-P river: its phosphorus
+    is about 3e-5 kg, below ``limpppar - hsatTP = 5e-5``, so ``totalphosfcn`` is 0 until the
+    phosphate pulse of days 60-89 lifts its 365-day mean above the guard, and the mean falls
+    back below it once the pulse leaves the 366-slot register (days 426-455, the slow run).
+    ``r_low`` (coefficient 0.52, area 4000 m2) is overridden to ``max_temp_lag = 5``,
+    ``max_phosphorus_lag = 300`` and raised rates (``_R_LOW_OVERRIDES``). The reservoir
+    ``res`` (capacity 6, emptied into the sea every day) abstracts 6 m3 a day from ``r_up``
+    after the catchments have routed, so in the drought of days 120-126 it drains ``r_up`` to
+    exactly 0 and the river is dry at ``calculate_discharge``; the DIN-free water that refills
+    it (days 120-170) keeps ``din`` at exactly 0, and the cold snap of days 130-150 makes
+    ``r_up`` mineralise there, so ``"river_nitrogen_lost"`` holds. The frost spell of days
+    25-45 freezes both rivers, with days between 0 and 5 degC either side; the seasons give
+    warming (production) and cooling (mineralisation), and every 50 % cap binds on some days
+    and not on others (asserted from the decisions under ``-m slow``).
+    """
+    days = _RIVER_NUTRIENTS_SLOW_DAYS
+    dates = _dates(days)
+    air = _nutrient_air(days, 130)
+    air_low = [round(t + 0.5, 4) for t in air]
+    return {
+        **_NUTRIENT_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _nutrient_catchment("src_up", days, 131, air),
+            _nutrient_catchment("src_low", days, 132, air),
+            _river(
+                "r_up",
+                damp=1.0,
+                length=2000.0,
+                width=0.5,
+                velocity=1728.0,
+                initial_storage=_nutrient_stocked(60.0, "src_up", 4.0),
+                data_input_dict={("temperature", d): t for d, t in zip(dates, air, strict=True)},
+            ),
+            _river(
+                "r_low",
+                damp=0.5,
+                length=2000.0,
+                width=2.0,
+                velocity=1728.0,
+                initial_storage=_nutrient_stocked(120.0, "src_low", 4.0),
+                data_input_dict={
+                    ("temperature", d): t for d, t in zip(dates, air_low, strict=True)
+                },
+            ),
+            _store("res", "Reservoir", capacity=6.0),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("up_in", "src_up", "r_up"),
+            _arc("low_in", "src_low", "r_low"),
+            _arc("up_to_low", "r_up", "r_low"),
+            _arc("up_to_res", "r_up", "res"),
+            _arc("res_to_sea", "res", "sea"),
+            _arc("low_to_sea", "r_low", "sea"),
+        ],
+        "overrides": {"nodes": {"r_low": {"type_": "River", "name": "r_low", **_R_LOW_OVERRIDES}}},
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Reservoir": "make_abstractions"},
+            {"River": "calculate_discharge"},
+            {"Reservoir": "distribute"},
+        ],
+    }
+
+
+_DOUBLE_DISCHARGE_DAYS = 40
+
+
+def _river_double_discharge() -> dict:
+    """A custom orchestration with ``River: calculate_discharge`` twice a day (X16, X32). The
+    river is warm (12-20 degC), never dry and always holds dissolved nitrogen, so each call
+    moves mass. WSIMOD assigns ``bio_in``/``bio_out`` (``storage.py:923-924``), so its node check
+    sees only the second call's terms and prints a mass-balance error for the river on every
+    day; noodl's terms add both calls and its residual is 0 (D17, the named exception to
+    W90/W91)."""
+    days = _DOUBLE_DISCHARGE_DAYS
+    dates = _dates(days)
+    rng = random.Random(140)
+    air = [
+        round(16.0 + 4.0 * math.sin(2 * math.pi * k / 40) + rng.uniform(-0.5, 0.5), 4)
+        for k in range(days)
+    ]
+    return {
+        **_NUTRIENT_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _nutrient_catchment("src", days, 141, air, profile="src_low"),
+            _river(
+                "riv",
+                damp=0.5,
+                length=2000.0,
+                width=2.0,
+                velocity=1728.0,
+                initial_storage=_nutrient_stocked(100.0, "src_low", 15.0),
+                data_input_dict={("temperature", d): t for d, t in zip(dates, air, strict=True)},
+            ),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("src_in", "src", "riv"), _arc("riv_to_sea", "riv", "sea")],
+        "orchestration": [
+            {"Catchment": "route"},
+            {"River": "calculate_discharge"},
+            {"River": "calculate_discharge"},
+        ],
+    }
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -2326,5 +2549,18 @@ CASES: dict[str, Case] = {
         days=_STORAGE_DAYS,
         scale=500.0,
         replay=("homes",),
+    ),
+    "river_nutrients": Case(
+        build=_river_nutrients,
+        days=_RIVER_NUTRIENTS_DAYS,
+        scale=_largest_volume(_river_nutrients()),
+        replay=("r_up", "r_low"),
+        slow_days=_RIVER_NUTRIENTS_SLOW_DAYS,
+    ),
+    "river_double_discharge": Case(
+        build=_river_double_discharge,
+        days=_DOUBLE_DISCHARGE_DAYS,
+        scale=_largest_volume(_river_double_discharge()),
+        replay=("riv",),
     ),
 }

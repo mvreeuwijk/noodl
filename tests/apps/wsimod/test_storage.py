@@ -37,7 +37,7 @@ from noodl.apps.wsimod.structure import forcing_readers
 from noodl.apps.wsimod.tanks import DecayQueueTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from tests.apps.wsimod._replay import ScriptedArc, StoreNode
-from tests.verification._wsimod_reference import ArcCall
+from tests.verification._wsimod_reference import ArcCall, pad_register
 
 P = QUANTITY_ONLY
 FA = 1e-11
@@ -1094,14 +1094,6 @@ BIO_PARAMETERS = (
     "muptPpar",
 )
 SITE = "node:r/biochemical_processes"
-
-
-def pad_register(values, size):
-    """WSIMOD's lag list as noodl's register: zero-padded at the front (X17)."""
-    register = torch.zeros(size, dtype=torch.float64)
-    if values:
-        register[size - len(values) :] = torch.tensor(values, dtype=torch.float64)
-    return register
 
 
 def bio_river(state, t_air, temperatures, phosphorus, *, p=BIO, record=False, **parameters):

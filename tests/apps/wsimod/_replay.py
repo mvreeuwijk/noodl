@@ -8,7 +8,9 @@ the node's stores from each call's ``pre``, makes the call, and compares the rep
 
 The comparison is exact for a class whose ``replay_bound`` is 0 (``Node``, ``Waste``,
 ``Catchment``): every value must be bitwise WSIMOD's. A class with ``pow``/``exp``/``sqrt`` may
-declare ``1e-12`` (relative to the case's scale) with its cause written next to it.
+declare ``1e-12`` (relative to the case's scale) with its cause written next to it. A River
+with biochemistry loads its two lag registers from WSIMOD's captured lists (padded, X17) and
+compares them after every call, and its bound ``temperature`` with the one WSIMOD read.
 
 :class:`StoreNode` is a test double for the unit tests: a VQIP store of a given capacity whose
 WSIMOD type is settable.
@@ -44,6 +46,7 @@ from noodl.apps.wsimod.vqip import (
     v_change_vqip,
     write,
 )
+from tests.verification._wsimod_reference import pad_register
 
 if TYPE_CHECKING:  # pragma: no cover
     from tests.verification._wsimod_reference import ArcCall, ArcDay
@@ -246,6 +249,10 @@ class StoreNode(Node):
         return self._clip(self._spare(), vqip)
 
 
+# a biochemistry River's lag lists, in ``River.lag_sizes``' order (storage.py:561, :564)
+_RIVER_REGISTERS = ("lagged_temperatures", "lagged_total_phosphorus")
+
+
 def _is_register(path: str) -> bool:
     return path.endswith("internal_arc.register")
 
@@ -266,7 +273,10 @@ def _internal_arc(node: Node, path: str):
 def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
     """A captured store as the noodl tensor ``Node.load_stores`` takes. A ``QueueTank``'s queue
     is WSIMOD's ``{time: vqip}`` dict, captured under the ``register`` path, and its key list
-    under the ``present`` path; a store that is a number is a scalar."""
+    under the ``present`` path; a River's lag list is padded to its register
+    (:func:`pad_register`, X17); a store that is a number is a scalar."""
+    if path in _RIVER_REGISTERS:
+        return pad_register(value, node.lag_sizes[_RIVER_REGISTERS.index(path)])
     if _is_register(path) or _is_present(path):
         length = _internal_arc(node, path).length
     if _is_register(path):
@@ -285,8 +295,12 @@ def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
 
 def compare_store(compare: _Comparer, label: str, path: str, ours: Tensor, theirs) -> None:
     """``ours`` against the captured store ``theirs`` (see :func:`load_value`); an absent queue
-    key is an empty row."""
-    if _is_register(path):
+    key is an empty row; a River's lag list is compared slot by slot with the padding (X17)."""
+    if path in _RIVER_REGISTERS:
+        expected = pad_register(theirs, ours.shape[-1])
+        for slot in range(ours.shape[-1]):
+            compare.value(f"{label}[{slot}]", ours[..., slot], float(expected[slot]))
+    elif _is_register(path):
         for time in range(ours.shape[-2]):
             vqip = theirs.get(time)
             row = {} if vqip is None else vqip
@@ -368,6 +382,12 @@ def replay(
             arc.flow_in = torch.tensor(float(flow_in), dtype=torch.float64)
             arc.vqip_in = to_vqip(p, call.pre.get(f"arcs.{arc.name}.vqip_in", {}))
         node.bind(node.configured_parameters(network.dates[call.day]))
+        if "forcing.temperature" in call.pre and "temperature" in node.params:
+            compare.value(
+                f"{label} forcing temperature",
+                node.params["temperature"],
+                call.pre["forcing.temperature"],
+            )
         node.load_stores(
             {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
         )
