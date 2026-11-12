@@ -33,9 +33,21 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 `NonResidentialDemand`, `ResidentialDemand`, `Distribution` (with leakage),
 `UnlimitedDistribution`, `Sewer`, `WTW`, `WWTW`, `FWTW` and `Land` with `Surface`,
 `ImperviousSurface` and `PerviousSurface` (IHACRES); the arcs `Arc`, `QueueArc`, `AltQueueArc`,
-`PullArc`, `PushArc`, `SewerArc` and `WeirArc`. Pollutants are carried without change: the
-treatment, decay and deposition processes that would change them are later sub-projects and
-are refused unless they are neutral.
+`PullArc`, `PushArc`, `SewerArc` and `WeirArc`. The soil temperature of a `PerviousSurface` is
+live (below); the other processes that change a pollutant (treatment, decay, deposition) are later
+sub-projects and are refused unless they are neutral.
+
+### The soil temperature
+
+With a `temperature` pollutant, a `PerviousSurface` moves its storage's temperature every day
+(`land.py:1060-1079`), after the IHACRES step:
+
+`T = (T_storage * soil_temp_w_prev + T_air * soil_temp_w_air + soil_temp_deep * soil_temp_w_deep) / (soil_temp_w_air + soil_temp_w_deep + soil_temp_w_prev)`
+
+WSIMOD's defaults are `w_prev = 0.1`, `w_air = 0.6`, `w_deep = 0.1`, `soil_temp_deep = 10`; any
+weights are accepted, and the port is bitwise equal to WSIMOD's. Weights that sum to 0 are
+refused by name (`"total weight"`), in the configuration and, for a batched parameter, at `bind`,
+where WSIMOD would divide by zero. A quantity-only run does not read the temperature.
 
 A day is WSIMOD's (`model.py:993-1176`): the orchestration slot by slot, each slot's nodes in
 configuration order; `River.distribute` in the river order, most upstream first; the record;
@@ -241,7 +253,8 @@ a run does not read — surface deposition loads, a demand's `pollutant_load`, n
 treatment processes, a catchment's pollutant series — are listed by name in
 `model.ignored_by_quantity_only`. With `pollutants=True` (the default) the same configuration is
 refused if any of them is not neutral, since the process that would change the pollutants is not
-ported yet: until 3b, real configurations need `pollutants=False`.
+ported yet: until the rest of 3b and 3c, real configurations need `pollutants=False`. The
+soil temperature is not among them (it is ported); its weights are only listed as ignored.
 
 ## Refusals
 
@@ -368,8 +381,8 @@ of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad)
 
 - **Sub-projects 3b and 3c.** The processes that change a pollutant (river biochemistry,
   treatment, decay, deposition, the land's nutrient pools, `GrowingSurface`, the garden and
-  irrigation surfaces) are refused unless neutral. Until 3b, a real configuration needs
-  `pollutants=False`.
+  irrigation surfaces) are refused unless neutral. The soil temperature is ported. Until the
+  rest of 3b, a real configuration needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:

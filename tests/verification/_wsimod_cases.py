@@ -1318,6 +1318,72 @@ def _batch_divergence() -> dict:
     }
 
 
+def _soil_temperature() -> dict:
+    """Two soils with weights other than the neutral ones (``land.py:1060-1079``): ``fen`` forgets
+    its storage temperature (``w_prev = 0``) and ``heath`` blends all three terms with a deep
+    temperature of 8; an impervious roof shares the land. The air temperature crosses 0 and 20.
+    Runoff goes through a ``Node`` to a ``Waste`` and the percolation to a ``Groundwater``. The
+    depths are powers of two, so the override's round trip is exact (see ``_neutral_soil``)."""
+    days = _LAND_DAYS
+    forcing = _land_forcing(days, 46)
+    for number, date in enumerate(_dates(days)):
+        forcing[("temperature", date)] = round(-4.0 + 26.0 * (number % 10) / 9, 4)
+    weights = {
+        "fen": {"soil_temp_w_prev": 0, "soil_temp_w_air": 0.6, "soil_temp_w_deep": 0.4},
+        "heath": {
+            "soil_temp_w_prev": 0.3,
+            "soil_temp_w_air": 0.5,
+            "soil_temp_w_deep": 0.2,
+            "soil_temp_deep": 8,
+        },
+    }
+    return {
+        "pollutants": ["phosphate", "temperature"],
+        "additive_pollutants": ["phosphate"],
+        "non_additive_pollutants": ["temperature"],
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "moor",
+                [
+                    _pervious(
+                        "fen",
+                        area=8000.0,
+                        depth=0.5,
+                        infiltration_capacity=0.01,
+                        initial_storage=1500.0,
+                    ),
+                    _pervious(
+                        "heath",
+                        area=6000.0,
+                        depth=1.0,
+                        total_porosity=0.45,
+                        field_capacity=0.32,
+                        wilting_point=0.15,
+                        infiltration_capacity=0.008,
+                        initial_storage=2500.0,
+                    ),
+                    _impervious("roof", area=500.0, pore_depth=0.001),
+                ],
+                forcing,
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("moor_to_aquifer", "moor", "aquifer"),
+            _arc("moor_to_brook", "moor", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "overrides": {"nodes": {"moor": {"type_": "Land", "name": "moor", "surfaces": weights}}},
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
 # --- the cases no node task owns (Task 17) ---------------------------------------------------
 _SIMPLE = {  # ``set_simple_pollutants`` (constants.py:93-97)
     "pollutants": ["phosphate", "temperature"],
@@ -1602,6 +1668,12 @@ CASES: dict[str, Case] = {
         days=_LAND_DAYS,
         scale=2000.0,
         replay=("farm",),
+    ),
+    "soil_temperature": Case(
+        build=_soil_temperature,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("moor",),
     ),
     "evaporation_clamp": Case(
         build=_evaporation_clamp,

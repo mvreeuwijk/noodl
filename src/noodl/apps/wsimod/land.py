@@ -398,6 +398,17 @@ class PerviousSurface(Surface):
         """The day's parameters; the IHACRES denominators ``depth - field_capacity_m`` and
         ``depth - wilting_point_m`` must stay positive (``land.py:942``, ``:950``)."""
         super().bind(parameters)
+        if "temperature" in self.p.names:
+            total = (
+                self._param("soil_temp_w_air")
+                + self._param("soil_temp_w_deep")
+                + self._param("soil_temp_w_prev")
+            )
+            if bool((total == 0).any()):
+                raise ValueError(
+                    f"{self.site}: the total weight soil_temp_w_air + soil_temp_w_deep + "
+                    "soil_temp_w_prev is 0 (land.py:1073 divides by it)"
+                )
         for name, value in (
             ("field_capacity", self.field_capacity_m),
             ("wilting_point", self.wilting_point_m),
@@ -504,8 +515,9 @@ class PerviousSurface(Surface):
     def calculate_soil_temperature(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:1060-1079``: the storage's temperature becomes
         ``(T_s w_prev + T_air w_air + T_deep w_deep) / (w_air + w_deep + w_prev)``. With pollutants
-        on, :meth:`Land.validate` admits only ``w_air = w_deep = 0`` and ``w_prev > 0`` (3b), an
-        identity to rounding; without a ``temperature`` column there is nothing to write."""
+        on, any weights are accepted unless they sum to 0 (``land.py:1073`` divides by the sum;
+        ``bind`` refuses a zero total weight); without a ``temperature`` column there is nothing
+        to write. The expression is WSIMOD's, term by term, so it is bitwise equal."""
         if "temperature" not in self.p.names:
             return self.ctx.empty(), self.ctx.empty()
         column = self.p.column("temperature")
@@ -614,9 +626,7 @@ class Land(Node):
         self.store_paths = self.store_paths_of([(s.cls, s.name) for s in spec.surfaces])
         # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
         # running mass balance are the day's (W75)
-        self.carried_paths = tuple(
-            p for p in self.store_paths if p.endswith(".storage")
-        )
+        self.carried_paths = tuple(p for p in self.store_paths if p.endswith(".storage"))
 
     @classmethod
     def store_paths_of(cls, surfaces: Sequence[tuple[str, str]]) -> tuple[str, ...]:
@@ -839,9 +849,9 @@ def _validate_surface(
       (``:942``, ``:950`` divide by the difference), a positive simulated depth less either, a
       non-zero ``area`` (``get_cmd`` divides, ``:893``) and ``ihacres_p >= 0`` (``0 ** p`` with
       ``p < 0`` raises ``ZeroDivisionError`` on a saturated soil). With pollutants on, a
-      ``temperature`` pollutant (``calculate_soil_temperature`` reads it, ``:1069``) and the
-      neutral soil temperature ``soil_temp_w_air = soil_temp_w_deep = 0``,
-      ``soil_temp_w_prev > 0`` (3b).
+      ``temperature`` pollutant (``calculate_soil_temperature`` reads it, ``:1069``) and a
+      non-zero total soil weight ``soil_temp_w_air + soil_temp_w_deep + soil_temp_w_prev``
+      (``:1073``; ``ZeroDivisionError`` in WSIMOD).
     """
     ignored: list[str] = []
     prefix = f"surfaces.{surface.name}"
@@ -856,7 +866,7 @@ def _validate_surface(
         if pollutants:
             raise ValueError(
                 f"{where}: surface deposition data {sorted(variables)[0]!r} is sub-project 3c; "
-                "run build_model(network, pollutants=False) until sub-projects 3b and 3c"
+                "run build_model(network, pollutants=False) until sub-project 3c"
             )
         ignored.append(f"{prefix}.data_input_dict")
     load = surface.parameters.get("pollutant_load") or {}
@@ -867,7 +877,7 @@ def _validate_surface(
                     raise ValueError(
                         f"{where}: pollutant_load {key!r}: {value!r} is deposition, sub-project "
                         "3c (only zero loads of additive pollutants are accepted); "
-                        "run build_model(network, pollutants=False) until sub-projects 3b and 3c"
+                        "run build_model(network, pollutants=False) until sub-project 3c"
                     )
         else:
             ignored.append(f"{prefix}.pollutant_load")
@@ -907,12 +917,13 @@ def _validate_surface(
                 f"{where}: a PerviousSurface needs a 'temperature' pollutant "
                 "(calculate_soil_temperature reads it, land.py:1069, KeyError)"
             )
-        if not neutral:
+        total = (
+            weights["soil_temp_w_air"] + weights["soil_temp_w_deep"] + weights["soil_temp_w_prev"]
+        )
+        if total == 0:
             raise ValueError(
-                f"{where}: the soil temperature process is sub-project 3b; set "
-                "soil_temp_w_air = soil_temp_w_deep = 0 and soil_temp_w_prev > 0 "
-                f"(got {weights}); "
-                "run build_model(network, pollutants=False) until sub-project 3b"
+                f"{where}: the total weight soil_temp_w_air + soil_temp_w_deep + "
+                f"soil_temp_w_prev is 0 (land.py:1073 divides by it); got {weights}"
             )
     elif not neutral and "temperature" in network.pollutants.names:
         ignored += [f"{prefix}.{k}" for k in SOIL_TEMPERATURE_DEFAULTS]

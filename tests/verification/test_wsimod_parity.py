@@ -52,14 +52,13 @@ DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
 CONFIG = {"quantity": "config.yml", "pollutants": "config_no_deposition.yml"}
 FULL = 1456  # both demos' dates
 
-# 3a refuses the demos' default soil-temperature weights and runs no WTW processes on them
-# (sub-project 3b); each task removes its marks when it ports the process (plan D1)
-SOIL = pytest.mark.xfail(strict=True, raises=ValueError, reason="soil temperature is Task 2")
+# 3a runs no WTW processes on the pollutant demos (sub-project 3b); the task that ports the
+# process removes its marks (plan D1)
 WTW = pytest.mark.xfail(strict=True, raises=ValueError, reason="the WTW processes are Task 3")
 
 DEMOS = [
     pytest.param("quickstart", "quantity", FULL, id="quickstart-quantity"),
-    pytest.param("quickstart", "pollutants", FULL, id="quickstart-pollutants", marks=SOIL),
+    pytest.param("quickstart", "pollutants", FULL, id="quickstart-pollutants"),
     pytest.param("oxford", "quantity", 365, id="oxford365-quantity"),
     pytest.param("oxford", "pollutants", 365, id="oxford365-pollutants", marks=WTW),
     pytest.param("oxford", "quantity", FULL, id="oxford-quantity", marks=pytest.mark.slow),
@@ -110,7 +109,7 @@ def test_demo_matches_wsimod(case, mode, days):
 
 @pytest.mark.parametrize(
     "case",
-    [pytest.param("quickstart", marks=SOIL), pytest.param("oxford", marks=WTW)],
+    [pytest.param("quickstart"), pytest.param("oxford", marks=WTW)],
 )
 def test_demo_quantity_only_equals_the_pollutant_run_volumes(case):
     """Spec, Verification 3: a quantity-only run's volumes equal the pollutant run's, exactly
@@ -168,7 +167,6 @@ def _name(label: tuple[str, str] | str) -> str:
     return label if isinstance(label, str) else f"{label[0]}.{label[1]}"
 
 
-@SOIL
 @pytest.mark.parametrize(
     ("group", "element"),
     [
@@ -212,7 +210,6 @@ def test_a_difference_beyond_the_bound_is_named_by_element_and_day(group, elemen
         )
 
 
-@SOIL
 def test_different_arc_names_or_day_counts_are_refused():
     results, diagnostics, reference = _perturbed()
     kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}
@@ -230,7 +227,6 @@ def test_different_arc_names_or_day_counts_are_refused():
         assert_matches_wsimod(shifted, reference, **kwargs)
 
 
-@SOIL
 def test_an_admission_needs_a_decision_within_its_margin_that_day():
     results, diagnostics, reference = _perturbed()
     column, scale = _busiest_arc(reference)
@@ -296,7 +292,6 @@ def _with_print(kind: str, day: int, node: int, *, names: list[str] | None = Non
     return results, diagnostics, reference
 
 
-@SOIL
 @pytest.mark.parametrize("kind", ["deficit", "maxiter"])
 def test_a_dated_print_matches_the_flag_of_its_node_and_day(kind):
     kwargs = {"case": "quickstart", "quality": True}
@@ -309,7 +304,6 @@ def test_a_dated_print_matches_the_flag_of_its_node_and_day(kind):
         assert_matches_wsimod(results, reference, diagnostics=diagnostics, **kwargs)
 
 
-@SOIL
 def test_a_wrong_node_name_mapping_fails_the_deficit_check():
     names = list(ours("quickstart", "pollutants", 10, True)[1]["node_names"])
     assert len(names) > 1
@@ -321,7 +315,6 @@ def test_a_wrong_node_name_mapping_fails_the_deficit_check():
         )
 
 
-@SOIL
 def test_a_wrong_maxiter_site_name_fails_the_maxiter_check():
     results, diagnostics, reference = _with_print("maxiter", 3, 0)
     reference.printed = [reference.printed[0].replace("reached in ", "reached in not_")]
@@ -331,7 +324,6 @@ def test_a_wrong_maxiter_site_name_fails_the_maxiter_check():
         )
 
 
-@SOIL
 def test_a_print_noodl_does_not_record_is_refused():
     results, diagnostics, reference = _perturbed(10)
     reference = copy.deepcopy(reference)
@@ -433,7 +425,7 @@ def test_the_cases_cover_every_listed_feature():
     sewer_timearea foul_sewers groundwater_infiltrate wwtw_storm_tank fwtw_deficit_sludge
     queue_tank_time_zero wtw_zero_input impervious_only pervious_only evaporation_clamp
     temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
-    batch_divergence capacity_first_come simple_pollutants float_accuracy_override
+    batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
     node_type_override""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
@@ -516,7 +508,6 @@ def test_the_evaporation_clamp_prints_are_accepted_only_where_they_match_noodl()
         assert_matches_wsimod(results, unflagged, diagnostics=diagnostics, **kwargs)
 
 
-@SOIL
 def test_an_undated_print_needs_noodls_event_and_a_dated_one_its_node_and_day():
     results, diagnostics, reference = _perturbed(10)
     kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}

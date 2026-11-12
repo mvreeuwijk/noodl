@@ -322,10 +322,96 @@ def test_the_soil_temperature_is_neutral_with_the_neutral_weights():
     blended = (10.0 * hand["total"] + 0.0 * 18.0) / (18.0 + hand["total"])
     assert float(rural.storage[1 + PP.names.index("temperature")]) == blended
     assert float(rural.infiltration_excess[2]) == 10.0
-    # WSIMOD's default weights move the temperature (3b; refused with pollutants on)
-    land, rural, _ = _one_pervious_day(18.0, 0.004, 0.002, pollutants=PP)
-    expected = (blended * 0.1 + 10.0 * 0.6 + 10 * 0.1) / (0.6 + 0.1 + 0.1)
-    assert float(rural.storage[2]) == expected
+
+
+def _soil_temperature(weights, storage_temperature=12.0, air=18.0, *, shape=()):
+    """One call of ``calculate_soil_temperature`` with the storage at that temperature."""
+    land = make_land([surface("PerviousSurface", "rural", **_RURAL)], pollutants=PP)
+    rural = land.surfaces[0]
+    day(land, pollutants=PP, shape=shape)
+    rural.storage = PP.to_vqip({"volume": 20.0, "temperature": storage_temperature})
+    parameters = {
+        f"surfaces.rural.{k}": torch.as_tensor(v, dtype=torch.float64) for k, v in weights.items()
+    }
+    land.bind({**forcing(0.0, 0.0, air), **parameters})
+    in_, out_ = rural.calculate_soil_temperature(active=TRUE)
+    return rural, in_, out_
+
+
+def test_the_soil_temperature_moves_with_wsimods_default_weights():
+    """``land.py:1073-1079`` with the defaults of ``:809-812``; Python's expression, bitwise."""
+    weights = {
+        "soil_temp_w_prev": 0.1,
+        "soil_temp_w_air": 0.6,
+        "soil_temp_w_deep": 0.1,
+        "soil_temp_deep": 10,
+    }
+    rural, in_, out_ = _soil_temperature(weights)
+    expected = (12.0 * 0.1 + 18.0 * 0.6 + 10 * 0.1) / (0.6 + 0.1 + 0.1)
+    assert torch.equal(
+        rural.storage[1 + PP.names.index("temperature")],
+        torch.tensor(expected, dtype=torch.float64),
+    )
+    assert float(in_.abs().sum()) == 0 and float(out_.abs().sum()) == 0
+
+
+def test_a_zero_previous_weight_forgets_the_storage_temperature():
+    weights = {"soil_temp_w_prev": 0, "soil_temp_w_air": 1, "soil_temp_w_deep": 0}
+    rural, _, _ = _soil_temperature(weights)
+    expected = (12.0 * 0 + 18.0 * 1 + 10 * 0) / (1 + 0 + 0)
+    assert float(rural.storage[1 + PP.names.index("temperature")]) == expected == 18.0
+
+
+def test_a_zero_total_soil_weight_is_refused():
+    """``land.py:1073`` divides by the total weight: refused in the configuration and at bind."""
+    zero = {"soil_temp_w_prev": 0, "soil_temp_w_air": 0, "soil_temp_w_deep": 0}
+    mapping = _mapping([_pervious()], overrides={"rural": zero}, lists=_LISTS)
+    with pytest.raises(ValueError, match="total weight"):
+        _validate(mapping, pollutants=True)
+    # a quantity-only run never divides
+    _validate(mapping, pollutants=False)
+    land = make_land([surface("PerviousSurface", "rural", **_RURAL)], pollutants=PP)
+    day(land, shape=(2,), pollutants=PP)
+    batch = torch.tensor([0.0, 0.5], dtype=torch.float64)
+    with pytest.raises(ValueError, match=r"rural.*total weight"):
+        land.bind(
+            {
+                "surfaces.rural.soil_temp_w_prev": batch,
+                "surfaces.rural.soil_temp_w_air": torch.zeros(2, dtype=torch.float64),
+                "surfaces.rural.soil_temp_w_deep": torch.zeros(2, dtype=torch.float64),
+            }
+        )
+
+
+def test_deposition_refusals_name_only_3c():
+    mapping = _mapping(
+        [_pervious(pollutant_load={"phosphate": 1e-6})],
+        overrides={"rural": _NEUTRAL},
+        lists=_LISTS,
+    )
+    with pytest.raises(ValueError, match="3c") as error:
+        _validate(mapping, pollutants=True)
+    assert "3b" not in str(error.value)
+    data = _mapping(
+        [
+            {
+                "type_": "ImperviousSurface",
+                "surface": "r",
+                "data_input_dict": {("nhx-dry", "2000-01-01"): 1e-6},
+            }
+        ],
+        lists=_LISTS,
+    )
+    with pytest.raises(ValueError, match="3c") as error:
+        _validate(data, pollutants=True)
+    assert "3b" not in str(error.value)
+
+
+def test_any_soil_weights_with_a_non_zero_total_are_accepted():
+    assert _validate(_mapping([_pervious()], lists=_LISTS), pollutants=True) == []
+    zero_prev = {**_NEUTRAL, "soil_temp_w_prev": 0, "soil_temp_w_air": 1}
+    mapping = _mapping([_pervious()], overrides={"rural": zero_prev}, lists=_LISTS)
+    assert _validate(mapping, pollutants=True) == []
 
 
 # --- Land.run -----------------------------------------------------------------------------------
@@ -733,16 +819,6 @@ def test_porosity_not_above_field_capacity_is_refused():
             ),
             False,
             "'precipitation' is not read",
-        ),
-        (_mapping([_pervious()], lists=_LISTS), True, "3b"),
-        (
-            _mapping(
-                [_pervious()],
-                overrides={"rural": {**_NEUTRAL, "soil_temp_w_prev": 0}},
-                lists=_LISTS,
-            ),
-            True,
-            "3b",
         ),
         (
             _mapping(
