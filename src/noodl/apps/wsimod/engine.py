@@ -24,10 +24,14 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   a ``QueueArc``'s ``arc:A/send_push_request/below_fa`` and, in ``update_queue``, one
   ``arc:A/update_queue/<push|pull>:<i>,<j>/below_fa`` per waiting row and
   ``arc:A/update_queue/<push|pull>:new/below_fa`` for the call's own request (each evaluated
-  where the row is present).
+  where the row is present). A user ``DecayArc`` or ``DecayArcAlt`` adds
+  ``arc:A/make_decay/cap:<pollutant>`` (its ``Decay``'s cap, evaluated at bind, D5); a
+  ``DecayArc``'s event ``"decay_arc_order_unknown"`` (D21) is recorded at the arc's name.
   A tank is not a node: its sites are its owner's with the tank's attribute path,
   ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
   ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,
+  ``node:N/<tank>/make_decay/cap:<pollutant>`` (a ``Decay``'s cap, evaluated at bind, D5;
+  a ``DecayQueueTank``'s is its internal arc's, ``node:N/tank/internal_arc/make_decay/cap:<p>``),
   ``node:N/<tank>/pull_ponded/excess``, ``node:N/<tank>/evaporate/clip``, and for a
   ``QueueTank`` ``node:N/<tank>/push_check/clip`` and
   ``node:N/<tank>/pull_storage_exact/clip:<volume|additive pollutant>``; its internal arc's
@@ -35,7 +39,18 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``send_push_request/{below_fa,clip}``). The storage family adds
   ``node:N/infiltrate/excess``, ``node:N/pull_check_active/clip``,
   ``node:N/pull_set_active/{clip,below_fa}``, ``node:N/push_check_river_reservoir/clip`` and
-  ``node:N/satisfy_environmental/owed``; a ``Demand``'s ``node:N/create_demand/deficit`` and
+  ``node:N/satisfy_environmental/owed``; a ``River`` with biochemistry (``"nitrate"`` a
+  pollutant) adds ``node:N/biochemical_processes/<branch>`` (``storage.py:766-893``, ``call``
+  the index of the day's ``calculate_discharge`` call) for the branches ``dry``, ``frozen``
+  (``dry`` under ``active``, ``frozen`` under ``active & ~dry``), then, under the mask the
+  guards leave, ``cold``,
+  ``denitrification_cap``, ``din:denitrification``, ``totalphosfcn``, ``production``,
+  ``production_cap:{N,P}`` and ``din:production`` (where it produces),
+  ``mineralisation_cap:{N,P}`` and ``din:mineralisation`` (where it mineralises),
+  ``macrophyte_temperature``, ``macrophyte_factor``, ``macrophyte_cap:N``, ``din:macrophyte``,
+  ``macrophyte_phosphorus`` and ``macrophyte_cap:P``, and noodl's event
+  ``"river_nitrogen_lost"`` (mineralisation with ``din == 0`` and a positive capped
+  ``minprodN``: the nitrogen is destroyed, X15); a ``Demand``'s ``node:N/create_demand/deficit`` and
   ``node:N/create_demand/not_able_to_push:<garden|house|default>`` (``demand.py:90``, ``:114``;
   events ``"demand_deficit"``, ``"demand_not_able_to_push"``); a leaking ``Distribution``'s
   ``node:N/pull_set_leakage/unsuccessful`` (``distribution.py:46``; event
@@ -305,7 +320,13 @@ class Engine:
 
     def end_day(self) -> None:
         """``end_timestep`` on every node in configuration order, then on every arc
-        (``model.py:1172-1176``)."""
+        (``model.py:1172-1176``).
+
+        The end-of-day rule: an ``end_timestep`` must not call ``ctx.decide`` or ``ctx.call``.
+        Such a call would be absent from the D2 sequence check, and the D14 re-snapshot
+        (``WsimodDay._finish_record``) would miss it, since it re-snapshots no decision and no
+        ``maxiter``. It may record terms, drops and events. Decay caps are evaluated at bind
+        (D5), not here."""
         for node in self.nodes.values():
             node.end_timestep()
         for arc in self.arcs.values():

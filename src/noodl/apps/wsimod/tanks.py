@@ -10,10 +10,12 @@ The arithmetic is WSIMOD's ``+ - * /`` and ``min``/``max`` in WSIMOD's order, so
 bitwise WSIMOD's.
 
 ``storage`` is a VQIP ``(..., 1 + K)``; a :class:`QueueTank` adds ``active_storage`` and the
-shift register of its internal :class:`~noodl.apps.wsimod.arcs.AltQueueArc`. :meth:`Tank.stores`
-names them by WSIMOD attribute path, relative to the tank (``storage``, ``active_storage``,
-``internal_arc.register``, ``internal_arc.present``). ``storage_`` and the other lagged copies
-serve only WSIMOD's mass balance and are not ported (spec, State).
+shift register of its internal :class:`~noodl.apps.wsimod.arcs.AltQueueArc` (a
+:class:`DecayQueueTank`'s is a :class:`~noodl.apps.wsimod.arcs.DecayArcAlt`, which adds
+``total_decayed``). :meth:`Tank.stores` names them by WSIMOD attribute path, relative to the
+tank (``storage``, ``active_storage``, ``internal_arc.register``, ``internal_arc.present``).
+``storage_`` and the other lagged copies serve only WSIMOD's mass balance and are not ported
+(spec, State).
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from typing import ClassVar
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.arcs import AltQueueArc, check_travel_time
+from noodl.apps.wsimod.arcs import AltQueueArc, DecayArcAlt, check_travel_time
 from noodl.apps.wsimod.config import ArcSpec
 from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
@@ -38,7 +40,7 @@ from noodl.apps.wsimod.vqip import (
     write,
 )
 
-__all__ = ["DecayTank", "QueueTank", "ResidenceTank", "Tank", "bind_timearea"]
+__all__ = ["DecayQueueTank", "DecayTank", "QueueTank", "ResidenceTank", "Tank", "bind_timearea"]
 
 
 def _f64(x) -> Tensor:
@@ -274,22 +276,45 @@ class ResidenceTank(Tank):
 
 
 class DecayTank(Tank):
-    """``DecayTank`` (``tanks.py:403-457``) with empty ``decays`` only (decay is 3b).
+    """``DecayTank`` (``tanks.py:403-457``): a tank that decays its storage at the end of the day.
 
-    ``end_timestep`` (``end_timestep_decay``, ``:442-447``) reads the parent's
-    ``("temperature", t)`` (``core.py:484-487``), so a missing temperature fails as WSIMOD's
-    ``KeyError`` does, and with no decays it leaves the storage unchanged.
-    ``parent`` is the node whose bound parameters hold ``"temperature"``.
+    ``end_timestep`` (``end_timestep_decay``, ``:442-447``) resets ``total_decayed``, decays
+    ``storage`` with the day's factor and adds the decayed mass to ``total_decayed``
+    (``core.py:474-492``). The factor and its cap were evaluated when the owner bound the
+    parameters (D5: ``decay.bind``), so no decision is taken here (the end-of-day rule,
+    ``Engine.end_day``). The decayed mass is the mass-balance term ``"DecayTank.decayed"``, an
+    ``"out"`` term that the owning class declares. ``total_decayed`` is a per-day store (D8).
+
+    With ``decay=None`` (empty ``decays``) the storage is unchanged, but the end of the day
+    still reads the parent's ``("temperature", t)`` (``core.py:484-487``), so a missing
+    temperature fails as WSIMOD's ``KeyError`` does. ``parent`` is the node whose bound
+    parameters hold ``"temperature"``.
     """
 
-    def __init__(self, pollutants: Pollutants, *, parent, **kwargs) -> None:
+    def __init__(self, pollutants: Pollutants, *, parent, decay=None, **kwargs) -> None:
         self.parent = parent
+        self.decay = decay
         super().__init__(pollutants, **kwargs)
+        self.total_decayed = empty(pollutants, ())
+
+    def stores(self) -> dict[str, Tensor]:
+        """``storage`` and the per-day ``total_decayed`` (D8): reset at every ``end_timestep``,
+        so the owner does not carry it, but the replay compares it."""
+        return {**super().stores(), "total_decayed": self.total_decayed}
 
     def end_timestep(self) -> None:
-        if "temperature" not in self.parent.params:
-            raise KeyError(f"{self.site}: the parent has no ('temperature', t) forcing")
-        # generic_temperature_decay over no pollutants: storage unchanged (core.py:507-520)
+        if self.decay is None:
+            # tanks.py:444: reset even over no pollutants. Deliberately unbatched (the init
+            # shape): nothing decays here, so nothing reads it at a batch shape.
+            self.total_decayed = empty(self.p, ())
+            if "temperature" not in self.parent.params:
+                raise KeyError(f"{self.site}: the parent has no ('temperature', t) forcing")
+            return  # generic_temperature_decay over no pollutants: storage unchanged
+        ctx = self.ctx
+        self.total_decayed = ctx.empty()  # tanks.py:444
+        self.storage, diff = self.decay.make_decay(self.storage)  # :447
+        self.total_decayed = sum_vqip(self.p, self.total_decayed, diff)  # core.py:491
+        ctx.term("DecayTank.decayed", diff, torch.ones(ctx.shape, dtype=torch.bool))
 
 
 class QueueTank(Tank):
@@ -474,3 +499,61 @@ class QueueTank(Tank):
         ``active_storage`` (``update_queue``), for every instance."""
         self.internal_arc.end_timestep()
         self.internal_arc.update_queue(active=torch.ones(self.ctx.shape, dtype=torch.bool))
+
+
+class DecayQueueTank(QueueTank):
+    """``DecayQueueTank`` (``tanks.py:645-696``): a :class:`QueueTank` whose internal arc is a
+    :class:`~noodl.apps.wsimod.arcs.DecayArcAlt` with ``parent`` the owning node
+    (``:663-669``), so the queued water decays on entry and at every end of day.
+
+    ``number_of_timesteps`` defaults to **1** (``:648``), against the class's docstring
+    ("Defaults to 0", ``:656-658``) and ``QueueTank``'s 0 (``:463``); a decaying
+    ``QueueGroundwater`` passes none (``storage.py:308-315``), so every entry waits a day longer
+    than in a non-decaying one (X12). Pushes and pulls are :class:`QueueTank`'s: ``storage``
+    gains the **undecayed** accepted part (``:536-538``) and the pulls read ``active_storage``.
+
+    :meth:`end_timestep` (``_end_timestep``, ``:689-696``) is transcribed as written (X13):
+
+    - ``storage`` loses the internal arc's ``total_decayed`` **before** the arc's own end of
+      day resets it (``:694``): that day's entry decay plus the previous end of day's decay, so
+      the decay reaches ``storage`` a day late. The loss is the ``"out"`` term
+      ``"DecayQueueTank.decayed"``, which the owner declares;
+    - ``active_storage`` never decays (the TODO at ``:692-693``);
+    - there is no ``update_queue``: water that reaches slot 0 at the end of the day waits there,
+      and decays again, until the next push or the owner's ``update_queue``.
+    """
+
+    wsimod_type: ClassVar[str] = "DecayQueueTank"
+
+    def __init__(
+        self, pollutants: Pollutants, *, parent, decay=None, number_of_timesteps: int = 1, **kwargs
+    ) -> None:
+        super().__init__(pollutants, number_of_timesteps=number_of_timesteps, **kwargs)
+        self.parent = parent
+        queue = self.internal_arc
+        # tanks.py:663-669: the internal arc is replaced (it files itself in the same dicts)
+        self.internal_arc = DecayArcAlt(
+            queue.spec,
+            self,
+            self,
+            pollutants,
+            decay=decay,
+            parent=parent,
+            length=queue.length,
+            site=queue.site,
+            owner=self.owner,
+        )
+
+    @property
+    def decay(self):
+        """The internal arc's :class:`~noodl.apps.wsimod.decay.Decay` (the owner binds it)."""
+        return self.internal_arc.decay
+
+    def end_timestep(self) -> None:
+        """``tanks.py:689-696``: extract the lagged ``total_decayed``, then the arc's end of day;
+        no ``update_queue`` (see the class text)."""
+        ctx, arc = self.ctx, self.internal_arc
+        decayed = arc.total_decayed
+        self.storage = extract_vqip(self.p, self.storage, decayed)  # :694
+        ctx.term("DecayQueueTank.decayed", decayed, torch.ones(ctx.shape, dtype=torch.bool))
+        arc.end_timestep()  # :696

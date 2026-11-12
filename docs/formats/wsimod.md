@@ -90,20 +90,47 @@ refused by name.
 - `NodeSpec.parameters` holds the class's defaults, then the configuration's values, then the
   overrides, per node (WSIMOD's shared mutable defaults are not reproduced). A treatment works
   with an empty `process_parameters` or `liquor_multiplier` gets WSIMOD's defaults for the
-  model's additive pollutants (`wtw.py:73-85`).
-- `decays` must be `None` on the Storage family (any dict, even `{}`, builds a `DecayTank`) and
-  empty on a surface; anything else is refused by name (sub-project 3b).
+  model's additive pollutants (`wtw.py:73-85`): constant 0.01, exponent 1.001, multiplier 0.7 and
+  volume 0.03. A non-empty `process_parameters` must name every additive pollutant with its
+  `constant` and `exponent`, and a non-empty `liquor_multiplier` every additive pollutant and
+  `volume`; WSIMOD raises `KeyError` otherwise, and so the reader refuses it by name. Entries for
+  a pollutant that is not additive or not listed, a `volume` `exponent` and an `exponent` of 0 or
+  below are refused when the model is built (WSIMOD never reads the first two, and `0 **
+  negative` raises).
+- `decays` is `None` (a plain tank) or a dict (a `DecayTank`, `{}` included) on `Storage`,
+  `Reservoir`, `RiverReservoir` and `River`: a key per decaying pollutant, each with exactly
+  `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
+  forcing on every date. A `Groundwater` loses its configured forcing (`storage.py:202-203`), so
+  its dict needs a `filename` override that gives `temperature` on every date, and so does a
+  `QueueGroundwater`'s (`storage.py:291-292`), which builds a `DecayQueueTank`. A surface takes
+  `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
+  air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
-  `DecayArc` and `DecayArcAlt` (sub-project 3b), `GrowingSurface`, `IrrigationSurface`,
-  `GardenSurface` and `VariableAreaSurface` (3c), and `EnfieldFoulSewer`, whose
-  `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
+  `GrowingSurface`, `IrrigationSurface`, `GardenSurface` and `VariableAreaSurface` (3c), and
+  `EnfieldFoulSewer`, whose `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
 
 ### Arcs
 
 `name`, `type_`, `in_port`, `out_port` (node names), `capacity`, `preference` and, for the queue
-arcs (`QueueArc`, `AltQueueArc`), `number_of_timesteps`. `decays` is refused (it belongs to the
-`Decay*` arcs of sub-project 3b). WSIMOD's `Arc` accepts any extra keyword silently; the reader
-refuses it by name.
+arcs (`QueueArc`, `AltQueueArc`, `DecayArc`, `DecayArcAlt`), `number_of_timesteps`. WSIMOD's
+`Arc` accepts any extra keyword silently; the reader refuses it by name.
+
+- `decays` is read on the user decay arcs `DecayArc` (a `QueueArc`, `arcs.py:668-728`) and
+  `DecayArcAlt` (an `AltQueueArc`, `arcs.py:731-805`) only, with the storage family's form (a
+  key per decaying pollutant, each with exactly `constant` and `exponent`, `exponent > 0`) and
+  WSIMOD's default `{}`; `decays: None` is refused (WSIMOD iterates it). On every other arc
+  class `decays` is refused: WSIMOD would store it unread (`arcs.py:52`). An arc override of
+  `decays` is refused too: an arc's `apply_overrides` takes `capacity` and `preference` only
+  (`arcs.py:87-96`).
+- A decay arc decays at its **in-port's** temperature (`core.py:464-470`), for either
+  direction, so that node needs a `temperature` forcing on every date, in both modes; a missing
+  date is refused when the model is built, naming the arc and the node. A plain `Node` takes the
+  forcing as `data_input_dict` or a `filename` override (which is then read, not listed in
+  `unread`). A `Catchment` in-port reads its `temperature` series, whether or not `temperature`
+  is a pollutant.
+- `parent` is refused on every arc: a decay object reads its temperature from a `parent`
+  attribute when it has one (`core.py:465-468`), and a configured value would be read as a
+  node.
 
 ### Dates
 
@@ -128,19 +155,40 @@ compute derived quantities.
   surface's `depth` are deprecated in WSIMOD, which ignores them with a printed warning; they
   are refused here.
 - `pollutant_load` and `liquor_multiplier` merge by update (the other keys are kept),
-  `process_parameters` merges per pollutant, and `surfaces` (a `Land`) merges per named surface.
+  `process_parameters` merges per pollutant and per key (an override of one `constant` keeps the
+  `exponent`; a partial override is allowed where a partial configured entry is not), and `surfaces` (a `Land`) merges per named surface.
   Every other value replaces the old one. A pervious surface's `depth` is the physical depth, as
   in the configuration.
 - A pervious surface's soil-temperature overrides (`soil_temp_w_prev`, `soil_temp_w_air`,
   `soil_temp_w_deep`, `soil_temp_deep`) are state attributes in WSIMOD, not constructor keywords.
   They are stored in `SurfaceSpec.parameters` all the same, which is where the model builder
   reads them.
-- A `QueueGroundwater` override of `number_of_timesteps` (a key of its `QueueTank`, not a
-  constructor keyword of the node) is refused.
-- An override of `decays` is refused (decay is sub-project 3b).
-- `filename` (a node) and `data_input_dict` (a surface) are refused: WSIMOD opens an override's
-  file relative to the current working directory, not the configuration directory
-  (`nodes.py:93-99`, `land.py:413-421`).
+- A `River`'s biochemistry parameters are set by overrides: `uptake_PNratio`, `denpar_w`,
+  `T_wdays`, `halfsatINwater`, `hsatTP`, `limpppar`, `prodNpar`, `prodPpar`, `muptNpar`,
+  `muptPpar` (numbers; the defaults are WSIMOD's), and the structural `max_temp_lag` and
+  `max_phosphorus_lag` (whole numbers: the sizes of the two lag registers). `bulk_density` is
+  accepted and never read (`WsimodNetwork.unread`). The biochemistry runs when `nitrate` is among
+  the pollutants and needs `temperature`, `phosphate`, `org-phosphorus`, `ammonia`, `nitrate` and
+  `org-nitrogen`; `T_wdays` of 0, a river of zero area and `halfsatINwater <= 0` are refused.
+- A `QueueGroundwater` override of `number_of_timesteps` (a key of its tank, not a
+  constructor keyword of the node) is accepted on a node with `decays`: it sets the
+  `DecayQueueTank`'s and its internal arc's (`tanks.py:682-685`), for example to 0 instead of
+  WSIMOD's default 1. On a node without `decays` it is refused, and so is a configured
+  (non-override) `number_of_timesteps` on either.
+- An override of `decays` on the Storage family merges per pollutant, as `dict.update` does
+  (an entry replaces the pollutant's whole dict, so it needs both keys); it is refused on a node
+  built with `decays: None` (`storage.py:96-100`). On a surface it merges per surface
+  (WSIMOD's shared default `{}` would reach every surface built without a `decays` key).
+- A node's `filename` override is read as WSIMOD reads it (`nodes.py:93-99`, `model.py:1252-1269`):
+  the path as written, opened relative to the process's **working directory**, not the
+  configuration's directory (use absolute paths); the file's data replaces the node's forcing.
+  It is not the constructor's `filename` key, which is relative to the configuration. A falsy
+  non-string (`None`, `0`, `[]`) is ignored. The empty string is refused as a missing file
+  (WSIMOD opens `""` and raises `FileNotFoundError`), and any other non-string value is refused
+  by name (WSIMOD raises `RuntimeError`). On a class that reads no forcing (a `Waste`, say) the file is
+  still read and the override is listed in `WsimodNetwork.unread`. A `Groundwater`'s override is
+  its only forcing (X11). A surface's `filename` and any `data_input_dict` override are still
+  refused (deposition data, sub-project 3c; `land.py:413-421`).
 
 ## Units, order and what runs
 
@@ -151,5 +199,5 @@ constructs them and noodl runs them, so it decides the order of every push and p
 WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own is set-hash
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
-and run bit for bit as WSIMOD runs them; a configuration with real pollutant processes needs
-`pollutants=False` until sub-project 3b. See the [WSIMOD application](../applications/wsimod.md).
+and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
+(deposition, the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config_no_deposition.yml` neutralises the surfaces' `pollutant_load` and runs every ported process. See the [WSIMOD application](../applications/wsimod.md).

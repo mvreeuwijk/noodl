@@ -1,18 +1,26 @@
 """WSIMOD 0.8.1's treatment works (``wsimod/nodes/wtw.py``): ``WTW``, ``WWTW`` and ``FWTW``,
 batched.
 
-``treat_current_input`` (``wtw.py:163-214``) splits the day's input into treated water (the
-volume constant ``c_v = 1 - percent_solids - liquor_multiplier["volume"]``, ``:92``,
-``:104-110``), liquor (``liquor_multiplier["volume"]``) and solids (``percent_solids``). With
-pollutants on, only the neutral process is accepted (spec, Pollutants in 3a): every additive
-pollutant has ``process_parameters[p] = {constant: c_v, exponent: 1}`` and
-``liquor_multiplier[p] = liquor_multiplier["volume"]``, so each splits in the volume's
-proportions. ``exponent ** (DECAY_REFERENCE_TEMPERATURE - T)`` is then ``1.0 ** x``, which is
-exactly 1 for every float ``x`` (NaN included), and ``x * c * 1.0`` is exactly ``x * c`` in
-IEEE arithmetic: the factor is left out, and the arithmetic is WSIMOD's ``+ - * /`` in its
-order, so every value is bitwise WSIMOD's (``replay_bound = 0``). The pollutants take ``c_v``
-and ``liquor_multiplier["volume"]`` from the day's parameters, so a batch of either keeps the
-process neutral (D6: the pollutant entries are checked, not driven).
+``treat_current_input`` (``wtw.py:163-214``) splits the day's input into treated water, liquor
+and solids. The volume's constant is ``c_v = 1 - percent_solids - liquor_multiplier["volume"]``
+(``:92``, ``:104-110``); each additive pollutant ``k`` has its own ``process_parameters[k] =
+{constant, exponent}`` and ``liquor_multiplier[k]`` (``:72-85``, ``:121-128``, ``:130-153``), and
+
+    treated[k] = influent[k] * constant[k] * exponent[k] ** (20 - T)      (``:188-199``)
+    liquor[k]  = influent[k] * liquor_multiplier[k]                        (``:201``)
+    solids[k]  = influent[k] - treated[k] - liquor[k]                      (``:207-208``)
+
+with ``T`` the influent's temperature and no temperature factor for the volume (``:195``). The
+power is :func:`~noodl.apps.wsimod.vqip.pow_python`, evaluated per instance by Python, and the
+products run left to right, so every value is bitwise WSIMOD's (``replay_bound = 0``). The
+factor rises as the temperature falls when ``exponent > 1``, and nothing caps ``constant x
+factor + liquor_multiplier``: where it exceeds 1 an additive solids column is negative (the
+works creates mass; WSIMOD's lists still close, the solids being the remainder) and noodl
+records ``"wtw_negative_solids"`` (X22). Drivers (X10, X34), one row per node of the class:
+``wsimod.<Class>.process_parameters.constant`` and ``.exponent`` ``(..., n, K_add)`` (absent in a
+quantity-only run) and ``wsimod.<Class>.liquor_multiplier`` ``(..., n, 1 + K_add)``, columns
+``volume`` then the additive pollutants (``(..., n, 1)`` in a quantity-only run). The volume
+constant is derived from the day's ``percent_solids`` and ``liquor_multiplier["volume"]`` (D5).
 
 The non-additive liquor blend divides by ``V_liquor + V_in x m_v`` (``:174-182``), which is 0 on
 a day with no input and no previous liquor, and on every day with
@@ -35,6 +43,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 from torch import Tensor
 
+from noodl.apps.wsimod import constants
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
 from noodl.apps.wsimod.tanks import Tank
@@ -42,6 +51,7 @@ from noodl.apps.wsimod.vqip import (
     Pollutants,
     empty,
     extract_vqip,
+    pow_python,
     safe_den,
     sum_vqip,
     v_change_vqip,
@@ -64,6 +74,14 @@ def _f64(x) -> Tensor:
 def _volume_column(width: int) -> Tensor:
     """``[True, False, ...]``: the volume column of a VQIP of ``width`` columns."""
     return torch.arange(width) == 0
+
+
+def _join(first: Tensor, rest: Tensor) -> Tensor:
+    """``first`` and ``rest`` side by side along the last axis, their batch shapes broadcast."""
+    shape = torch.broadcast_shapes(first.shape[:-1], rest.shape[:-1])
+    return torch.cat(
+        [first.expand(*shape, first.shape[-1]), rest.expand(*shape, rest.shape[-1])], dim=-1
+    )
 
 
 def _liquor_multiplier(values: Mapping) -> Mapping:
@@ -115,7 +133,22 @@ class WTW(Node):
             name: _f64(values.get(name, default))
             for name, default in self.parameter_defaults.items()
         }
-        self.defaults["liquor_multiplier"] = _f64(_liquor_multiplier(values).get("volume", 0.03))
+        # X10, X34: the volume entry, then one per additive pollutant (none in a quantity-only run)
+        liquor = _liquor_multiplier(values)
+        additive = pollutants.additive
+        self.defaults["liquor_multiplier"] = _f64(
+            [liquor.get("volume", 0.03)] + [liquor.get(name, 0.7) for name in additive]
+        )
+        if additive:  # wtw.py:73-85: WSIMOD's defaults where a node is built without any
+            process = values.get("process_parameters") or {}
+            for field, default in (("constant", 0.01), ("exponent", 1.001)):
+                self.defaults[f"process_parameters.{field}"] = _f64(
+                    [process.get(name, {}).get(field, default) for name in additive]
+                )
+        # VQIP column -> column of the (volume, additive...) vectors; non-additive columns take
+        # the volume's, which the treatment never reads
+        position = {name: i + 1 for i, name in enumerate(additive)}
+        self._vector_columns = torch.tensor([0] + [position.get(n, 0) for n in pollutants.names])
         # wtw.py:95-96
         self.push_set_handler["default"] = self.push_set_deny
         self.push_check_handler["default"] = self.push_check_deny
@@ -144,16 +177,33 @@ class WTW(Node):
     def _param(self, name: str) -> Tensor:
         return self.params.get(name, self.defaults[name])
 
+    def driver_columns(self) -> dict[str, tuple[str, ...]]:
+        """``liquor_multiplier``: ``volume`` then the additive pollutants; the process
+        constants and exponents: the additive pollutants (X10, X34)."""
+        columns: dict[str, tuple[str, ...]] = {"liquor_multiplier": ("volume", *self.p.additive)}
+        if self.p.additive:
+            columns["process_parameters.constant"] = self.p.additive
+            columns["process_parameters.exponent"] = self.p.additive
+        return columns
+
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
-        """This day's parameters by name; the tank parameters reach the tank."""
+        """This day's parameters by name; the tank parameters reach the tank. An ``exponent``
+        of 0 or below is refused (``0 ** negative`` raises where ``T > 20``, a negative base
+        gives a complex number)."""
         super().bind(parameters)
+        exponent = self.params.get("process_parameters.exponent")
+        if exponent is not None and not bool((exponent.detach() > 0).all()):
+            raise ValueError(
+                f"node {self.name!r}: process_parameters exponent must be positive (wtw.py:191-193 "
+                f"raises 0 or a negative base to a power); got {exponent.detach().tolist()}"
+            )
         for name, (attribute, field) in self.tank_parameters.items():
             if name in self.params:
                 setattr(getattr(self, attribute), field, self.params[name])
 
     def volume_constant(self) -> Tensor:
         """``wtw.py:104-110``: ``1 - percent_solids - liquor_multiplier["volume"]``."""
-        return 1 - self._param("percent_solids") - self._param("liquor_multiplier")
+        return 1 - self._param("percent_solids") - self._param("liquor_multiplier")[..., 0]
 
     # --- state ------------------------------------------------------------------------------
     def stores(self) -> dict[str, Tensor]:
@@ -181,20 +231,22 @@ class WTW(Node):
         )
 
     def treat_current_input(self, *, active: Tensor) -> None:
-        """``wtw.py:163-214`` with the neutral process (module text).
+        """``wtw.py:163-214`` (module text).
 
         The non-additive columns of the treated water are the influent's; those of the liquor
         blend the old liquor with ``V_in x m_v`` of influent (``:174-182``, before the liquor
-        volume changes), keeping the old value where that denominator is 0. Treated water
-        ``x c_v``, liquor ``x m_v`` (``:188-201``), solids volume ``V x percent_solids`` and
-        additive solids ``influent - treated - liquor`` (``:204-208``); the solids'
-        non-additive columns are never written. ``treated`` accumulates (``:211``).
+        volume changes), keeping the old value where that denominator is 0. The volume and each
+        additive column ``k`` are independent (``:188-201``): treated ``x c_k f_k`` with ``f_k =
+        e_k ** (20 - T)`` (1 for the volume), liquor ``x m_k``. Solids volume ``V x
+        percent_solids`` and additive solids ``influent - treated - liquor`` (``:204-208``);
+        the solids' non-additive columns are never written. ``treated`` accumulates (``:211``).
         """
         ctx, p = self.ctx, self.p
         active = torch.as_tensor(active, dtype=torch.bool)
         call = ctx.call(self.site, "treat_current_input")
         influent = self.current_input.clone()  # copy_vqip (wtw.py:167)
-        m_v = self._param("liquor_multiplier")
+        multiplier = self._param("liquor_multiplier")  # (..., 1 + K_add): volume, additive
+        m_v = multiplier[..., 0]
         c_v = self.volume_constant()
         percent_solids = self._param("percent_solids")
         v_in = influent[..., :1]
@@ -217,9 +269,22 @@ class WTW(Node):
             )
             ctx.event("wtw_liquor_zero_denominator", self.name, active & zero)
             blended = torch.where(zero[..., None], old, num / safe_den(den))
-        # wtw.py:188-201: volume and additive columns
-        treated_add = influent * c_v[..., None]
-        liquor_add = influent * m_v[..., None]
+        # wtw.py:188-201: volume and additive columns, each its own constant, factor and
+        # multiplier; the vectors are (volume, additive...) and ``columns`` spreads them over
+        # the VQIP's columns (the non-additive ones are replaced below)
+        columns = self._vector_columns
+        constant = c_v[..., None]
+        if p.additive:
+            constant = _join(constant, self._param("process_parameters.constant"))
+            exponent = self._param("process_parameters.exponent")
+            temperature = influent[..., p.column("temperature") : p.column("temperature") + 1]
+            # wtw.py:191-193: exponent ** (20 - T), Python's power per instance
+            factor = pow_python(exponent, constants.DECAY_REFERENCE_TEMPERATURE - temperature)
+            factor = _join(torch.ones_like(factor[..., :1]), factor)
+            treated_add = influent * constant[..., columns] * factor[..., columns]
+        else:  # only the volume: x * c * 1 is x * c exactly (wtw.py:195)
+            treated_add = influent * constant[..., columns]
+        liquor_add = influent * multiplier[..., columns]
         solids_add = influent - treated_add - liquor_add
         solids_volume = v_in * percent_solids[..., None]
         non_add = p.non_additive_mask
@@ -233,6 +298,9 @@ class WTW(Node):
         self.treated = write(active, sum_vqip(p, self.treated, discharge), self.treated)
         seen = ctx.treated_input.get(self.name, ctx.empty())
         ctx.treated_input[self.name] = write(active, influent, seen)
+        # X22: the solids are the unclamped remainder, so they can be negative
+        negative = ((solids_add.detach() < 0) & p.additive_mask).any(dim=-1)
+        ctx.event("wtw_negative_solids", self.name, active & negative)
         more = (self.treated[..., 0] > self.current_input[..., 0]).detach()
         ctx.event("more_treated_than_input", self.name, active & more)
 
@@ -242,15 +310,18 @@ class WTW(Node):
         """``liquor_multiplier`` needs a ``volume`` entry (``wtw.py:110``). A configured volume
         process constant must be the derived one (WSIMOD replaces a configured one, ``:92``, but
         an override's ``update`` would replace the derived one, ``:146-148``). With pollutants
-        on, the processes must be neutral (3b, spec, Pollutants in 3a), and additive pollutants
-        need ``temperature`` among the pollutants (``:191-193`` reads it). A quantity-only run
-        ignores the pollutant entries of ``process_parameters`` and ``liquor_multiplier``."""
+        on, additive pollutants need ``temperature`` among the pollutants (``:191-193`` reads
+        it), and the entries WSIMOD never reads are refused (D20): one for a pollutant that is
+        not additive (``:188``), a volume ``exponent`` (``:195``), and an ``exponent`` of 0 or
+        below (``0 ** negative`` raises where ``T > 20``, a negative base gives a complex
+        number). A configuration lacking an additive pollutant is refused by the reader. A
+        quantity-only run ignores the pollutant entries of ``process_parameters`` and
+        ``liquor_multiplier``."""
         super().validate(spec, network, pollutants=pollutants)
         where = f"node {spec.name!r}"
         values = spec.parameters
         c_v = wtw_derived(spec)["volume_constant"]
         liquor = _liquor_multiplier(values)
-        m_v = liquor["volume"]
         process = values.get("process_parameters") or {}
         volume = process.get("volume")
         if volume is not None and "constant" in volume and volume["constant"] != c_v:
@@ -267,20 +338,24 @@ class WTW(Node):
                 ignored.append("liquor_multiplier")
             return ignored
         additive = network.pollutants.additive
-        neutral = {"constant": c_v, "exponent": 1}
+        for table, entries in (("process_parameters", process), ("liquor_multiplier", liquor)):
+            for name in entries:
+                if name != "volume" and name not in additive:
+                    raise ValueError(
+                        f"{where}: {table} has an entry for {name!r}, which is not an additive "
+                        "pollutant of the model (wtw.py:188 reads only the additive ones)"
+                    )
+        if volume is not None and "exponent" in volume:
+            raise ValueError(
+                f"{where}: process_parameters['volume'] has an 'exponent' (wtw.py:195 never "
+                "reads it)"
+            )
         for name in additive:
-            if process.get(name) != neutral:
+            exponent = process[name]["exponent"]
+            if not exponent > 0:
                 raise ValueError(
-                    f"{where}: process_parameters[{name!r}] {process.get(name)!r} is not the "
-                    f"neutral {neutral!r} (WTW pollutant processes are sub-project 3b); "
-                    "run build_model(network, pollutants=False) until sub-project 3b"
-                )
-            if liquor.get(name) != m_v:
-                raise ValueError(
-                    f"{where}: liquor_multiplier[{name!r}] {liquor.get(name)!r} is not "
-                    f"liquor_multiplier['volume'] = {m_v!r}: the process_parameters split is "
-                    "not neutral (WTW pollutant processes are sub-project 3b); "
-                    "run build_model(network, pollutants=False) until sub-project 3b"
+                    f"{where}: process_parameters[{name!r}] exponent {exponent!r} must be "
+                    "positive (wtw.py:191-193 raises 0 or a negative base to a power)"
                 )
         if additive and "temperature" not in network.pollutants.names:
             raise ValueError(

@@ -9,6 +9,7 @@ from noodl.apps.wsimod.vqip import (
     ds_vqip,
     empty,
     extract_vqip,
+    pow_python,
     safe_den,
     sum_vqip,
     tmax,
@@ -196,3 +197,17 @@ def test_pollutants_accepts_lists():
     p = Pollutants(["phosphate", "temperature"], ["phosphate"], ["temperature"])
     assert p.names == ("phosphate", "temperature") and p.additive == ("phosphate",)
     assert p == P and p.volume_or_additive_mask.tolist() == [True, True, False]
+
+
+def test_pow_python_is_pythons_power_bitwise():
+    """``pow_python`` is ``float.__pow__`` per element (``wtw.py:191-193``). ``torch.pow`` on a
+    batch takes a vectorised path that differs from it in the last bit (339 of these 20000 pairs
+    with torch 2.14 on x86-64; element by element it agrees), so this test fails if
+    ``pow_python`` is replaced by ``torch.pow``."""
+    generator = torch.Generator().manual_seed(11)
+    base = 0.5 + torch.rand(20000, generator=generator, dtype=torch.float64)
+    exponent = -30 + 60 * torch.rand(20000, generator=generator, dtype=torch.float64)
+    expected = torch.tensor(
+        [b**e for b, e in zip(base.tolist(), exponent.tolist(), strict=True)], dtype=torch.float64
+    )
+    assert torch.equal(pow_python(base, exponent), expected)

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from noodl.apps.wsimod import build_model
 from noodl.apps.wsimod.classes import (
     ARC_SCHEMAS,
     NODE_SCHEMAS,
@@ -416,11 +417,17 @@ REFUSALS = [
     (_node(type_="Land", surfaces=[{"type_": "ImperviousSurface", "depth": 1}]), "depth"),
     (_node(type_="Widget"), "Widget"),
     (_node(type_="Waste", capacityy=1), "capacityy"),
-    (_node(type_="Waste", filename="x.csv"), "data_input_dict"),
+    (_node(type_="Waste", filename="x.csv"), "data_input_dict"),  # a constructor key
     (_node(type_="Catchment", filename="missing.csv"), "missing.csv"),
     (_node(type_="Waste", name="a"), "'a'"),
-    (_arc(type_="DecayArc"), "3b"),
     (_arc(type_="Arc", decays={}), "decays"),
+    (_arc(type_="QueueArc", decays={}), "read only by DecayArc and DecayArcAlt"),
+    (_arc(type_="DecayArc", parent="x"), "parent"),
+    (_arc(type_="DecayArcAlt", parent="x"), "parent"),
+    (_arc(type_="Arc", parent="x"), "parent"),
+    (_arc(type_="DecayArc", decays=None), "decays must be a mapping"),
+    (_arc(type_="DecayArc", decays={"phosphate": {"constant": 1}}), "exponent"),
+    (_arc(type_="DecayArcAlt", decays={"unobtainium": {"constant": 1, "exponent": 1}}), "unob"),
     (_arc(type_="Arc", diameter=1), "diameter"),
     (_arc(type_="Arc", number_of_timesteps=2), "number_of_timesteps"),
     (_arc(type_="QueueArc", number_of_timesteps=1.5), "number_of_timesteps"),
@@ -430,7 +437,13 @@ REFUSALS = [
     (_override(node={"type_": "Reservoir", "name": "a"}), "Reservoir"),
     (_override(node={"type_": "Land", "name": "a"}), "'a'"),  # a is filed under Catchment
     (_override(node={"type_": "Catchment", "name": "a", "capacity": 1}), "capacity"),
-    (_override(node={"type_": "Catchment", "name": "a", "filename": "x.csv"}), "filename"),
+    (_override(node={"type_": "Catchment", "name": "a", "filename": "x.csv"}), "x.csv"),
+    (_override(node={"type_": "Catchment", "name": "a", "filename": 3}), "filename"),
+    (
+        _override(node={"type_": "Land", "name": "land", "surfaces": {"g": {"filename": "x.csv"}}}),
+        "filename",
+    ),
+    (_override(node={"type_": "Catchment", "name": "a", "data_input_dict": {}}), "data_input_dict"),
     (
         _override(
             node={"type_": "Land", "name": "land", "surfaces": {"g": {"data_input_dict": "x.csv"}}}
@@ -460,14 +473,197 @@ REFUSALS = [
         ),
         "depth",
     ),
-    (_node(type_="Storage", decays={}), "3b"),
-    (_node(type_="Groundwater", decays={"phosphate": {"constant": 1}}), "decays"),
-    (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "decays": {"a": 1}}]), "3b"),
+    (_node(type_="Groundwater", decays={"phosphate": {"constant": 1}}), "exponent"),
+    # a DecayQueueTank's number_of_timesteps is an override only (tanks.py:682-685, X28)
+    (_node(type_="QueueGroundwater", decays={}, number_of_timesteps=0), "number_of_timesteps"),
+    # read_decays at node level (Task 5's refusals)
+    (_node(type_="Storage", decays=[1]), "decays must be a mapping"),
+    (_node(type_="Storage", decays={"unobtainium": {"constant": 1, "exponent": 1}}), "unobtainium"),
+    (_node(type_="Storage", decays={"volume": {"constant": 1, "exponent": 1}}), "volume"),
+    (_node(type_="Reservoir", decays={"phosphate": {"constant": 1}}), "exponent"),
+    (_node(type_="River", decays={"phosphate": {"constant": 1, "exponent": 0}}), "exponent"),
+    (_node(type_="Storage", decays={"phosphate": {"constant": "a", "exponent": 1}}), "constant"),
+    (_node(type_="Storage", decays={"phosphate": {"constant": 1, "exponent": None}}), "exponent"),
+    (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "decays": {"a": 1}}]), "'a'"),
     (_node(type_="Waste", data_input_dict={}), "data_input_dict"),
     (_override(node={"type_": "Catchment", "name": "a", "decays": {}}), "decays"),
     (_override(arc={"name": "nowhere", "type_": "Arc"}), "nowhere"),
     (_override(arc={"name": "ab", "type_": "Arc", "diameter": 1}), "diameter"),
 ]
+
+
+def _decay_arc_mapping(type_: str, **arc) -> dict:
+    """``_base()`` with a ``type_`` arc ``x`` out of the catchment ``a``."""
+    mapping = _arc(type_=type_, number_of_timesteps=1, **arc)
+    mapping["overrides"] = {"nodes": [], "arcs": []}
+    return mapping
+
+
+@pytest.mark.parametrize("type_", ["DecayArc", "DecayArcAlt"])
+def test_the_decay_arcs_are_read_with_their_decays(type_):
+    """A ``Decay*`` arc is a configured class now (it was refused as 3b's); its ``decays``
+    defaults to ``{}`` (``arcs.py:671``, ``:734``), and the reader's checks of a node's
+    ``decays`` apply. A ``decays`` override is refused (an arc's ``apply_overrides`` takes
+    ``capacity`` and ``preference`` only, ``arcs.py:87-96``), and so is a 3b message."""
+    assert "DecayArc" not in OUT_OF_SCOPE and "DecayArcAlt" not in OUT_OF_SCOPE
+    plain = read_wsimod_config(_decay_arc_mapping(type_)).arcs[-1]
+    assert (plain.cls, plain.number_of_timesteps, plain.decays.keys) == (type_, 1, ())
+    decays = {"phosphate": {"constant": 0.1, "exponent": 1.05}}
+    spec = read_wsimod_config(_decay_arc_mapping(type_, decays=decays)).arcs[-1]
+    assert spec.decays.keys == ("phosphate",) and spec.decays.constant == {"phosphate": 0.1}
+    assert read_wsimod_config(_base()).arcs[0].decays is None  # a plain arc has none
+    mapping = _decay_arc_mapping(type_, decays=decays)
+    mapping["overrides"]["arcs"] = [{"name": "x", "decays": {"phosphate": decays["phosphate"]}}]
+    with pytest.raises(ValueError, match="decays") as refused:
+        read_wsimod_config(mapping)
+    assert "3b" not in str(refused.value)
+    with pytest.raises(ValueError, match="decays") as refused:
+        read_wsimod_config(_arc(type_="Arc", decays={}))
+    assert "3b" not in str(refused.value)
+
+
+@pytest.mark.parametrize("type_", ["DecayArc", "DecayArcAlt"])
+def test_a_decay_arc_needs_its_in_ports_temperature(type_):
+    """``core.py:484-487``: a ``Decay*`` arc reads its in-port's ``("temperature", t)`` at every
+    decay, in both modes; a missing date is refused at build time, naming the arc and the
+    node. A ``filename`` override of that node is read, so it is not listed unread."""
+    mapping = {
+        "dates": ["2000-01-01", "2000-01-02"],
+        "nodes": [
+            {
+                "name": "a",
+                "type_": "Node",
+                "data_input_dict": {("temperature", "2000-01-01"): 12.0},
+            },
+            {"name": "b", "type_": "Waste"},
+        ],
+        "arcs": [{"name": "x", "type_": type_, "in_port": "a", "out_port": "b"}],
+    }
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match=r"arc 'x'.*node 'a'.*temperature.*2000-01-02"):
+            build_model(read_wsimod_config(mapping), pollutants=pollutants)
+    mapping["nodes"][0]["data_input_dict"][("temperature", "2000-01-02")] = 13.0
+    build_model(read_wsimod_config(mapping), pollutants=False)
+
+
+def test_a_decay_arcs_in_port_filename_override_is_read(tmp_path):
+    """D10: the ``filename`` of a node that reads no forcing is listed unread, unless a
+    ``Decay*`` arc leaves it, whose decay reads it (``core.py:464-470``)."""
+    path = tmp_path / "a.csv"
+    path.write_text("variable,time,value\ntemperature,2000-01-01,11.0\n", encoding="utf-8")
+    mapping = {
+        "dates": ["2000-01-01"],
+        "nodes": [{"name": "a", "type_": "Node"}, {"name": "b", "type_": "Waste"}],
+        "arcs": [{"name": "x", "type_": "Arc", "in_port": "a", "out_port": "b"}],
+        "overrides": {"nodes": [{"type_": "Node", "name": "a", "filename": str(path)}]},
+    }
+    assert read_wsimod_config(copy.deepcopy(mapping)).unread == ["a.filename"]
+    mapping["arcs"][0]["type_"] = "DecayArc"
+    assert read_wsimod_config(mapping).unread == []
+
+
+def _forcing_csv(path: Path, rows: dict[str, float]) -> str:
+    path.write_text(
+        "variable,time,value\n" + "".join(f"flow,{d},{v!r}\n" for d, v in rows.items()),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _as_dates(data) -> dict:
+    """A forcing dict with its dates as ``datetime`` (WSIMOD's ``to_datetime`` keys compare by
+    ``__eq__``, not by hash)."""
+    return {(k[0], datetime.fromisoformat(str(k[1]))): v for k, v in data.items()}
+
+
+def _filename_override(value) -> dict:
+    """``_base()`` with a ``filename`` override of the catchment ``a`` (and its inline data), in
+    the dict form WSIMOD's ``add_overrides`` takes."""
+    mapping = _base()
+    mapping["nodes"][0]["data_input_dict"] = {("flow", "2000-01-01"): 1.0}
+    mapping["overrides"] = {
+        "nodes": {"a": {"type_": "Catchment", "name": "a", "filename": value}},
+        "arcs": {},
+    }
+    return mapping
+
+
+def test_a_filename_override_replaces_the_forcing(tmp_path):
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    path = _forcing_csv(tmp_path / "flow.csv", {"2000-01-01": 7.5, "2000-01-02": 8.5})
+    mapping = _filename_override(path)
+    ours = read_wsimod_config(mapping).nodes[0].data
+    theirs = wsimod_model(mapping).nodes["a"].data_input_dict
+    assert ours == {
+        ("flow", datetime(2000, 1, 1)): 7.5,
+        ("flow", datetime(2000, 1, 2)): 8.5,
+    }
+    assert _as_dates(theirs) == ours
+
+
+def test_a_relative_filename_override_opens_from_the_working_directory(tmp_path, monkeypatch):
+    """Not from the configuration's directory (nodes.py:93-99, X27)."""
+    _forcing_csv(tmp_path / "flow.csv", {"2000-01-01": 3.0})
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path)
+    network = read_wsimod_config(_filename_override("flow.csv"))
+    assert network.nodes[0].data == {("flow", datetime(2000, 1, 1)): 3.0}
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    with pytest.raises(ValueError, match="flow.csv"):
+        read_wsimod_config(_filename_override("flow.csv"))
+
+
+def test_filename_override_edge_cases(tmp_path):
+    """D23 as the source reads (nodes.py:93-99): a falsy non-string is ignored, the empty string
+    is a string that WSIMOD opens (``FileNotFoundError``), another non-string is refused (WSIMOD
+    raises ``RuntimeError``), and a class that reads no forcing accepts the file and lists it."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    inline = {("flow", datetime(2000, 1, 1)): 1.0}
+    for ignored in (None, 0, []):
+        mapping = _filename_override(ignored)
+        assert read_wsimod_config(mapping).nodes[0].data == inline
+        assert _as_dates(wsimod_model(mapping).nodes["a"].data_input_dict) == inline
+    with pytest.raises(ValueError, match="does not exist"):
+        read_wsimod_config(_filename_override(""))
+    with pytest.raises(FileNotFoundError):
+        wsimod_model(_filename_override(""))
+
+    with pytest.raises(ValueError, match="filename"):
+        read_wsimod_config(_filename_override(3))
+    with pytest.raises(RuntimeError, match="Not recognised format"):
+        wsimod_model(_filename_override(3))
+
+    path = _forcing_csv(tmp_path / "waste.csv", {"2000-01-01": 2.0})
+    mapping = _filename_override(path)
+    mapping["overrides"]["nodes"] = {"b": {"type_": "Waste", "name": "b", "filename": path}}
+    assert read_wsimod_config(mapping).unread == ["b.filename"]
+    wsimod_model(mapping)  # WSIMOD reads the file and accepts it
+    assert read_wsimod_config(_filename_override(path)).unread == []
+
+
+def test_groundwater_forcing_is_lost_and_listed_unread():
+    """storage.py:202-203: the configured forcing is reset by ``Node.__init__`` (X11, D10)."""
+    mapping = {
+        "nodes": [
+            {
+                "name": "g",
+                "type_": "Groundwater",
+                "data_input_dict": {("temperature", "2000-01-01"): 10.0},
+            },
+            {"name": "b", "type_": "Waste"},
+        ],
+        "arcs": [],
+    }
+    network = read_wsimod_config(mapping)
+    assert network.unread == ["g.data_input_dict"]
+    assert network.nodes[0].data == {}
+    mapping["dates"] = ["2000-01-01"]
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    assert model.unread == ["g.data_input_dict"]
 
 
 @pytest.mark.parametrize(("mapping", "named"), REFUSALS)
@@ -609,3 +805,35 @@ def test_a_demand_with_a_residential_override_runs_in_the_demand_slot():
         }
     )
     assert (network.nodes[0].slot_key, network.nodes[0].cls) == ("Demand", "ResidentialDemand")
+
+
+def test_a_rivers_filename_override_is_read_with_nitrate_among_the_pollutants(tmp_path):
+    """``storage.py:750``: a ``River`` with ``nitrate`` reads its temperature at every
+    ``calculate_discharge``, so its ``filename`` override is not listed unread; without
+    ``nitrate`` it is."""
+    path = tmp_path / "r.csv"
+    path.write_text("variable,time,value\ntemperature,2000-01-01,11.0\n", encoding="utf-8")
+
+    def mapping(pollutants):
+        return {
+            "dates": ["2000-01-01"],
+            "pollutants": pollutants,
+            "additive_pollutants": [x for x in pollutants if x != "temperature"],
+            "non_additive_pollutants": ["temperature"] if "temperature" in pollutants else [],
+            "nodes": [{"name": "r", "type_": "River"}],
+            "arcs": [],
+            "overrides": {"nodes": [{"type_": "River", "name": "r", "filename": str(path)}]},
+        }
+
+    assert read_wsimod_config(mapping(["phosphate", "temperature"])).unread == ["r.filename"]
+    assert read_wsimod_config(mapping(["nitrate", "phosphate", "temperature"])).unread == []
+
+
+def test_an_arc_override_of_decays_is_refused_with_the_reason():
+    """M3: WSIMOD's ``Arc.apply_overrides`` consumes only ``capacity`` and ``preference``
+    (``arcs.py:87-96``): the refusal says so instead of "must be a number"."""
+    decays = {"phosphate": {"constant": 0.1, "exponent": 1.05}}
+    mapping = _decay_arc_mapping("DecayArc", decays=decays)
+    mapping["overrides"]["arcs"] = [{"name": "x", "decays": decays}]
+    with pytest.raises(ValueError, match=r"arc 'x'.*decays cannot be overridden.*arcs\.py:87-96"):
+        read_wsimod_config(mapping)

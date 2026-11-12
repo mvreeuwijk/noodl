@@ -125,20 +125,35 @@ def _build_quickstart_model(data_folder: str, capacities: dict | None = None):
     waste = {"type_": "Waste", "name": "my_outlet"}
 
     urban_drainage = {
-        "type_": "Arc", "in_port": "my_land", "out_port": "my_sewer", "name": "urban_drainage"
+        "type_": "Arc",
+        "in_port": "my_land",
+        "out_port": "my_sewer",
+        "name": "urban_drainage",
     }
     percolation = {
-        "type_": "Arc", "in_port": "my_land", "out_port": "my_groundwater", "name": "percolation"
+        "type_": "Arc",
+        "in_port": "my_land",
+        "out_port": "my_groundwater",
+        "name": "percolation",
     }
     runoff = {"type_": "Arc", "in_port": "my_land", "out_port": "my_river", "name": "runoff"}
     storm_outflow = {
-        "type_": "Arc", "in_port": "my_sewer", "out_port": "my_river", "name": "storm_outflow"
+        "type_": "Arc",
+        "in_port": "my_sewer",
+        "out_port": "my_river",
+        "name": "storm_outflow",
     }
     baseflow = {
-        "type_": "Arc", "in_port": "my_groundwater", "out_port": "my_river", "name": "baseflow"
+        "type_": "Arc",
+        "in_port": "my_groundwater",
+        "out_port": "my_river",
+        "name": "baseflow",
     }
     catchment_outflow = {
-        "type_": "Arc", "in_port": "my_river", "out_port": "my_outlet", "name": "catchment_outflow"
+        "type_": "Arc",
+        "in_port": "my_river",
+        "out_port": "my_outlet",
+        "name": "catchment_outflow",
     }
 
     quickstart_model = Model()
@@ -171,7 +186,8 @@ def _build_and_capture_quickstart(
 
     ALLOCATION_DIR.mkdir(parents=True, exist_ok=True)
     (ALLOCATION_DIR / f"{prefix}_topology.json").write_text(
-        json.dumps(topology, indent=2), encoding="utf-8", newline="\n")
+        json.dumps(topology, indent=2), encoding="utf-8", newline="\n"
+    )
     raw = pd.DataFrame(events)
     aggregated = raw.groupby(["arc", "direction", "t"], as_index=False)[
         ["requested", "realised"]
@@ -207,11 +223,12 @@ def _build_and_capture_oxford(data_folder: str) -> None:
 
     ALLOCATION_DIR.mkdir(parents=True, exist_ok=True)
     (ALLOCATION_DIR / "oxford_topology.json").write_text(
-        json.dumps(oxford_topology, indent=2), encoding="utf-8", newline="\n")
+        json.dumps(oxford_topology, indent=2), encoding="utf-8", newline="\n"
+    )
     oxford_raw = pd.DataFrame(oxford_events_raw)
-    oxford_aggregated = oxford_raw.groupby(
-        ["arc", "direction", "t"], as_index=False
-    )[["requested", "realised"]].sum()
+    oxford_aggregated = oxford_raw.groupby(["arc", "direction", "t"], as_index=False)[
+        ["requested", "realised"]
+    ].sum()
     n_events = len(oxford_raw)
     n_rows = len(oxford_aggregated)
     print(f"oxford: {n_events} raw events aggregated into {n_rows} rows")
@@ -229,11 +246,13 @@ def _first_difference(original, reloaded) -> str | None:
 
     # the reloaded arcs are in registration order (`_registration_order`): align them by name
     rows = [reloaded.arc_names.index(name) for name in original.arc_names]
-    series = [("arc_flow", original.arc_flow, reloaded.arc_flow[:, rows]),
-              ("arc_quality", original.arc_quality, reloaded.arc_quality[:, rows]),
-              ("tank_storage", original.tank_storage, reloaded.tank_storage),
-              ("tank_quality", original.tank_quality, reloaded.tank_quality),
-              ("surface_quality", original.surface_quality, reloaded.surface_quality)]
+    series = [
+        ("arc_flow", original.arc_flow, reloaded.arc_flow[:, rows]),
+        ("arc_quality", original.arc_quality, reloaded.arc_quality[:, rows]),
+        ("tank_storage", original.tank_storage, reloaded.tank_storage),
+        ("tank_quality", original.tank_quality, reloaded.tank_quality),
+        ("surface_quality", original.surface_quality, reloaded.surface_quality),
+    ]
     series += [(f"surface.{k}", v, reloaded.surface[k]) for k, v in original.surface.items()]
     for name, a, b in series:
         a, b = a.numpy(), b.numpy()
@@ -299,6 +318,7 @@ def _corrected_config(model, config_path: Path) -> dict:
             if hasattr(surface, "total_porosity"):
                 saved = config["nodes"][name]["surfaces"][surface.surface]
                 saved["depth"] = surface.depth / surface.total_porosity
+
     # `save` takes each entry's keys from a `set`, and `create_oxford_model` builds its additive
     # pollutant list from one, so their order changes from run to run (string hashing): sort
     # every mapping inside an entry and that list, keeping the order of nodes, arcs and surfaces
@@ -322,49 +342,49 @@ def _corrected_config(model, config_path: Path) -> dict:
     return config
 
 
-def _neutral_overrides(model) -> dict:
-    """The `overrides` section that makes WSIMOD's water quality neutral.
+def _no_deposition_overrides(model) -> dict:
+    """The `overrides` section that switches off the surfaces' deposition.
 
-    Every `WWTW`/`FWTW`: `process_parameters[p] = {constant: c_v, exponent: 1}` (c_v the
-    volume constant) and `liquor_multiplier[p] = liquor_multiplier["volume"]` for every
-    additive `p`. Every surface of every `Land`: `pollutant_load` zero for every key it has,
-    `soil_temp_w_prev 1, soil_temp_w_air 0, soil_temp_w_deep 0` (pervious surfaces only, the
-    keys `PerviousSurface.apply_overrides` accepts, `land.py:845-880`)."""
-    from wsimod.core import constants
 
+    Every surface of every `Land`: `pollutant_load` zero for every key it has. Nothing else
+    is overridden: the WTW processes and the soil temperature stay WSIMOD's defaults. The
+    deposition is what sub-project 3c ports."""
     nodes = {}
     for name, node in model.nodes.items():
-        kind = type(node).__name__
-        if kind in ("WWTW", "FWTW"):
-            c_v = node.process_parameters["volume"]["constant"]
-            volume = node.liquor_multiplier["volume"]
-            nodes[name] = {
-                "type_": kind,
-                "name": name,
-                "process_parameters": {
-                    p: {"constant": c_v, "exponent": 1} for p in constants.ADDITIVE_POLLUTANTS
-                },
-                "liquor_multiplier": {p: volume for p in constants.ADDITIVE_POLLUTANTS},
+        if type(node).__name__ == "Land":
+            surfaces = {
+                surface.surface: {"pollutant_load": {k: 0.0 for k in surface.pollutant_load}}
+                for surface in node.surfaces
             }
-        elif kind == "Land":
-            surfaces = {}
-            for surface in node.surfaces:
-                override = {"pollutant_load": {k: 0.0 for k in surface.pollutant_load}}
-                if hasattr(surface, "total_porosity"):
-                    override.update(soil_temp_w_prev=1, soil_temp_w_air=0, soil_temp_w_deep=0)
-                surfaces[surface.surface] = override
-            nodes[name] = {"type_": kind, "name": name, "surfaces": surfaces}
+            nodes[name] = {"type_": "Land", "name": name, "surfaces": surfaces}
     return {"nodes": nodes}
+
+
+def write_no_deposition_configs(folder) -> None:
+    """Writes `config_no_deposition.yml` into `folder` from its `config.yml`: the same mapping
+    plus `_no_deposition_overrides` of the model that `config.yml` loads."""
+    import yaml
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals, wsimod_model
+
+    folder = Path(folder)
+    config = yaml.safe_load((folder / "config.yml").read_text(encoding="utf-8"))
+    reset_wsimod_globals()
+    overrides = _no_deposition_overrides(wsimod_model(folder))
+    (folder / "config_no_deposition.yml").write_text(
+        yaml.safe_dump(dict(config, overrides=overrides), sort_keys=False),
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def write_demo_configs(data_folder) -> None:
     """Writes `tests/data/wsimod/{quickstart,oxford}/` from the demo forcing in `data_folder`.
 
     Per demo: build the model; `Model.save(dir, "config.yml", compress=True)`; correct the
-    saved config (`_corrected_config`); write `config_neutral.yml` (the same
-    mapping plus `_neutral_overrides`); reload `config.yml` with `wsimod_model`, run both it
+    saved config (`_corrected_config`); write `config_no_deposition.yml`
+    (`write_no_deposition_configs`); reload `config.yml` with `wsimod_model`, run both it
     and the original model, and exit non-zero naming the first difference if they disagree."""
-    import yaml
     from wsimod.demo.create_oxford import create_oxford_model
 
     from tests.verification._wsimod_reference import (
@@ -385,21 +405,23 @@ def write_demo_configs(data_folder) -> None:
         model.save(str(folder), "config.yml", compress=True)
         for path in folder.glob("*.csv.gz"):  # reproducible bytes: no mtime in the header
             path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=0))
-        config = _corrected_config(model, folder / "config.yml")
-        neutral = dict(config, overrides=_neutral_overrides(model))
-        (folder / "config_neutral.yml").write_text(
-            yaml.safe_dump(neutral, sort_keys=False), encoding="utf-8", newline="\n"
-        )
+        _corrected_config(model, folder / "config.yml")
+        write_no_deposition_configs(folder)
         original = record_wsimod_run(model)
         reloaded = record_wsimod_run(wsimod_model(folder))
         difference = _first_difference(original, reloaded)
         if difference is not None:
             sys.exit(f"{case}: the reloaded config.yml run differs from the original: {difference}")
-        print(f"{case}: reloaded config.yml reproduces the original run "
-              f"({len(original.dates)} days)")
+        print(
+            f"{case}: reloaded config.yml reproduces the original run ({len(original.dates)} days)"
+        )
 
 
 if __name__ == "__main__":
+    if "--no-deposition-only" in sys.argv[1:]:
+        for case in ("quickstart", "oxford"):
+            write_no_deposition_configs(WSIMOD_DIR / case)
+        sys.exit(0)
     data_folder = _download_data_folder()
     print(f"Downloaded WSIMOD demo data to {data_folder}")
     _build_and_capture_quickstart(data_folder)

@@ -22,14 +22,13 @@ import torch
 from torch import Tensor
 
 from noodl.apps.wsimod.config import WsimodNetwork
-from noodl.apps.wsimod.day import STATE_KEYS, WsimodDay
+from noodl.apps.wsimod.day import _FLAT_KEYS, STATE_KEYS, WsimodDay
 from noodl.model import Drivers, Model, State
 from noodl.topology import Network
 
 __all__ = ["build_model", "initial_drivers", "initial_state"]
 
 F64 = torch.float64
-_FLAT = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
 
 
 def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Model, State, Drivers]:
@@ -39,9 +38,11 @@ def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Mod
     the parameters or on ``pollutants`` (neutral processes, ``decays``, porosity, leakage,
     preferences, travel times, check-recursion cycles, the river order, the orchestration,
     missing forcing). ``pollutants=False`` runs on the volumes alone; what that run ignores is
-    listed in ``model.ignored_by_quantity_only``. The closure runs one tracing day (D2) that
-    fixes the call structure. ``model.wsimod_day`` is the closure and ``model.driver_template``
-    the configured drivers; ``state`` and ``drivers`` are :func:`initial_state` and
+    listed in ``model.ignored_by_quantity_only``; what WSIMOD accepts and never reads (a
+    ``Groundwater``'s forcing, a ``filename`` on a class that reads none) is ``model.unread``.
+    The closure runs one tracing day (D2) that fixes the call structure. ``model.wsimod_day`` is
+    the closure and ``model.driver_template`` the configured drivers; ``state`` and ``drivers``
+    are :func:`initial_state` and
     :func:`initial_drivers` without values.
     """
     day = WsimodDay(network, pollutants=pollutants)
@@ -53,6 +54,7 @@ def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Mod
     model = Model(net, [], closures=[day])
     model.wsimod_day = day
     model.ignored_by_quantity_only = list(day.ignored_by_quantity_only)
+    model.unread = list(network.unread)  # accepted and never read, D10
     model.driver_template = day.driver_template()
     return model, initial_state(model), initial_drivers(model)
 
@@ -141,7 +143,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
         rows: dict[int, Tensor] = {}
         for label, v in value.items():
             i = _row(labels, label, key)
-            rows[i] = _tensor(v) if key in _FLAT else _vqip(day, v, key, label)
+            rows[i] = _tensor(v) if key in _FLAT_KEYS else _vqip(day, v, key, label)
         given[key] = rows
     active_labels = day.state_labels("wsimod.active_storage")
     storage_labels = day.state_labels("wsimod.storage")
@@ -151,7 +153,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
         if label in active_labels and active_labels.index(label) not in follow:
             follow[active_labels.index(label)] = row
     for key, rows in given.items():
-        state[key] = _assemble(state[key], rows, key in _FLAT)
+        state[key] = _assemble(state[key], rows, key in _FLAT_KEYS)
     return state
 
 

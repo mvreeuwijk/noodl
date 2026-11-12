@@ -23,7 +23,7 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `WsimodNetwork` | A WSIMOD model description: pollutants, orchestration, dates, nodes and arcs, in the configuration's order (a node's in- and out-arc order is the arcs' order). | `WsimodNetwork(pollutants, float_accuracy, orchestration, dates, date_labels, nodes, arcs)` |
+| `WsimodNetwork` | A WSIMOD model description: pollutants, orchestration, dates, nodes and arcs, in the configuration's order (a node's in- and out-arc order is the arcs' order). | `WsimodNetwork(pollutants, float_accuracy, orchestration, dates, date_labels, nodes, arcs, unread=<factory>)` |
 
 ## Closures
 
@@ -47,7 +47,7 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `DayRecord` | What one day records (``model.py:1063-1170``), at the state the day reached, before ``end_timestep``; every tensor has the day's batch shape in front. | `DayRecord(arc_flow, arc_quality, tank_storage, tank_quality, surface, surface_quality, terms, dropped, dropped_arcs, storage_total, storage_start, events, maxiter, decisions)` |
+| `DayRecord` | What one day records (``model.py:1063-1170``), at the state the day reached, before ``end_timestep``; every tensor has the day's batch shape in front. ``WsimodDay`` completes the record after ``end_timestep`` (D14): ``storage_end``, and ``terms``, ``dropped``, ``dropped_arcs`` and ``events`` again, so what ``end_timestep`` records counts in its day. | `DayRecord(arc_flow, arc_quality, tank_storage, tank_quality, surface, surface_quality, terms, dropped, dropped_arcs, storage_total, storage_start, storage_end, events, maxiter, decisions)` |
 | `WsimodMassBalance` | The system's water balance per day, each ``(..., T, 1 + K_additive)`` (volume, then the additive pollutants' masses). ``terms`` holds every term by its ``"<Class>.<term>"`` key (D11) plus ``"dropped"``; ``residual = inflow - outflow - storage_change``. | `WsimodMassBalance(inflow, outflow, storage_change, residual, terms, dropped_arcs=None)` |
 | `WsimodResults` | What WSIMOD's ``Model.run`` records (``model.py:1063-1170``), with a leading batch shape. | `WsimodResults(dates, arc_names, arc_flow, arc_quality, tank_names, tank_storage, tank_quality, surface_names, surface, surface_quality, mass_balance)` |
 
@@ -65,4 +65,4 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
-| `EVENT_NAMES` | 19 names: `storage_unable_to_push`, `demand_deficit`, `reservoir_spill`, `wwtw_couldnt_push`, `service_reservoirs_not_filled`, `sludge_nowhere`, `river_cant_push`, `ponded_water_cant_reenter`, ... |
+| `EVENT_NAMES` | 22 names: `storage_unable_to_push`, `demand_deficit`, `reservoir_spill`, `wwtw_couldnt_push`, `service_reservoirs_not_filled`, `sludge_nowhere`, `river_cant_push`, `ponded_water_cant_reenter`, ... |

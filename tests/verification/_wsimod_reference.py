@@ -62,11 +62,14 @@ import torch
 
 __all__ = [
     "ArcCall",
+    "ArcDay",
     "NodeCall",
     "WsimodReference",
+    "capture_arc_calls",
     "capture_events",
     "capture_node_calls",
     "extract_topology",
+    "pad_register",
     "record_wsimod_run",
     "reset_wsimod_globals",
     "wsimod_model",
@@ -372,9 +375,7 @@ def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
         tank_storage=_tensor(tanks, "storage", n_days, n_tanks),
         tank_quality=quality(tanks, n_tanks),
         surface_names=[(row["node"], row["surface"]) for row in surfaces[:n_surfaces]],
-        surface={
-            name: _tensor(surfaces, key, n_days, n_surfaces) for name, key in _SURFACE_FIELDS
-        },
+        surface={name: _tensor(surfaces, key, n_days, n_surfaces) for name, key in _SURFACE_FIELDS},
         surface_quality=quality(surfaces, n_surfaces),
         printed=out.getvalue().splitlines(),
     )
@@ -427,6 +428,32 @@ class NodeCall:
 
 
 _HANDLERS = ("pull_set", "push_set", "pull_check", "push_check")
+# a River's biochemistry stores (storage.py:561-599), in the order noodl's River lists them
+_RIVER_BIOCHEMISTRY_PATHS = ("lagged_temperatures", "lagged_total_phosphorus", "bio_in", "bio_out")
+
+
+def pad_register(values: Sequence[float], size: int) -> torch.Tensor:
+    """WSIMOD's lag list (``lagged_temperatures``, ``lagged_total_phosphorus``) as noodl's
+    fixed-size register: the list in the last ``len(values)`` slots, ``+0.0`` in front (X17).
+    A list longer than the register is refused."""
+    if len(values) > size:
+        raise ValueError(f"pad_register: {len(values)} values do not fit {size} slots")
+    register = torch.zeros(size, dtype=torch.float64)
+    if len(values):
+        register[size - len(values) :] = torch.tensor(
+            [float(v) for v in values], dtype=torch.float64
+        )
+    return register
+
+
+def _runs_biochemistry(node) -> bool:
+    """Whether ``node`` is a WSIMOD ``River`` whose ``calculate_discharge`` runs the
+    biochemistry (``"nitrate" in constants.POLLUTANTS``, ``storage.py:919``)."""
+    from wsimod.core import constants
+
+    return type(node).__qualname__ == "River" and "nitrate" in constants.POLLUTANTS
+
+
 _ARC_METHODS = {  # the end of the arc that makes the call (arcs.py:112-228)
     "send_push_request": "in_port",
     "send_push_check": "in_port",
@@ -445,7 +472,15 @@ def _store_paths(node) -> tuple[str, ...]:
     cls = NODE_CLASSES[type(node).__qualname__]
     if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
         return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
-    return cls.store_paths
+    tank = type(getattr(node, "tank", None)).__name__
+    paths = cls.store_paths
+    if tank == "DecayTank":  # D8: a per-day store
+        paths = (*paths, "tank.total_decayed")
+    if tank == "DecayQueueTank":  # D8: carried, extracted at the next end of day
+        paths = (*paths, "tank.internal_arc.total_decayed")
+    if _runs_biochemistry(node):  # the registers (carried) and the per-day bio_in/bio_out
+        paths = (*paths, *_RIVER_BIOCHEMISTRY_PATHS)
+    return paths
 
 
 def _wsimod_store(node, path: str):
@@ -477,10 +512,15 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     """Record every call into the named nodes while ``model`` runs (spec, Verification 1).
 
     Wraps each target's orchestration methods (the slots that name it, and ``distribute`` when
-    it is in the river order), its four handler entry points, and the ``send_*`` methods of the
+    it is in the river order), its ``end_timestep`` (stores before and after: a ``DecayTank``
+    decays there), its four handler entry points, and the ``send_*`` methods of the
     arcs it calls (out-arcs push, in-arcs pull). Every argument is deep-copied at entry, before
-    WSIMOD can mutate it (spec, Protocol, Request mutation). A call into a target that is
-    already in a captured call is refused (D22); the error is raised again at exit, because
+    WSIMOD can mutate it (spec, Protocol, Request mutation). A ``River`` with biochemistry
+    records its two lag lists and ``bio_in``/``bio_out`` among the stores (as WSIMOD's lists and
+    dicts; :func:`pad_register` makes a register of a list), and the day's
+    ``data_input_dict[("temperature", t)]`` as ``pre["forcing.temperature"]``, so the replay
+    can check it binds the temperature WSIMOD read (``storage.py:750``). A call into a target
+    that is already in a captured call is refused (D22); the error is raised again at exit, because
     WSIMOD's ``query_handler`` swallows exceptions and retries (``nodes.py:335-343``).
     Everything is restored on exit.
     """
@@ -497,6 +537,13 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
             out[f"arcs.{arc.name}.vqip_in"] = copy.deepcopy(arc.vqip_in)
             out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
         return out
+
+    def forcing(node) -> dict[str, float]:
+        """The day's forcing the call reads: a biochemistry River's
+        ``get_data_input("temperature")`` (``storage.py:750``)."""
+        if _runs_biochemistry(node):
+            return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
+        return {}
 
     def install(obj, attr: str, make) -> None:
         own = attr in vars(obj)
@@ -526,7 +573,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                     vqip=copy.deepcopy(vqip),
                     tag=copy.deepcopy(tag),
                     reply=None,
-                    pre=snapshot(node),
+                    pre={**snapshot(node), **forcing(node)},
                     post={},
                     arc_calls=[],
                 )
@@ -560,9 +607,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                     arc=arc.name,
                     method=method,
                     # QueueArc.send_push_request names the request ``vqip_`` (arcs.py:360)
-                    vqip=copy.deepcopy(
-                        bound.arguments.get("vqip", bound.arguments.get("vqip_"))
-                    ),
+                    vqip=copy.deepcopy(bound.arguments.get("vqip", bound.arguments.get("vqip_"))),
                     tag=copy.deepcopy(bound.arguments.get("tag", "default")),
                     force=bool(bound.arguments.get("force", False)),
                     reply={},
@@ -591,6 +636,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
         }
         if name in getattr(model, "river_discharge_order", []):
             steps.add("distribute")
+        steps.add("end_timestep")  # model.py:1172-1174
         for method in sorted(steps):
             node_wrapper(node, method, handler=False)
         for method in _HANDLERS:
@@ -609,5 +655,285 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                 setattr(obj, attr, value)
             else:
                 delattr(obj, attr)
+    if errors:
+        raise RuntimeError(errors[0])
+
+
+# --- per-arc call capture (spec, Verification 1, the replay harness) -------------------------
+@dataclass
+class ArcDay:
+    """One user ``Decay*`` arc on one day, as WSIMOD's own run did it.
+
+    ``calls`` holds, in the order WSIMOD made them, each request call into the arc
+    (``send_push_request``/``send_pull_request``, ``reply`` what the arc returned), the
+    ``update_queue`` it ran, and the calls the arc made into its ports: ``push_check`` and
+    ``push_set`` into the ``out_port``, ``pull_check`` and ``pull_set`` into the ``in_port``,
+    with the port's reply. (Port calls carry the arc's name in ``arc``.) A request call's
+    *static call index* is its place among the day's request calls, both directions.
+
+    ``entry_diffs`` is ``(static call index, diff)`` of each entry ``make_decay``, and
+    ``end_diffs`` ``(row, diff)`` of each end-of-day one, in WSIMOD's order. A row is
+    ``(direction, entry day, index among that direction's calls of its entry day)`` for a
+    ``DecayArc``, and ``("slot", key)`` for a ``DecayArcAlt``. ``queue_at_end`` is the queue
+    before ``end_timestep``, in list order: ``direction``, ``time`` (days left), ``vqip`` and
+    the ``row`` (``slot`` and ``vqip`` for a ``DecayArcAlt``). ``pre`` and ``post`` hold WSIMOD's
+    ``queue`` before the day's first call and after ``end_timestep`` (a list of requests, or the
+    ``{key: vqip}`` dict). ``total_decayed_before_reset`` is WSIMOD's ``total_decayed`` as
+    ``end_timestep`` was entered (the end of the day before, then this day's entries) and
+    ``total_decayed_after`` as it returned (this day's end-of-day decays).
+    """
+
+    day: int
+    calls: list[ArcCall] = field(default_factory=list)
+    entry_diffs: list[tuple[int, dict]] = field(default_factory=list)
+    end_diffs: list[tuple[tuple, dict]] = field(default_factory=list)
+    queue_at_end: list[dict] = field(default_factory=list)
+    total_decayed_before_reset: dict = field(default_factory=dict)
+    total_decayed_after: dict = field(default_factory=dict)
+    pre: dict[str, object] = field(default_factory=dict)
+    post: dict[str, object] = field(default_factory=dict)
+
+
+class _PortProxy:
+    """The arc's view of one port: records the calls the arc makes (``arcs.py:112-258``) while
+    one of its request calls runs, and forwards everything else untouched."""
+
+    def __init__(self, real, recorder: _ArcRecorder) -> None:
+        self._real, self._recorder = real, recorder
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def _forward(self, method: str, vqip, tag):
+        recorder = self._recorder
+        record = recorder.record_call(method, vqip, tag)
+        reply = getattr(self._real, method)(copy.deepcopy(vqip), tag)
+        if record is not None:
+            recorder.finish_call(record, reply)
+        return reply
+
+    def push_check(self, vqip=None, tag="default"):
+        return self._forward("push_check", vqip, tag)
+
+    def push_set(self, vqip, tag="default"):
+        return self._forward("push_set", vqip, tag)
+
+    def pull_check(self, vqip=None, tag="default"):
+        return self._forward("pull_check", vqip, tag)
+
+    def pull_set(self, vqip, tag="default"):
+        return self._forward("pull_set", vqip, tag)
+
+
+class _ArcRecorder:
+    """The state of :func:`capture_arc_calls` for one arc."""
+
+    def __init__(self, arc, date_index: dict, errors: list[str]) -> None:
+        self.arc, self.date_index, self.errors = arc, date_index, errors
+        self.alt = hasattr(arc, "max_travel")
+        self.days: dict[int, ArcDay] = {}
+        self.current: tuple[ArcCall, int] | None = None  # the request call under way, its index
+        self.today: int | None = None
+        self.index = 0  # request calls so far today
+        self.per_direction = {"push": 0, "pull": 0}
+        self.phase = "entry"
+        self.raw: list[dict] = []  # the end-of-day diffs so far
+        # a queued request -> its row; the request is kept, so that its id cannot be reused
+        self.rows: dict[int, tuple[dict, tuple]] = {}
+
+    def fail(self, message: str) -> None:
+        self.errors.append(message)
+        raise RuntimeError(message)
+
+    def day(self) -> ArcDay:
+        number = self.date_index[self.arc.in_port.t]
+        if number != self.today:
+            self.today, self.index = number, 0
+            self.per_direction = {"push": 0, "pull": 0}
+        if number not in self.days:
+            self.days[number] = ArcDay(day=number, pre=self.snapshot())
+        return self.days[number]
+
+    def snapshot(self) -> dict[str, object]:
+        queue = self.arc.queue
+        if self.alt:
+            return {"queue": copy.deepcopy(dict(queue))}
+        return {"queue": [self.queue_row(request) for request in queue]}
+
+    def queue_row(self, request: dict) -> dict:
+        return {
+            "direction": request["direction"],
+            "time": request["time"],
+            "vqip": copy.deepcopy(request["vqip"]),
+            "row": self.rows[id(request)][1],
+        }
+
+    def record_call(self, method: str, vqip, tag) -> ArcCall | None:
+        """A port call of the request under way (a check a node makes is not recorded)."""
+        if self.current is None:
+            return None
+        arc = self.arc
+        record = ArcCall(
+            arc=arc.name,
+            method=method,
+            vqip=copy.deepcopy(vqip),
+            tag=copy.deepcopy(tag),
+            force=False,
+            reply={},
+            flow_in=arc.flow_in,
+            vqip_in=copy.deepcopy(arc.vqip_in),
+        )
+        self.day().calls.append(record)
+        return record
+
+    def finish_call(self, record: ArcCall, reply) -> None:
+        arc = self.arc
+        record.reply = copy.deepcopy(reply)
+        record.flow_in_after = arc.flow_in
+        record.vqip_in_after = copy.deepcopy(arc.vqip_in)
+        record.flow_out_after = arc.flow_out
+        record.vqip_out_after = copy.deepcopy(arc.vqip_out)
+
+    def request(self, method: str, original):
+        signature = inspect.signature(original)
+        direction = "push" if method == "send_push_request" else "pull"
+
+        def wrapped(*args, **kwargs):
+            if self.current is not None:
+                self.fail(f"capture_arc_calls: {method} re-enters {self.arc.name!r}")
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            if bound.arguments.get("time", 0):
+                self.fail(f"capture_arc_calls: {self.arc.name!r} got a request with a time")
+            day = self.day()
+            j = self.per_direction[direction]
+            self.per_direction[direction] += 1
+            index, self.index = self.index, self.index + 1
+            record = ArcCall(
+                arc=self.arc.name,
+                method=method,
+                # QueueArc.send_push_request names the request ``vqip_`` (arcs.py:360)
+                vqip=copy.deepcopy(bound.arguments.get("vqip", bound.arguments.get("vqip_"))),
+                tag=copy.deepcopy(bound.arguments.get("tag", "default")),
+                force=bool(bound.arguments.get("force", False)),
+                reply={},
+                flow_in=self.arc.flow_in,
+                vqip_in=copy.deepcopy(self.arc.vqip_in),
+            )
+            day.calls.append(record)
+            self.current = (record, index)
+            try:
+                reply = original(*args, **kwargs)
+            finally:
+                self.current = None
+            self.finish_call(record, reply)
+            if not self.alt:
+                for request in self.arc.queue:
+                    self.rows.setdefault(id(request), (request, (direction, day.day, j)))
+            return reply
+
+        return wrapped
+
+    def update_queue(self, original):
+        def wrapped(*args, **kwargs):
+            record = self.record_call("update_queue", None, None)
+            reply = original(*args, **kwargs)
+            if record is not None:
+                self.finish_call(record, reply)
+            return reply
+
+        return wrapped
+
+    def decay(self, original):
+        """``generic_temperature_decay`` (``core.py:495-523``) returns the ``diff`` that
+        ``make_decay`` adds to ``total_decayed``."""
+
+        def wrapped(*args, **kwargs):
+            result = original(*args, **kwargs)
+            diff = copy.deepcopy(result[1])
+            if self.phase == "end":
+                self.raw.append(diff)
+            elif self.current is None:
+                self.fail(f"capture_arc_calls: {self.arc.name!r} decayed outside a request call")
+            else:
+                self.day().entry_diffs.append((self.current[1], diff))
+            return result
+
+        return wrapped
+
+    def end_timestep(self, original):
+        arc = self.arc
+
+        def wrapped():
+            day = self.day()
+            if self.alt:  # arcs.py:798-805: the keys above 0 in order, then key 0
+                slots = [i + 1 for i in range(arc.max_travel) if (i + 1) in arc.queue] + [0]
+                day.queue_at_end = [
+                    {"slot": k, "vqip": copy.deepcopy(arc.queue[k])} for k in sorted(arc.queue)
+                ]
+                rows = [("slot", k) for k in slots]
+            else:
+                day.queue_at_end = [self.queue_row(request) for request in arc.queue]
+                rows = [row["row"] for row in day.queue_at_end]
+            day.total_decayed_before_reset = copy.deepcopy(arc.total_decayed)
+            self.phase, self.raw = "end", []
+            try:
+                original()
+            finally:
+                self.phase = "entry"
+            if len(self.raw) != len(rows):
+                self.fail(
+                    f"capture_arc_calls: {arc.name!r} decayed {len(self.raw)} requests at the "
+                    f"end of the day, expected {len(rows)}"
+                )
+            day.end_diffs = list(zip(rows, self.raw, strict=True))
+            day.total_decayed_after = copy.deepcopy(arc.total_decayed)
+            day.post = self.snapshot()
+
+        return wrapped
+
+
+@contextmanager
+def capture_arc_calls(model, arcs: Sequence[str]) -> Iterator[dict[str, list[ArcDay]]]:
+    """Record the named user ``DecayArc``/``DecayArcAlt`` arcs while ``model`` runs (spec,
+    Verification 1, the replay harness): one :class:`ArcDay` per arc and day.
+
+    Wraps each arc's request calls, ``update_queue`` and ``end_timestep``, its
+    ``generic_temperature_decay`` (every per-request ``diff``, tagged with its call or its
+    row) and its two ports (the calls the arc makes into them, with their replies). Every
+    argument is deep-copied at entry, before WSIMOD can mutate it; no result is changed, and
+    everything is restored on exit. The lists fill while the model runs and are ordered by day
+    when the block exits.
+    """
+    errors: list[str] = []
+    date_index = {date: i for i, date in enumerate(model.dates)}
+    recorders = {name: _ArcRecorder(model.arcs[name], date_index, errors) for name in arcs}
+    restore: list[tuple[object, str, bool, object]] = []
+
+    def install(obj, attr: str, make) -> None:
+        own = attr in vars(obj)
+        restore.append((obj, attr, own, vars(obj).get(attr)))
+        setattr(obj, attr, make(getattr(obj, attr)))
+
+    for recorder in recorders.values():
+        arc = recorder.arc
+        install(arc, "send_push_request", lambda o, r=recorder: r.request("send_push_request", o))
+        install(arc, "send_pull_request", lambda o, r=recorder: r.request("send_pull_request", o))
+        install(arc, "update_queue", recorder.update_queue)
+        install(arc, "generic_temperature_decay", recorder.decay)
+        install(arc, "end_timestep", recorder.end_timestep)
+        for port in ("in_port", "out_port"):
+            install(arc, port, lambda real, r=recorder: _PortProxy(real, r))
+    result: dict[str, list[ArcDay]] = {name: [] for name in arcs}
+    try:
+        yield result
+    finally:
+        for obj, attr, own, value in reversed(restore):
+            if own:
+                setattr(obj, attr, value)
+            else:
+                delattr(obj, attr)
+        for name, recorder in recorders.items():
+            result[name].extend(recorder.days[d] for d in sorted(recorder.days))
     if errors:
         raise RuntimeError(errors[0])

@@ -11,24 +11,35 @@ in the first task where every class it needs exists.
 
 from __future__ import annotations
 
+import csv
+import functools
+import math
 import random
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 __all__ = ["CASES", "Case"]
 
 
 @dataclass(frozen=True)
 class Case:
-    """A purpose-built case (D8). A case with a River declares pollutant lists without nitrate."""
+    """A purpose-built case (D8). A case with a River declares pollutant lists without nitrate
+    unless it is built for the River's biochemistry (``river_nutrients``,
+    ``river_double_discharge``)."""
 
     build: Callable[[], dict]  # the mapping
-    days: int  # 30-120
+    days: int  # the default run: 30-120, 400 for river_nutrients (X39)
     scale: float  # the largest volume in the forcing
     replay: tuple[str, ...] = ()  # nodes the replay test captures
+    replay_arcs: tuple[str, ...] = ()  # user Decay* arcs the arc replay captures (D16)
     modes: tuple[str, ...] = ("quantity", "pollutants")
     wsimod: bool = True  # False: noodl-only (a WSIMOD crash), Task 17
+    # D24: the full horizon of a case whose default run is a prefix of its dates; a test marked
+    # ``slow`` runs it. ``None``: the default run is the whole case.
+    slow_days: int | None = None
 
 
 # A short pollutant list: one additive, one more additive, one non-additive.
@@ -38,6 +49,26 @@ _POLLUTANTS = {
     "non_additive_pollutants": ["temperature"],
 }
 _FLOW_MAX = 50.0
+
+
+@functools.cache
+def _forcing_dir() -> Path:
+    """One temporary directory per process (each xdist worker writes its own, D11)."""
+    return Path(tempfile.mkdtemp(prefix="noodl-wsimod-forcing-"))
+
+
+def _forcing_file(case: str, rows: Mapping[tuple[str, str], float]) -> str:
+    """The CSV of a ``filename`` override (D11): columns ``variable``, ``time``, ``value``, as
+    ``read_csv`` reads them (``model.py:1252-1269``). Returns its **absolute** path: both
+    engines open an override's file relative to the working directory, so a relative path would
+    depend on where pytest runs (X27)."""
+    path = _forcing_dir() / f"{case}.csv"
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["variable", "time", "value"])
+        for (variable, date), value in rows.items():
+            writer.writerow([variable, date, repr(float(value))])
+    return str(path.resolve())
 
 
 def _dates(n: int) -> list[str]:
@@ -969,6 +1000,74 @@ def _wtw_zero_input() -> dict:
     )
 
 
+def _wtw_catchment(name: str, days: int, seed: int, *, flow: tuple[float, float]) -> dict:
+    """A catchment whose temperature crosses 20 degC (daily values in [-5, 35]), for the
+    treatment's temperature factor ``exponent ** (20 - T)``."""
+    rng = random.Random(seed)
+    data = {}
+    for date in _dates(days):
+        data[("flow", date)] = round(rng.uniform(*flow), 6)
+        data[("phosphate", date)] = round(rng.uniform(1e-3, 1e-2), 8)
+        data[("ammonia", date)] = round(rng.uniform(1e-3, 5e-2), 8)
+        data[("temperature", date)] = round(rng.uniform(-5.0, 35.0), 4)
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _wtw_treatment() -> dict:
+    """The treatment processes (``wtw.py:163-214``) on the topologies of ``wwtw_storm_tank`` and
+    ``fwtw_deficit_sludge``, side by side. The ``WWTW`` has per-pollutant constants and
+    exponents (one above 1, one below), liquor multipliers other than the volume's and a
+    catchment whose temperature crosses 20 degC; cold days make its phosphate solids negative
+    (``0.55 x 1.07 ** (20 - T) + 0.35 > 1`` below about 15 degC, ``:207-208``). The ``FWTW``'s
+    supply is topped up by a small, varying catchment, so its water's temperature moves too."""
+    works = _wwtw_storm_tank()
+    plant = _fwtw_deficit_sludge()
+    days = _STORAGE_DAYS
+    nodes = [dict(n) for n in works["nodes"]]
+    for node in nodes:
+        if node["name"] == "inflow":
+            node.update(_wtw_catchment("inflow", days, 41, flow=(5.0, _FLOW_MAX)))
+        if node["name"] == "works":
+            node["process_parameters"] = {
+                "phosphate": {"constant": 0.55, "exponent": 1.07},
+                "ammonia": {"constant": 0.3, "exponent": 0.98},
+            }
+            node["liquor_multiplier"] = {"phosphate": 0.35, "ammonia": 0.5, "volume": 0.035}
+    for node in plant["nodes"]:
+        node = dict(node)
+        if node["name"] == "sea":
+            node["name"] = "sea_f"
+        if node["name"] == "plant":
+            node["process_parameters"] = {
+                "phosphate": {"constant": 0.3, "exponent": 1.02},
+                "ammonia": {"constant": 0.45, "exponent": 1.0},
+            }
+            node["liquor_multiplier"] = {"phosphate": 0.645, "ammonia": 0.2, "volume": 0.03}
+        nodes.append(node)
+    nodes.append(_wtw_catchment("source", days, 42, flow=(0.5, 3.0)))
+    arcs = [dict(a) for a in works["arcs"]]
+    for arc in plant["arcs"]:
+        arc = dict(arc)
+        for end in ("in_port", "out_port"):
+            if arc[end] == "sea":
+                arc[end] = "sea_f"
+        arcs.append(arc)
+    arcs.append(_arc("source_to_supply", "source", "supply"))
+    return _storage_case(
+        nodes,
+        arcs,
+        [
+            {"Catchment": "route"},
+            {"Reservoir": "distribute"},
+            {"Sewer": "make_discharge"},
+            {"WWTW": "calculate_discharge"},
+            {"FWTW": "treat_water"},
+            {"Demand": "create_demand"},
+            {"WWTW": "make_discharge"},
+        ],
+    )
+
+
 # --- land and its surfaces (Task 12) -----------------------------------------------------------
 _LAND_DAYS = 40
 
@@ -1318,6 +1417,72 @@ def _batch_divergence() -> dict:
     }
 
 
+def _soil_temperature() -> dict:
+    """Two soils with weights other than the neutral ones (``land.py:1060-1079``): ``fen`` forgets
+    its storage temperature (``w_prev = 0``) and ``heath`` blends all three terms with a deep
+    temperature of 8; an impervious roof shares the land. The air temperature crosses 0 and 20.
+    Runoff goes through a ``Node`` to a ``Waste`` and the percolation to a ``Groundwater``. The
+    depths are powers of two, so the override's round trip is exact (see ``_neutral_soil``)."""
+    days = _LAND_DAYS
+    forcing = _land_forcing(days, 46)
+    for number, date in enumerate(_dates(days)):
+        forcing[("temperature", date)] = round(-4.0 + 26.0 * (number % 10) / 9, 4)
+    weights = {
+        "fen": {"soil_temp_w_prev": 0, "soil_temp_w_air": 0.6, "soil_temp_w_deep": 0.4},
+        "heath": {
+            "soil_temp_w_prev": 0.3,
+            "soil_temp_w_air": 0.5,
+            "soil_temp_w_deep": 0.2,
+            "soil_temp_deep": 8,
+        },
+    }
+    return {
+        "pollutants": ["phosphate", "temperature"],
+        "additive_pollutants": ["phosphate"],
+        "non_additive_pollutants": ["temperature"],
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "moor",
+                [
+                    _pervious(
+                        "fen",
+                        area=8000.0,
+                        depth=0.5,
+                        infiltration_capacity=0.01,
+                        initial_storage=1500.0,
+                    ),
+                    _pervious(
+                        "heath",
+                        area=6000.0,
+                        depth=1.0,
+                        total_porosity=0.45,
+                        field_capacity=0.32,
+                        wilting_point=0.15,
+                        infiltration_capacity=0.008,
+                        initial_storage=2500.0,
+                    ),
+                    _impervious("roof", area=500.0, pore_depth=0.001),
+                ],
+                forcing,
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("moor_to_aquifer", "moor", "aquifer"),
+            _arc("moor_to_brook", "moor", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "overrides": {"nodes": {"moor": {"type_": "Land", "name": "moor", "surfaces": weights}}},
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
 # --- the cases no node task owns (Task 17) ---------------------------------------------------
 _SIMPLE = {  # ``set_simple_pollutants`` (constants.py:93-97)
     "pollutants": ["phosphate", "temperature"],
@@ -1438,6 +1603,657 @@ def _node_type_override() -> dict:
         [_arc("supply_to_homes", "supply", "homes"), _arc("homes_to_sea", "homes", "sea")],
         [{"Demand": "create_demand"}],
     )
+
+
+_DECAY_POLLUTANTS = {
+    "pollutants": ["phosphate", "ammonia", "do", "temperature"],
+    "additive_pollutants": ["phosphate", "ammonia"],
+    "non_additive_pollutants": ["do", "temperature"],
+}
+_DECAY_DAYS = 40
+
+
+def _decay_temperatures(days: int, seed: int, *, exactly_20: int | None = None) -> dict:
+    """Air temperatures in [12, 28], so the decay factor crosses its reference at 20 degC;
+    day ``exactly_20`` (if any) is 20.0 itself, where ``exponent ** 0 == 1``."""
+    rng = random.Random(seed)
+    data = {("temperature", date): round(rng.uniform(12.0, 28.0), 4) for date in _dates(days)}
+    if exactly_20 is not None:
+        data[("temperature", _dates(days)[exactly_20])] = 20.0
+    return data
+
+
+def _decay_catchment(name: str, days: int, seed: int) -> dict:
+    """A catchment that also carries dissolved oxygen (``do``, non-additive)."""
+    rng = random.Random(seed)
+    data = {}
+    for date in _dates(days):
+        data[("flow", date)] = round(rng.uniform(5.0, _FLOW_MAX), 6)
+        data[("phosphate", date)] = round(rng.uniform(1e-3, 1e-2), 8)
+        data[("ammonia", date)] = round(rng.uniform(1e-3, 5e-2), 8)
+        data[("do", date)] = round(rng.uniform(6.0, 10.0), 4)
+        data[("temperature", date)] = round(rng.uniform(4.0, 20.0), 4)
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _stocked_do(volume: float) -> dict:
+    return {**_stocked(volume), "do": 8.0}
+
+
+def _decay_storage() -> dict:
+    """A ``Storage``, a ``Reservoir``, a ``RiverReservoir`` and a ``River`` (no nitrate), each
+    with a ``decays`` dict and its own temperature forcing, which crosses 20 degC
+    (``DecayTank.end_timestep_decay``, ``tanks.py:442-447``).
+
+    - ``pond`` decays ``phosphate`` and the non-additive ``do`` and leaves ``ammonia`` and
+      ``temperature`` alone;
+    - ``res`` has a constant of 0.9, so ``constant * exponent ** (T - 20)`` exceeds 1 on warm days
+      and the cap binds; an override merges ``ammonia`` into its ``decays``
+      (``storage.py:101``);
+    - ``rr`` decays two pollutants with a ``decays`` entry whose factor is small;
+    - ``riv`` has a constant of 1 and a day at exactly 20 degC: its factor is exactly 1, which
+      the cap leaves alone (Python's ``min(1.0, 1)`` is ``1.0``).
+    """
+    days = _DECAY_DAYS
+    return {
+        **_DECAY_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _decay_catchment("src", days, 31),
+            _store("head", "Node"),
+            _store(
+                "pond",
+                "Storage",
+                capacity=80.0,
+                initial_storage=_stocked_do(30.0),
+                decays={
+                    "phosphate": {"constant": 0.05, "exponent": 1.07},
+                    "do": {"constant": 0.04, "exponent": 1.05},
+                },
+                data_input_dict=_decay_temperatures(days, 32),
+            ),
+            _store(
+                "res",
+                "Reservoir",
+                capacity=60.0,
+                initial_storage=_stocked_do(20.0),
+                decays={"phosphate": {"constant": 0.9, "exponent": 1.08}},
+                data_input_dict=_decay_temperatures(days, 33),
+            ),
+            _store(
+                "rr",
+                "RiverReservoir",
+                capacity=50.0,
+                initial_storage=_stocked_do(15.0),
+                environmental_flow=5.0,
+                decays={
+                    "phosphate": {"constant": 0.02, "exponent": 1.03},
+                    "ammonia": {"constant": 0.03, "exponent": 1.1},
+                },
+                data_input_dict=_decay_temperatures(days, 34),
+            ),
+            _river(
+                "riv",
+                damp=0.3,
+                initial_storage=_stocked_do(10.0),
+                decays={"phosphate": {"constant": 1.0, "exponent": 1.05}},
+                data_input_dict=_decay_temperatures(days, 35, exactly_20=3),
+            ),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_head", "src", "head"),
+            _arc("head_to_pond", "head", "pond", capacity=40.0),
+            _arc("pond_to_res", "pond", "res", capacity=15.0),
+            _arc("res_to_rr", "res", "rr", capacity=12.0),
+            _arc("rr_to_riv", "rr", "riv", capacity=10.0),
+            _arc("riv_to_sea", "riv", "sea"),
+        ],
+        "overrides": {
+            "nodes": {
+                "res": {
+                    "type_": "Reservoir",
+                    "name": "res",
+                    "decays": {"ammonia": {"constant": 0.02, "exponent": 1.03}},
+                }
+            }
+        },
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Storage": "distribute"},
+            {"Reservoir": "distribute"},
+            {"RiverReservoir": "satisfy_environmental"},
+        ],
+    }
+
+
+def _decay_groundwater(*, override: bool = True) -> dict:
+    """A ``Groundwater`` with ``decays`` between a catchment and a waste. WSIMOD loses the
+    groundwater's configured ``data_input_dict`` (``storage.py:202-203``: a decoy here, with
+    temperatures that would decay it differently), so its temperature comes from a ``filename``
+    override (``nodes.py:93-99``, X11). ``override=False`` leaves the override out: WSIMOD then
+    raises ``TypeError`` at the first decay (``core.py:485``) and noodl refuses by name."""
+    days = _DECAY_DAYS
+    mapping = {
+        **_DECAY_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _decay_catchment("src", days, 61),
+            _store(
+                "gw",
+                "Groundwater",
+                capacity=80.0,
+                initial_storage=_stocked_do(30.0),
+                residence_time=15.0,
+                decays={
+                    "phosphate": {"constant": 0.05, "exponent": 1.07},
+                    "do": {"constant": 0.04, "exponent": 1.05},
+                },
+                data_input_dict=_decay_temperatures(days, 62),
+            ),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("src_to_gw", "src", "gw"), _arc("gw_to_sea", "gw", "sea")],
+        "orchestration": [{"Catchment": "route"}, {"Groundwater": "distribute"}],
+    }
+    if override:
+        temperatures = _decay_temperatures(days, 63, exactly_20=4)
+        mapping["overrides"] = {
+            "nodes": {
+                "gw": {
+                    "type_": "Groundwater",
+                    "name": "gw",
+                    "filename": _forcing_file("decay_groundwater", temperatures),
+                }
+            }
+        }
+    return mapping
+
+
+def _decay_queue_groundwater(*, override: bool = True, number_of_timesteps: int | None = None):
+    """A ``QueueGroundwater`` with time-area ``{0: 0.5, 2: 0.5}`` and ``decays``: its tank is a
+    ``DecayQueueTank`` (``storage.py:307-315``) with WSIMOD's default ``number_of_timesteps = 1``
+    (``tanks.py:648``, X12), or the override's (``number_of_timesteps``, ``tanks.py:682-685``,
+    X28). A reservoir abstracts from it through ``pull_set_active`` (pro rata over the decayed
+    queue) and takes what it distributes; a second reservoir, distributed before the
+    groundwater, pushes all it holds into it.
+
+    - The catchment's flow is 0 on every third day, so the feeding reservoir is empty and
+      nothing is pushed that day: the water the end of the day before moved to slot 0 waits
+      there, without the flush of a push, until ``distribute``'s ``update_queue``
+      (``storage.py:352``; X13, plan Review Focus 1).
+    - ``ammonia``'s constant of 0.9 makes the cap bind on warm days; ``do`` is a non-additive
+      pollutant that decays, ``temperature`` one that only blends (the swapped merge, X13).
+    - The temperature is a ``filename`` override's: WSIMOD loses the configured
+      ``data_input_dict`` (``storage.py:291-292``, a decoy here, X11). ``override=False`` leaves
+      the override out, and WSIMOD raises ``TypeError`` at the first decay (``core.py:485``).
+    """
+    days = _DECAY_DAYS
+    source = _decay_catchment("src", days, 71)
+    for k, date in enumerate(_dates(days)):
+        if k % 3 == 2:
+            source["data_input_dict"][("flow", date)] = 0.0
+    mapping = {
+        **_DECAY_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            source,
+            _store("head", "Node"),  # a Catchment pushes to Node, River and Waste only
+            _store("feed", "Reservoir", capacity=60.0),  # a Node pushes to no Groundwater
+            _store(
+                "gw",
+                "QueueGroundwater",
+                capacity=500.0,
+                initial_storage=_stocked_do(30.0),
+                timearea={0: 0.5, 2: 0.5},
+                decays={
+                    "phosphate": {"constant": 0.05, "exponent": 1.07},
+                    "ammonia": {"constant": 0.9, "exponent": 1.08},
+                    "do": {"constant": 0.04, "exponent": 1.05},
+                },
+                data_input_dict=_decay_temperatures(days, 72),
+            ),
+            _store("res", "Reservoir", capacity=25.0),
+            _store("sink", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_head", "src", "head"),
+            _arc("head_to_feed", "head", "feed", capacity=45.0),
+            _arc("feed_to_gw", "feed", "gw"),
+            _arc("gw_to_res", "gw", "res", capacity=12.0),
+            _arc("res_to_sink", "res", "sink", capacity=8.0),
+        ],
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Reservoir": "make_abstractions"},
+            {"Reservoir": "distribute"},
+            {"QueueGroundwater": "distribute"},
+        ],
+    }
+    override_entry: dict = {"type_": "QueueGroundwater", "name": "gw"}
+    if override:
+        temperatures = _decay_temperatures(days, 73, exactly_20=5)
+        name = "decay_queue_groundwater" + ("" if number_of_timesteps is None else "_n0")
+        override_entry["filename"] = _forcing_file(name, temperatures)
+    if number_of_timesteps is not None:
+        override_entry["number_of_timesteps"] = number_of_timesteps
+    if len(override_entry) > 2:
+        mapping["overrides"] = {"nodes": {"gw": override_entry}}
+    return mapping
+
+
+def _decay_queue_groundwater_n0() -> dict:
+    """``decay_queue_groundwater`` with the override ``number_of_timesteps: 0`` (D12)."""
+    return _decay_queue_groundwater(number_of_timesteps=0)
+
+
+def _arc_temperatures(days: int, seed: int) -> dict:
+    """An in-port's air temperatures in [12, 28] (``_decay_temperatures``) for its arcs' decay."""
+    return _decay_temperatures(days, seed)
+
+
+_ARC_DECAYS = {
+    "phosphate": {"constant": 0.06, "exponent": 1.07},
+    "temperature": {"constant": 0.02, "exponent": 1.03},  # a non-additive column decays
+}
+
+
+def _decay_arc() -> dict:
+    """W21's ``queue_arc`` with its arcs made user ``DecayArc``s (``arcs.py:668-728``):
+
+    - ``q`` (``n = 2``) pushes into the reservoir ``res`` of capacity 6, which rejects a due
+      request on day 7: the backflow is the decayed water (``:399-405``);
+    - ``q_pull`` (``n = 1``) is the reservoir ``basin``'s abstraction from ``well``: the pulled
+      water decays after it left the sender, and is handed over the next day;
+    - ``b_to_sink`` (``n = 0``) decays each push once, on entry, and delivers it at once;
+    - ``src2_to_j`` (``n = 0``) leaves a catchment: it decays at the catchment's
+      ``"wsimod.temperature"`` row (X29).
+
+    Each in-port (``a``, ``well``, ``b``) has a temperature forcing that crosses 20 degC. Every
+    arc carries requests of one direction, so no end of day finds due-and-waiting rows in both
+    (the precondition of D21): noodl's ``"decay_arc_order_unknown"`` is false on every day."""
+    mapping = _queue_arc()
+    days = _QUEUE_ARC_DAYS
+    for seed, node in enumerate(mapping["nodes"]):
+        if node["name"] in ("a", "well", "b"):
+            node["data_input_dict"] = _arc_temperatures(days, 80 + seed)
+    phosphate = {"phosphate": _ARC_DECAYS["phosphate"]}
+    for arc in mapping["arcs"]:
+        if arc["name"] == "q":
+            arc.update(type_="DecayArc", decays=dict(_ARC_DECAYS))
+        elif arc["name"] == "q_pull":
+            arc.update(type_="DecayArc", decays=dict(phosphate))
+        elif arc["name"] in ("b_to_sink", "src2_to_j"):
+            arc.update(type_="DecayArc", number_of_timesteps=0, decays=dict(_ARC_DECAYS))
+    return mapping
+
+
+def _decay_arc_mixed() -> dict:
+    """``decay_arc`` with the storage ``well`` made a reservoir: ``q_pull`` (``n = 1``) then
+    carries both directions. Each day ``well`` pushes its water into ``basin`` through it
+    (``Reservoir: distribute``), and then ``basin`` pulls from ``well`` through it
+    (``Abstraction: make_abstractions``), so the two directions meet in one arc in the same
+    order every day. The pull calls reach ``update_queue`` every day, so the end of the day
+    never finds a due request waiting in both directions. No request is ever due at the end of a
+    day here, so the case covers the merged push and pull order of the term, but not X41's
+    due-and-waiting case."""
+    mapping = _decay_arc()
+    well = next(node for node in mapping["nodes"] if node["name"] == "well")
+    well["type_"] = "Reservoir"
+    return mapping
+
+
+_DECAY_ARC_ALT_DAYS = 40
+
+
+def _decay_arc_alt() -> dict:
+    """A user ``DecayArcAlt`` (``arcs.py:731-805``, ``n = 2``) from the node ``head`` into a
+    reservoir (a ``Node`` pushes to Node, River, Waste and Reservoir only, ``nodes.py:62-65``).
+    The catchment's flow is 0 on irregular days, so ``head`` pushes on some days and
+    not on others: on a day without a push the arc's slot 0 is not delivered, and the end of
+    day merges it with slot 1 (the swapped merge, X13). ``temperature`` blends where a push
+    sums into a queued key, and ``phosphate`` and ``ammonia`` decay at ``head``'s temperature
+    (the in-port's, ``core.py:464-470``)."""
+    days = _DECAY_ARC_ALT_DAYS
+    source = _catchment("src", days, 91)
+    rng = random.Random(92)
+    for date in _dates(days):
+        if rng.random() < 0.35:
+            source["data_input_dict"][("flow", date)] = 0.0
+    decays = {
+        "phosphate": {"constant": 0.07, "exponent": 1.06},
+        "ammonia": {"constant": 0.12, "exponent": 1.08},
+    }
+    return _storage_case(
+        [
+            source,
+            _store("head", "Node", data_input_dict=_arc_temperatures(days, 93)),
+            _store("b", "Reservoir", capacity=300.0),
+            _store("sink", "Waste"),
+        ],
+        [
+            _arc("src_to_head", "src", "head"),
+            _arc(
+                "head_to_b",
+                "head",
+                "b",
+                type_="DecayArcAlt",
+                number_of_timesteps=2,
+                capacity=30.0,
+                decays=decays,
+            ),
+            _arc("b_to_sink", "b", "sink", capacity=9.0),
+        ],
+        [{"Catchment": "route"}, {"Reservoir": "distribute"}],
+    )
+
+
+def _nitrifying(volume: float) -> dict:
+    """An ``initial_storage`` VQIP over WSIMOD's 12 default pollutants, with ammonia, nitrite and
+    nitrate to decay (every key is needed: WSIMOD sums over its pollutant list)."""
+    return {
+        "volume": volume,
+        "do": 8.0,
+        "org-phosphorus": 0.0004 * volume,
+        "phosphate": 0.002 * volume,
+        "ammonia": 0.02 * volume,
+        "solids": 0.5 * volume,
+        "bod": 0.01 * volume,
+        "cod": 0.02 * volume,
+        "ph": 7.0,
+        "temperature": 11.0,
+        "nitrate": 0.01 * volume,
+        "nitrite": 0.005 * volume,
+        "org-nitrogen": 0.003 * volume,
+    }
+
+
+def _nitrifying_land(*, twice: bool) -> dict:
+    """An impervious and a pervious surface that decay ammonia, nitrite and phosphate, each with
+    its own ``decays`` (D13) over WSIMOD's 12 default pollutants and the live soil temperature.
+    The air temperature crosses 20 degC, so ``roads`` nitrite hits the cap of 1 on warm days
+    (``core.py:513-515``). There is no ``River`` (nitrate would start its biochemistry): the
+    percolation goes to a ``Groundwater`` without decays, the runoff through a ``Node`` to a
+    ``Waste``. ``twice`` runs the ``Land`` twice a day (X16: the carry-over, ``land.py:427-439``,
+    is converted at every ``Surface.run``)."""
+    days = _LAND_DAYS
+    forcing = _land_forcing(days, 71 if twice else 70)
+    for number, date in enumerate(_dates(days)):
+        forcing[("temperature", date)] = round(8.0 + 16.0 * (number % 10) / 9, 4)
+    orchestration = [{"Land": "run"}] * (2 if twice else 1) + [{"Groundwater": "distribute"}]
+    return {
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "plot",
+                [
+                    _impervious(
+                        "roads",
+                        area=2000.0,
+                        pore_depth=0.002,
+                        et0_to_e=0.9,
+                        initial_storage=_nitrifying(3.0),
+                        decays={
+                            "ammonia": {"constant": 0.05, "exponent": 1.08},
+                            "nitrite": {"constant": 0.9, "exponent": 1.1},
+                            "phosphate": {"constant": 0.01, "exponent": 1.03},
+                        },
+                    ),
+                    _pervious(
+                        "turf",
+                        area=1e4,
+                        depth=0.5,
+                        infiltration_capacity=0.01,
+                        initial_storage=_nitrifying(1700.0),
+                        decays={
+                            "ammonia": {"constant": 0.08, "exponent": 1.06},
+                            "nitrite": {"constant": 0.12, "exponent": 1.04},
+                            "phosphate": {"constant": 0.02, "exponent": 1.02},
+                        },
+                    ),
+                ],
+                forcing,
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("plot_to_aquifer", "plot", "aquifer"),
+            _arc("plot_to_brook", "plot", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": orchestration,
+    }
+
+
+def _surface_decay_nitrification() -> dict:
+    return _nitrifying_land(twice=False)
+
+
+def _land_run_twice() -> dict:
+    return _nitrifying_land(twice=True)
+
+
+# --- River biochemistry (Task 13; spec, Purpose-built cases) -----------------------------------
+_NUTRIENT_ADDITIVE = ["phosphate", "org-phosphorus", "ammonia", "nitrate", "org-nitrogen"]
+_NUTRIENT_POLLUTANTS = {  # the six the biochemistry reads (storage.py:738-898)
+    "pollutants": ["temperature", *_NUTRIENT_ADDITIVE],
+    "additive_pollutants": _NUTRIENT_ADDITIVE,
+    "non_additive_pollutants": ["temperature"],
+}
+_RIVER_NUTRIENTS_DAYS = 400  # the default run (X39): the 366-slot register has turned over
+_RIVER_NUTRIENTS_SLOW_DAYS = 1100  # three turns of the register, three winters (D24)
+# The designed days of ``river_nutrients`` (R3: every branch inside the first 400 days).
+_FROST = range(25, 46)  # air at -6 degC: the river water relaxes to T <= 0 (frozen)
+_P_PULSE = range(60, 90)  # src_up's phosphate x150: r_up's 365-day P mean crosses the guard
+_DROUGHT = range(120, 127)  # src_up flows nothing: res drains r_up to exactly 0 (dry)
+_DIN_FREE = range(120, 171)  # src_up carries no ammonia and no nitrate: r_up's din is 0
+_COLD_SNAP = range(130, 151)  # air 8 degC below the season: cooling, so r_up mineralises
+_NUTRIENT_CONCENTRATIONS = {  # kg/m3; src_up is the low-P catchment
+    "src_up": {
+        "phosphate": 2.5e-7,
+        "org-phosphorus": 1e-7,
+        "ammonia": 0.005,
+        "nitrate": 0.015,
+        "org-nitrogen": 1.5e-4,
+    },
+    "src_low": {
+        "phosphate": 2e-3,
+        "org-phosphorus": 1e-3,
+        "ammonia": 0.005,
+        "nitrate": 0.015,
+        "org-nitrogen": 0.005,
+    },
+}
+# r_low's overrides (storage.py:620-644), all 13 attributes; ``max_temp_lag = 5``
+# makes both temperature windows the whole 6-slot register, so its 10-day mean always exceeds
+# its 20-day mean and it produces whenever it is warm; its rates are raised so that its caps bind
+# with ordinary concentrations; ``bulk_density`` is unread (D10).
+_R_LOW_OVERRIDES = {
+    "max_temp_lag": 5,
+    "max_phosphorus_lag": 300,
+    "denpar_w": 2e-4,
+    "prodNpar": 0.05,
+    "prodPpar": 0.01,
+    "uptake_PNratio": 0.5,
+    "muptNpar": 0.01,
+    "muptPpar": 0.002,
+    "T_wdays": 3,
+    "halfsatINwater": 2e-3,
+    "hsatTP": 1e-4,
+    "limpppar": 2e-4,
+    "bulk_density": 1500,
+}
+
+
+def _nutrient_air(days: int, seed: int) -> list[float]:
+    """Air temperatures: a year's sinusoid (about -1 to 21 degC, coldest on day 15) with noise,
+    the frost spell and the cold snap written in."""
+    rng = random.Random(seed)
+    out = []
+    for k in range(days):
+        value = 10.0 - 11.0 * math.cos(2 * math.pi * (k - 15) / 365) + rng.uniform(-0.8, 0.8)
+        if k in _FROST:
+            value = -6.0 + rng.uniform(-0.5, 0.5)
+        elif k in _COLD_SNAP:
+            value -= 8.0
+        out.append(round(value, 4))
+    return out
+
+
+def _nutrient_catchment(
+    name: str, days: int, seed: int, air: list[float], *, profile: str | None = None
+) -> dict:
+    """A catchment with the six pollutants at ``_NUTRIENT_CONCENTRATIONS[profile]`` (default
+    its name's): a seasonal flow with noise (``src_up``: the drought and the DIN-free stretch,
+    and the phosphate pulse), water a degree warmer than the air and never below 0.5 degC."""
+    rng = random.Random(seed)
+    base = _NUTRIENT_CONCENTRATIONS[name if profile is None else profile]
+    data = {}
+    for k, date in enumerate(_dates(days)):
+        flow = 30.0 - 10.0 * math.cos(2 * math.pi * (k - 45) / 365) + rng.uniform(-4.0, 4.0)
+        if name == "src_low":
+            flow = 0.6 * flow
+        if name == "src_up" and k in _DROUGHT:
+            flow = 0.0
+        data[("flow", date)] = round(flow, 6)
+        data[("temperature", date)] = round(max(air[k] + 1.0, 0.5), 4)
+        for pollutant, concentration in base.items():
+            value = concentration * rng.uniform(0.8, 1.2)
+            if name == "src_up":
+                if pollutant == "phosphate" and k in _P_PULSE:
+                    value *= 150.0
+                if pollutant in ("ammonia", "nitrate") and k in _DIN_FREE:
+                    value = 0.0
+            data[(pollutant, date)] = float(f"{value:.6e}")
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _nutrient_stocked(volume: float, source: str, temperature: float) -> dict:
+    """An ``initial_storage`` VQIP at the catchment ``source``'s concentrations."""
+    return {
+        "volume": volume,
+        "temperature": temperature,
+        **{p: c * volume for p, c in _NUTRIENT_CONCENTRATIONS[source].items()},
+    }
+
+
+def _river_nutrients() -> dict:
+    """Two rivers in a chain with WSIMOD's biochemistry live (``"nitrate"`` a pollutant),
+    1100 days, every branch inside the first 400 (R3, X39).
+
+    ``src_up`` -> ``r_up`` -> ``r_low`` -> ``sea``, and ``src_low`` -> ``r_low``. ``r_up``
+    (``kt = 1.16``, routing coefficient 0.33, area 1000 m2) is the low-P river: its phosphorus
+    is about 3e-5 kg, below ``limpppar - hsatTP = 5e-5``, so ``totalphosfcn`` is 0 until the
+    phosphate pulse of days 60-89 lifts its 365-day mean above the guard, and the mean falls
+    back below it once the pulse leaves the 366-slot register (days 426-455; the guard is False
+    again from day 448, measured, in the slow run).
+    ``r_low`` (coefficient 0.52, area 4000 m2) is overridden to ``max_temp_lag = 5``,
+    ``max_phosphorus_lag = 300`` and raised rates (``_R_LOW_OVERRIDES``). The reservoir
+    ``res`` (capacity 6, emptied into the sea every day) abstracts 6 m3 a day from ``r_up``
+    after the catchments have routed, so in the drought of days 120-126 it drains ``r_up`` to
+    exactly 0 and the river is dry at ``calculate_discharge``; the DIN-free water that refills
+    it (days 120-170) keeps ``din`` at exactly 0, and the cold snap of days 130-150 makes
+    ``r_up`` mineralise there, so ``"river_nitrogen_lost"`` holds. The frost spell of days
+    25-45 freezes both rivers, with days between 0 and 5 degC either side; the seasons give
+    warming (production) and cooling (mineralisation), and every 50 % cap binds on some days
+    and not on others (asserted from the decisions under ``-m slow``).
+    """
+    days = _RIVER_NUTRIENTS_SLOW_DAYS
+    dates = _dates(days)
+    air = _nutrient_air(days, 130)
+    air_low = [round(t + 0.5, 4) for t in air]
+    return {
+        **_NUTRIENT_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _nutrient_catchment("src_up", days, 131, air),
+            _nutrient_catchment("src_low", days, 132, air),
+            _river(
+                "r_up",
+                damp=1.0,
+                length=2000.0,
+                width=0.5,
+                velocity=1728.0,
+                initial_storage=_nutrient_stocked(60.0, "src_up", 4.0),
+                data_input_dict={("temperature", d): t for d, t in zip(dates, air, strict=True)},
+            ),
+            _river(
+                "r_low",
+                damp=0.5,
+                length=2000.0,
+                width=2.0,
+                velocity=1728.0,
+                initial_storage=_nutrient_stocked(120.0, "src_low", 4.0),
+                data_input_dict={
+                    ("temperature", d): t for d, t in zip(dates, air_low, strict=True)
+                },
+            ),
+            _store("res", "Reservoir", capacity=6.0),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("up_in", "src_up", "r_up"),
+            _arc("low_in", "src_low", "r_low"),
+            _arc("up_to_low", "r_up", "r_low"),
+            _arc("up_to_res", "r_up", "res"),
+            _arc("res_to_sea", "res", "sea"),
+            _arc("low_to_sea", "r_low", "sea"),
+        ],
+        "overrides": {"nodes": {"r_low": {"type_": "River", "name": "r_low", **_R_LOW_OVERRIDES}}},
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Reservoir": "make_abstractions"},
+            {"River": "calculate_discharge"},
+            {"Reservoir": "distribute"},
+        ],
+    }
+
+
+_DOUBLE_DISCHARGE_DAYS = 40
+
+
+def _river_double_discharge() -> dict:
+    """A custom orchestration with ``River: calculate_discharge`` twice a day (X16, X32). The
+    river is warm (12-20 degC), never dry and always holds dissolved nitrogen, so each call
+    moves mass. WSIMOD assigns ``bio_in``/``bio_out`` (``storage.py:923-924``), so its node check
+    sees only the second call's terms and prints a mass-balance error for the river on every
+    day; noodl's terms add both calls and its balance closes within rounding, 2e-16 of scale
+    (D17, the named exception to W90/W91)."""
+    days = _DOUBLE_DISCHARGE_DAYS
+    dates = _dates(days)
+    rng = random.Random(140)
+    air = [
+        round(16.0 + 4.0 * math.sin(2 * math.pi * k / 40) + rng.uniform(-0.5, 0.5), 4)
+        for k in range(days)
+    ]
+    return {
+        **_NUTRIENT_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _nutrient_catchment("src", days, 141, air, profile="src_low"),
+            _river(
+                "riv",
+                damp=0.5,
+                length=2000.0,
+                width=2.0,
+                velocity=1728.0,
+                initial_storage=_nutrient_stocked(100.0, "src_low", 15.0),
+                data_input_dict={("temperature", d): t for d, t in zip(dates, air, strict=True)},
+            ),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("src_in", "src", "riv"), _arc("riv_to_sea", "riv", "sea")],
+        "orchestration": [
+            {"Catchment": "route"},
+            {"River": "calculate_discharge"},
+            {"River": "calculate_discharge"},
+        ],
+    }
 
 
 CASES: dict[str, Case] = {
@@ -1579,6 +2395,12 @@ CASES: dict[str, Case] = {
         scale=150.0,
         replay=("plant", "sludge_sewer"),
     ),
+    "wtw_treatment": Case(
+        build=_wtw_treatment,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_wtw_treatment()),
+        replay=("works", "combined", "plant", "sludge_sewer"),
+    ),
     "queue_tank_time_zero": Case(
         build=_queue_tank_time_zero,
         days=_STORAGE_DAYS,
@@ -1602,6 +2424,12 @@ CASES: dict[str, Case] = {
         days=_LAND_DAYS,
         scale=2000.0,
         replay=("farm",),
+    ),
+    "soil_temperature": Case(
+        build=_soil_temperature,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("moor",),
     ),
     "evaporation_clamp": Case(
         build=_evaporation_clamp,
@@ -1661,10 +2489,79 @@ CASES: dict[str, Case] = {
         scale=_largest_volume(_float_accuracy_override()),
         replay=("buf",),
     ),
+    "decay_storage": Case(
+        build=_decay_storage,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_storage()),
+        replay=("pond", "res", "rr", "riv"),
+    ),
+    "decay_groundwater": Case(
+        build=_decay_groundwater,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_groundwater()),
+        replay=("gw",),
+    ),
+    "decay_queue_groundwater": Case(
+        build=_decay_queue_groundwater,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_queue_groundwater()),
+        replay=("gw",),
+    ),
+    "decay_queue_groundwater_n0": Case(
+        build=_decay_queue_groundwater_n0,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_queue_groundwater_n0()),
+        replay=("gw",),
+    ),
+    "decay_arc": Case(
+        build=_decay_arc,
+        days=_QUEUE_ARC_DAYS,
+        scale=_largest_volume(_decay_arc()),
+        replay=("a", "b", "res", "basin"),
+        replay_arcs=("q", "q_pull", "b_to_sink", "src2_to_j"),
+    ),
+    "decay_arc_mixed": Case(
+        build=_decay_arc_mixed,
+        days=_QUEUE_ARC_DAYS,
+        scale=_largest_volume(_decay_arc_mixed()),
+        replay_arcs=("q_pull",),
+    ),
+    "decay_arc_alt": Case(
+        build=_decay_arc_alt,
+        days=_DECAY_ARC_ALT_DAYS,
+        scale=_largest_volume(_decay_arc_alt()),
+        replay=("b",),
+        replay_arcs=("head_to_b",),
+    ),
+    "surface_decay_nitrification": Case(
+        build=_surface_decay_nitrification,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("plot",),
+    ),
+    "land_run_twice": Case(
+        build=_land_run_twice,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("plot",),
+    ),
     "node_type_override": Case(
         build=_node_type_override,
         days=_STORAGE_DAYS,
         scale=500.0,
         replay=("homes",),
+    ),
+    "river_nutrients": Case(
+        build=_river_nutrients,
+        days=_RIVER_NUTRIENTS_DAYS,
+        scale=_largest_volume(_river_nutrients()),
+        replay=("r_up", "r_low"),
+        slow_days=_RIVER_NUTRIENTS_SLOW_DAYS,
+    ),
+    "river_double_discharge": Case(
+        build=_river_double_discharge,
+        days=_DOUBLE_DISCHARGE_DAYS,
+        scale=_largest_volume(_river_double_discharge()),
+        replay=("riv",),
     ),
 }

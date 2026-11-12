@@ -8,19 +8,29 @@ the node's stores from each call's ``pre``, makes the call, and compares the rep
 
 The comparison is exact for a class whose ``replay_bound`` is 0 (``Node``, ``Waste``,
 ``Catchment``): every value must be bitwise WSIMOD's. A class with ``pow``/``exp``/``sqrt`` may
-declare ``1e-12`` (relative to the case's scale) with its cause written next to it.
+declare ``1e-12`` (relative to the case's scale) with its cause written next to it. A River
+with biochemistry loads its two lag registers from WSIMOD's captured lists (padded, X17) and
+compares them after every call, and its bound ``temperature`` with the one WSIMOD read.
 
 :class:`StoreNode` is a test double for the unit tests: a VQIP store of a given capacity whose
 WSIMOD type is settable.
+
+:func:`replay_arc` does the same for a user ``DecayArc`` or ``DecayArcAlt`` (spec, Verification
+1, the replay harness): the arc is built alone between two :class:`ScriptedPort`\\ s that return
+the replies WSIMOD's ports gave, and every request call, reply, accumulator, per-request ``diff``
+and queued row is compared bitwise with the capture (:class:`ArcDay`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 
+from noodl.apps.wsimod.arcs import ARC_CLASSES, DecayArcAlt
 from noodl.apps.wsimod.classes import NODE_SCHEMAS
 from noodl.apps.wsimod.config import ArcSpec, NodeSpec, WsimodNetwork
 from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
@@ -36,8 +46,20 @@ from noodl.apps.wsimod.vqip import (
     v_change_vqip,
     write,
 )
+from tests.verification._wsimod_reference import pad_register
 
-__all__ = ["Mismatch", "ScriptedArc", "StoreNode", "replay"]
+if TYPE_CHECKING:  # pragma: no cover
+    from tests.verification._wsimod_reference import ArcCall, ArcDay
+
+__all__ = [
+    "Mismatch",
+    "ScriptedArc",
+    "ScriptedPort",
+    "StoreNode",
+    "precondition_holds",
+    "replay",
+    "replay_arc",
+]
 
 
 def _keys(p: Pollutants) -> tuple[str, ...]:
@@ -227,6 +249,10 @@ class StoreNode(Node):
         return self._clip(self._spare(), vqip)
 
 
+# a biochemistry River's lag lists, in ``River.lag_sizes``' order (storage.py:561, :564)
+_RIVER_REGISTERS = ("lagged_temperatures", "lagged_total_phosphorus")
+
+
 def _is_register(path: str) -> bool:
     return path.endswith("internal_arc.register")
 
@@ -247,7 +273,10 @@ def _internal_arc(node: Node, path: str):
 def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
     """A captured store as the noodl tensor ``Node.load_stores`` takes. A ``QueueTank``'s queue
     is WSIMOD's ``{time: vqip}`` dict, captured under the ``register`` path, and its key list
-    under the ``present`` path; a store that is a number is a scalar."""
+    under the ``present`` path; a River's lag list is padded to its register
+    (:func:`pad_register`, X17); a store that is a number is a scalar."""
+    if path in _RIVER_REGISTERS:
+        return pad_register(value, node.lag_sizes[_RIVER_REGISTERS.index(path)])
     if _is_register(path) or _is_present(path):
         length = _internal_arc(node, path).length
     if _is_register(path):
@@ -266,8 +295,12 @@ def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
 
 def compare_store(compare: _Comparer, label: str, path: str, ours: Tensor, theirs) -> None:
     """``ours`` against the captured store ``theirs`` (see :func:`load_value`); an absent queue
-    key is an empty row."""
-    if _is_register(path):
+    key is an empty row; a River's lag list is compared slot by slot with the padding (X17)."""
+    if path in _RIVER_REGISTERS:
+        expected = pad_register(theirs, ours.shape[-1])
+        for slot in range(ours.shape[-1]):
+            compare.value(f"{label}[{slot}]", ours[..., slot], float(expected[slot]))
+    elif _is_register(path):
         for time in range(ours.shape[-2]):
             vqip = theirs.get(time)
             row = {} if vqip is None else vqip
@@ -349,10 +382,19 @@ def replay(
             arc.flow_in = torch.tensor(float(flow_in), dtype=torch.float64)
             arc.vqip_in = to_vqip(p, call.pre.get(f"arcs.{arc.name}.vqip_in", {}))
         node.bind(node.configured_parameters(network.dates[call.day]))
+        if "forcing.temperature" in call.pre and "temperature" in node.params:
+            compare.value(
+                f"{label} forcing temperature",
+                node.params["temperature"],
+                call.pre["forcing.temperature"],
+            )
         node.load_stores(
             {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
         )
-        if call.method in type(node).step_methods:
+        if call.method == "end_timestep":
+            node.end_timestep()
+            reply = None
+        elif call.method in type(node).step_methods:
             reply = getattr(node, call.method)(active=active)
         else:
             vqip = None if call.vqip is None else to_vqip(p, call.vqip)
@@ -376,3 +418,355 @@ def replay(
                     f"{label} post {key}.vqip_in", arc.vqip_in, call.post[f"{key}.vqip_in"]
                 )
     return compare.worst
+
+
+# --- user Decay arcs (spec, Verification 1, the replay harness) -------------------------------
+ARC_REPLAY_BOUND = 0.0  # bitwise: IEEE + - * / and comparisons, and ``pow_python`` (X18)
+_DIRECTIONS = ("push", "pull")
+_REQUESTS = {"send_push_request": "push", "send_pull_request": "pull"}
+_OUT_PORT_CALLS = ("push_check", "push_set")  # the others go into the in_port (arcs.py:112-258)
+
+
+class ScriptedPort(Node):
+    """One end of an arc replayed alone (``ScriptedArc``'s counterpart for an arc): it answers
+    the calls the arc makes into it with the replies WSIMOD's port gave, in order, and asserts
+    that the arc made the same calls (method, tag and request, bitwise: ``ARC_REPLAY_BOUND``).
+
+    A pull request is compared by its volume only (D4: its additive entries are not rescaled).
+    An inactive call is skipped and returns zeros. ``script`` holds the port calls of the request
+    under way, ``label`` names it in a mismatch, and ``params`` is the node's day forcing: the
+    ``temperature`` a ``Decay*`` arc reads when this is its ``in_port`` (``core.py:464-470``).
+    """
+
+    def __init__(self, spec: NodeSpec, pollutants: Pollutants, *, wsimod_type: str, scale: float):
+        super().__init__(spec, pollutants)
+        self.wsimod_type = wsimod_type
+        self.script: list[ArcCall] = []
+        self.label = spec.name
+        self.compare = _Comparer(pollutants, scale, ARC_REPLAY_BOUND)
+
+    def assert_exhausted(self) -> None:
+        if self.script:
+            raise Mismatch(
+                f"{self.label}: noodl made no {self.script[0].method} into {self.name!r} "
+                f"({len(self.script)} left)"
+            )
+
+    def _next(self, method: str, vqip: Tensor | None, tag, active: Tensor) -> Tensor:
+        if not bool(active):
+            return empty(self.p, ()) if vqip is None else torch.zeros_like(vqip)
+        label = f"{self.label}: {method} into {self.name!r}"
+        if not self.script:
+            raise Mismatch(f"{label}: WSIMOD made no such call")
+        call = self.script.pop(0)
+        if (call.method, call.tag) != (method, tag):
+            raise Mismatch(f"{label} (tag {tag!r}): WSIMOD called {call.method} (tag {call.tag!r})")
+        if (call.vqip is None) != (vqip is None):
+            raise Mismatch(f"{label}: request {vqip!r}, WSIMOD's {call.vqip!r}")
+        if vqip is not None:
+            self.compare.vqip(f"{label} request", vqip, call.vqip, volume_only=method == "pull_set")
+        return to_vqip(self.p, call.reply)
+
+    def push_set(self, vqip: Tensor, tag="default", *, active: Tensor) -> Tensor:
+        return self._next("push_set", vqip, tag, active)
+
+    def pull_set(self, vqip: Tensor, tag="default", *, active: Tensor) -> Tensor:
+        return self._next("pull_set", vqip, tag, active)
+
+    def push_check(self, vqip: Tensor | None = None, tag="default", *, active: Tensor) -> Tensor:
+        return self._next("push_check", vqip, tag, active)
+
+    def pull_check(self, vqip: Tensor | None = None, tag="default", *, active: Tensor) -> Tensor:
+        return self._next("pull_check", vqip, tag, active)
+
+
+def precondition_holds(day: ArcDay, n: int) -> bool:
+    """X41's precondition on one captured day, from WSIMOD's own queue (D21): the end of the
+    day does not find a due request waiting in the push direction and another in the pull
+    direction (``time`` 0 before the end of the day). ``n`` is the arc's
+    ``number_of_timesteps``; with ``n = 0`` nothing is queued. A ``DecayArcAlt`` has one
+    direction, so it always holds."""
+    if n == 0:
+        return True
+    waiting = {r["direction"] for r in day.queue_at_end if "direction" in r and r["time"] == 0}
+    return waiting != set(_DIRECTIONS)
+
+
+@dataclass
+class _Group:
+    """A request call WSIMOD made, the port calls it caused and whether it reached
+    ``update_queue``."""
+
+    request: ArcCall
+    ports: list[ArcCall] = field(default_factory=list)
+    queued: bool = False
+
+    @property
+    def direction(self) -> str:
+        return _REQUESTS[self.request.method]
+
+
+def _groups(day: ArcDay) -> list[_Group]:
+    groups: list[_Group] = []
+    for call in day.calls:
+        if call.method in _REQUESTS:
+            groups.append(_Group(call))
+        elif call.method == "update_queue":
+            groups[-1].queued = True
+        else:
+            groups[-1].ports.append(call)
+    return groups
+
+
+def _template(days: Sequence[Sequence[_Group]]) -> list[tuple[str, int, object]]:
+    """The static request calls of one day, ``(direction, index, tag)`` in order: as many per
+    direction as its busiest day makes, the directions in the order they meet within a day.
+    noodl's call structure is the same every day (D2); a call WSIMOD did not make is inactive,
+    and WSIMOD's calls fill the first slots of their direction. Days whose directions interleave
+    cannot be laid on one template and are refused."""
+    counts = dict.fromkeys(_DIRECTIONS, 0)
+    tags: dict[str, list] = {d: [] for d in _DIRECTIONS}
+    order: list[str] = []
+    for groups in days:
+        seen: list[str] = []
+        per = dict.fromkeys(_DIRECTIONS, 0)
+        for group in groups:
+            d = group.direction
+            if not seen or seen[-1] != d:
+                seen.append(d)
+            if per[d] == len(tags[d]):
+                tags[d].append(group.request.tag)
+            per[d] += 1
+        if len(set(seen)) != len(seen):
+            raise ValueError(f"a day's requests interleave the directions: {seen}")
+        counts = {d: max(counts[d], per[d]) for d in _DIRECTIONS}
+        if len(seen) == 2 and order and order != seen:
+            raise ValueError(f"the directions meet as {seen} on one day and {order} on another")
+        if len(seen) == 2:
+            order = seen
+    order += [d for d in _DIRECTIONS if d not in order]
+    return [(d, k, tags[d][k]) for d in order for k in range(counts[d])]
+
+
+class _ArcReplay:
+    """:func:`replay_arc`'s state: the arc between its two ports, and what it decayed."""
+
+    def __init__(self, network: WsimodNetwork, name: str, p: Pollutants, scale: float) -> None:
+        self.network, self.name, self.p = network, name, p
+        self.spec = next(a for a in network.arcs if a.name == name)
+        self.nodes = {n.name: n for n in network.nodes}
+        ports = {
+            end: ScriptedPort(
+                self.nodes[end],
+                p,
+                wsimod_type=NODE_SCHEMAS[self.nodes[end].cls].renamed_type,
+                scale=scale,
+            )
+            for end in (self.spec.in_port, self.spec.out_port)
+        }
+        self.in_port, self.out_port = ports[self.spec.in_port], ports[self.spec.out_port]
+        self.arc = ARC_CLASSES[self.spec.cls](self.spec, self.in_port, self.out_port, p)
+        self.alt = isinstance(self.arc, DecayArcAlt)
+        self.n = self.arc.number_of_timesteps
+        self.compare = _Comparer(p, scale, ARC_REPLAY_BOUND)
+        self.decays: list[tuple[str, int, Tensor]] = []  # (phase, template place, diff)
+        self.phase, self.place = "entry", 0
+        original = self.arc.make_decay
+
+        def recording(vqip: Tensor):
+            result = original(vqip)
+            self.decays.append((self.phase, self.place, result[1]))
+            return result
+
+        self.arc.make_decay = recording
+        self.day = 0
+        self.last: dict[str, int | None] = dict.fromkeys(_DIRECTIONS)  # last call to update_queue
+
+    def new_day(self, k: int) -> Ctx:
+        """The day's context, and the arc's decay bound at its ``in_port``'s temperature: the
+        configuration's ``("temperature", date)`` row, set on the port (no node lists it in its
+        ``configured_parameters``)."""
+        ctx = Ctx(self.p, self.network.float_accuracy, (), day=k, node_names=[self.name])
+        self.arc.ctx = ctx
+        row = self.nodes[self.spec.in_port].data[("temperature", self.network.dates[k])]
+        self.in_port.params = {"temperature": torch.tensor(float(row), dtype=torch.float64)}
+        self.arc.bind_decay(
+            self.arc.defaults["decays.constant"], self.arc.defaults["decays.exponent"]
+        )
+        return ctx
+
+    def trace(self, template: list[tuple[str, int, object]], day: int) -> None:
+        """``WsimodDay._trace`` (D2): one day of every request call, inactive, fixes the arc's
+        call labels; its values are discarded."""
+        arc = self.arc
+        arc.begin_tracing()
+        self.new_day(day)
+        for direction, _, tag in template:
+            handle = arc.send_push_request if direction == "push" else arc.send_pull_request
+            handle(empty(self.p, ()), active=torch.tensor(False), tag=tag)
+        arc.end_timestep()
+        arc.end_tracing()
+        self.decays.clear()
+
+    def call(self, label: str, group: _Group | None, direction: str, tag) -> None:
+        """One request call of the template: WSIMOD's ``group``, or inactive (``None``)."""
+        arc, compare, p = self.arc, self.compare, self.p
+        for port in (self.in_port, self.out_port):
+            port.label = label
+            port.script = (
+                []
+                if group is None
+                else [
+                    c
+                    for c in group.ports
+                    if (c.method in _OUT_PORT_CALLS) == (port is self.out_port)
+                ]
+            )
+        handle = arc.send_push_request if direction == "push" else arc.send_pull_request
+        if group is None:
+            handle(empty(p, ()), active=torch.tensor(False), tag=tag)
+            return
+        request = group.request
+        compare.value(f"{label}: flow_in at entry", arc.flow_in, request.flow_in)
+        compare.vqip(f"{label}: vqip_in at entry", arc.vqip_in, request.vqip_in)
+        kwargs = {"force": request.force} if direction == "push" else {}
+        reply = handle(to_vqip(p, request.vqip), active=torch.tensor(True), tag=tag, **kwargs)
+        for port in (self.in_port, self.out_port):
+            port.assert_exhausted()
+        compare.vqip(f"{label}: reply", reply, request.reply)
+        compare.value(f"{label}: flow_in", arc.flow_in, request.flow_in_after)
+        compare.vqip(f"{label}: vqip_in", arc.vqip_in, request.vqip_in_after)
+        compare.value(f"{label}: flow_out", arc.flow_out, request.flow_out_after)
+        compare.vqip(f"{label}: vqip_out", arc.vqip_out, request.vqip_out_after)
+        if group.queued:
+            self.last[group.direction] = self.day
+
+    def check_queue(self, label: str, items: list[dict], shift: int) -> None:
+        """The arc's queue against WSIMOD's: ``items`` are WSIMOD's queued requests (``row``,
+        ``vqip``) or, for a ``DecayArcAlt``, its ``{key: vqip}`` dict. noodl's row ``(d, i, j)``
+        holds the request entered ``i`` days before the last call to reach ``update_queue`` in
+        direction ``d`` (``QueueArc``), and ``since`` counts the days since it, ``shift`` more
+        after the end of the day."""
+        arc, compare, p = self.arc, self.compare, self.p
+        if self.alt:
+            for path in ("register", "present"):
+                compare_store(
+                    compare, f"{label} {path}", f"internal_arc.{path}", getattr(arc, path), items
+                )
+            return
+        if not self.n:
+            return
+        expected: dict[tuple[int, int, int], dict] = {}
+        for item in items:
+            direction, entry_day, j = item["row"]
+            d = _DIRECTIONS.index(direction)
+            i = self.last[direction] - entry_day
+            if not 0 <= i < self.n:
+                raise Mismatch(
+                    f"{label}: WSIMOD's request {item['row']} waits {i} days (n={self.n})"
+                )
+            expected[d, i, j] = item["vqip"]
+        zero = dict.fromkeys(_keys(p), 0.0)
+        for d, direction in enumerate(_DIRECTIONS):
+            for i in range(self.n):
+                for j in range(arc.rows.shape[-2]):
+                    compare.vqip(
+                        f"{label} rows[{direction}, {i}, {j}]",
+                        arc.rows[d, i, j],
+                        expected.get((d, i, j), zero),
+                    )
+            last = self.last[direction]
+            since = self.n if last is None else min(self.day - last + shift, self.n)
+            compare.value(f"{label} since[{direction}]", arc.since[d], since)
+
+    def end_day(self, label: str, day: ArcDay, place_of: dict[int, int]) -> None:
+        arc, compare = self.arc, self.compare
+        entry_list = [(place, diff) for phase, place, diff in self.decays if phase == "entry"]
+        entries = dict(entry_list)
+        if len(entries) != len(entry_list):  # one entry decay per call: none overwrites another
+            raise Mismatch(
+                f"{label}: noodl decayed {len(entry_list)} entries on {len(entries)} calls"
+            )
+        if len(entry_list) < len(day.entry_diffs):
+            raise Mismatch(
+                f"{label}: noodl made {len(entry_list)} entry decays, WSIMOD {len(day.entry_diffs)}"
+            )
+        for index, diff in day.entry_diffs:
+            compare.vqip(f"{label} entry call {index}", entries[place_of[index]], diff)
+        before = {r["slot"]: r["vqip"] for r in day.queue_at_end} if self.alt else day.queue_at_end
+        self.check_queue(f"{label} before end_timestep", before, 0)
+        self.decays.clear()
+        self.phase = "end"
+        arc.end_timestep()
+        self.phase = "entry"
+        ends = [diff for _, _, diff in self.decays]
+        # noodl decays every slot (an absent one is empty); WSIMOD only the present ones
+        slots = (arc.length + 1) if self.alt else (2 * self.n * arc.rows.shape[-2] if self.n else 0)
+        if len(ends) != slots or len(day.end_diffs) > slots:
+            raise Mismatch(
+                f"{label}: noodl made {len(ends)} end-of-day decays ({slots} slots), "
+                f"WSIMOD {len(day.end_diffs)}"
+            )
+        width = 0 if self.alt else arc.rows.shape[-2]
+        for row, diff in day.end_diffs:
+            if self.alt:
+                index = row[1] - 1 if row[1] else arc.length
+            else:
+                direction, entry_day, j = row
+                d = _DIRECTIONS.index(direction)
+                index = (d * self.n + self.last[direction] - entry_day) * width + j
+            compare.vqip(f"{label} end row {row}", ends[index], diff)
+        self.check_queue(f"{label} after end_timestep", day.post["queue"], 1)
+        if self.alt:
+            compare.vqip(f"{label} total_decayed", arc.total_decayed, day.total_decayed_after)
+
+
+def replay_arc(
+    network: WsimodNetwork,
+    name: str,
+    days: Sequence[ArcDay],
+    *,
+    scale: float,
+    pollutants: Pollutants | None = None,
+    contexts: list | None = None,
+) -> None:
+    """Replay the captured ``days`` (:class:`ArcDay`\\ s of WSIMOD's arc ``name``) into noodl's
+    arc, built alone between :class:`ScriptedPort`\\ s. Raises :class:`Mismatch` at the first
+    difference, naming the arc, the day and the call or row (every bound is 0, bitwise):
+
+    - each request call's arguments into the ports, its reply and the arc's four accumulators;
+    - each entry ``diff`` (by its call) and each end-of-day ``diff`` (by its row);
+    - the queued requests before and after ``end_timestep``: a ``DecayArc``'s rows and ``since``,
+      a ``DecayArcAlt``'s register and key set and its ``total_decayed``.
+
+    A ``DecayArc``'s calls are laid on a static template (:func:`_template`), and a tracing day
+    over it fixes the call labels first, as ``WsimodDay._trace`` does (D2). The arc reads its
+    ``in_port``'s temperature of the day (:meth:`_ArcReplay.new_day`). A list passed as
+    ``contexts`` receives each day's ``Ctx`` after its ``end_timestep``, with the day's terms and
+    events.
+    """
+    p = network.pollutants if pollutants is None else pollutants
+    replay = _ArcReplay(network, name, p, scale)
+    all_groups = [_groups(day) for day in days]
+    template = [] if replay.alt else _template(all_groups)
+    if template:
+        replay.trace(template, days[0].day)
+    for day, groups in zip(days, all_groups, strict=True):
+        label = f"arc {name!r} day {day.day}"
+        replay.day = day.day
+        ctx = replay.new_day(day.day)
+        replay.decays.clear()
+        place_of: dict[int, int] = {}
+        if replay.alt:
+            slots = [(g.direction, g, g.request.tag) for g in groups]
+        else:
+            by = {d: [g for g in groups if g.direction == d] for d in _DIRECTIONS}
+            slots = [(d, by[d][k] if k < len(by[d]) else None, tag) for d, k, tag in template]
+        for place, (direction, group, tag) in enumerate(slots):
+            replay.place = place
+            if group is not None:
+                place_of[groups.index(group)] = place
+            replay.call(f"{label} call {place}", group, direction, tag)
+        replay.end_day(label, day, place_of)
+        if contexts is not None:
+            contexts.append(ctx)

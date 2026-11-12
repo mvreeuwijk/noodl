@@ -17,7 +17,7 @@ classes and formats; :func:`check_network` refuses the rest by name, through eac
 
 from __future__ import annotations
 
-from noodl.apps.wsimod.arcs import ARC_CLASSES
+from noodl.apps.wsimod.arcs import ARC_CLASSES, DECAY_ARCS
 from noodl.apps.wsimod.classes import NODE_SCHEMAS
 from noodl.apps.wsimod.config import WsimodNetwork
 from noodl.apps.wsimod.engine import _register_all
@@ -30,6 +30,19 @@ __all__ = [
     "river_order",
 ]
 
+# the storage-family classes whose ``decays`` dict builds a DecayTank (a QueueGroundwater's a
+# DecayQueueTank) that reads the node's temperature (a Groundwater's and a QueueGroundwater's
+# is a filename override's, X11)
+DECAYING_STORAGE = (
+    "Storage",
+    "Groundwater",
+    "QueueGroundwater",
+    "Reservoir",
+    "RiverReservoir",
+    "River",
+)
+# the user arc classes that read their in_port's temperature (arcs.py:668-805)
+DECAY_ARC_CLASSES = tuple(cls.__name__ for cls in DECAY_ARCS)
 # model.py:697-735: the WSIMOD types (after the renames) whose arcs give the river order
 _RIVER_TYPES = ("River", "Node", "Waste", "Reservoir")
 # The tags a check can be asked under in 3a: the default, a Sewer's and a WWTW's "Sewer",
@@ -67,6 +80,9 @@ def check_network(network: WsimodNetwork, *, pollutants: bool) -> list[str]:
     for arc in network.arcs:
         ARC_CLASSES[arc.cls].validate(arc, network)
     ignored: list[str] = []
+    for arc in network.arcs:  # X49: a user Decay arc's values are not read quantity-only
+        if not pollutants and arc.decays is not None and arc.decays.keys:
+            ignored.append(f"{arc.name}.decays")
     for spec in network.nodes:
         if spec.cls not in classes:
             raise ValueError(f"node {spec.name!r}: class {spec.cls!r} is not ported yet")
@@ -284,11 +300,18 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
     """``{variable: nodes reading it}`` in configuration order (spec, Forcing checks).
 
     ``Land`` reads ``precipitation``, ``et0`` and ``temperature`` (``land.py:451-460``; the
-    temperature also for the surfaces' end-of-day decay, ``core.py:485-487``), a
+    temperature also for the surfaces' end-of-day decay, ``core.py:485-487``), a decaying
+    ``Storage``, ``Reservoir``, ``RiverReservoir`` or ``River`` (``temperature``, the same
+    end-of-day read) or ``Groundwater`` or ``QueueGroundwater`` (a ``filename`` override's, X11),
+    every ``River`` when ``"nitrate"`` is a configured pollutant (its biochemistry relaxes the
+    water temperature towards it, ``storage.py:748-750``; in quantity-only runs too, D9), a
     ``ResidentialDemand`` ``temperature`` (``demand.py:321``) and a ``Catchment`` ``flow`` and
-    every pollutant of the configuration (``catchment.py:59-74``). A variable no node reads is
-    absent.
+    every pollutant of the configuration (``catchment.py:59-74``). The ``in_port`` of every user
+    ``DecayArc`` or ``DecayArcAlt`` reads ``temperature`` too (``core.py:464-470``), each node
+    once, a ``Catchment`` included (X29: its ``"wsimod.temperature"`` row is the decay's, its
+    concentration column the outflow's). A variable no node reads is absent.
     """
+    decay_ports = {arc.in_port for arc in network.arcs if arc.cls in DECAY_ARC_CLASSES}
     readers: dict[str, list[str]] = {}
     for spec in network.nodes:
         if spec.cls == "Land":
@@ -297,8 +320,14 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
             variables = ("temperature",)
         elif spec.cls == "Catchment":
             variables = ("flow", *network.pollutants.names)
+        elif spec.cls in DECAYING_STORAGE and spec.parameters.get("decays") is not None:
+            variables = ("temperature",)  # the DecayTank's end of day (core.py:484-487)
+        elif spec.cls == "River" and "nitrate" in network.pollutants.names:
+            variables = ("temperature",)  # the biochemistry, in either mode (storage.py:750, D9)
         else:
-            continue
+            variables = ()
+        if spec.name in decay_ports and "temperature" not in variables:
+            variables = (*variables, "temperature")
         for variable in variables:
             readers.setdefault(variable, []).append(spec.name)
     return readers

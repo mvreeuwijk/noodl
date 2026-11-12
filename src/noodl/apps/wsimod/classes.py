@@ -219,12 +219,16 @@ _CONSTRUCTORS: dict[str, tuple[dict[str, object], str | None]] = {
     "PushArc": ({}, "Arc"),
     "SewerArc": ({}, "Arc"),  # no __init__ of its own
     "WeirArc": ({}, "SewerArc"),  # no __init__ of its own
+    # arcs.py:671 and :734 (``decays={}``); neither has an apply_overrides of its own, so
+    # ``decays`` is no override
+    "DecayArc": ({"decays": {}}, "QueueArc"),
+    "DecayArcAlt": ({"decays": {}}, "AltQueueArc"),
 }
 
 # --- override chains -------------------------------------------------------------------------
 # class -> the keys its own ``apply_overrides`` pops (the parent chain is the one above)
 _OVERRIDES: dict[str, frozenset[str]] = {
-    "Node": frozenset(),  # nodes.py:80-102; a ``filename`` is refused by the reader (3a)
+    "Node": frozenset({"filename"}),  # nodes.py:93-99 (X27)
     "Catchment": frozenset(),
     "Waste": frozenset(),
     "Demand": frozenset({"constant_demand", "pollutant_load"}),  # demand.py:66-77
@@ -243,15 +247,40 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     "Sewer": frozenset(  # sewer.py:118-143
         {"capacity", "chamber_area", "chamber_floor", "pipe_time", "pipe_timearea"}
     ),
-    # storage.py:78-104: ``decays`` is read there too, but a decaying store is refused (3b)
-    "Storage": frozenset({"capacity", "area", "datum"}),
+    # storage.py:78-104: ``decays`` merges per pollutant (``dict.update``), and is refused on a
+    # node built with ``decays: None``
+    "Storage": frozenset({"capacity", "area", "datum", "decays"}),
     "Groundwater": frozenset(  # storage.py:205-220
         {"residence_time", "infiltration_threshold", "infiltration_pct"}
     ),
-    "QueueGroundwater": frozenset({"timearea"}),  # storage.py:317-328
-    # storage.py:610-658; the biochemistry parameters it also sets belong to the refused
-    # nitrate River (3b)
-    "River": frozenset({"length", "width", "velocity", "damp", "mrf"}),
+    # storage.py:317-328 (``timearea``); ``decays`` comes from Storage's chain, and
+    # ``number_of_timesteps`` reaches the tank's apply_overrides (tanks.py:682-685, X28), which
+    # QueueGroundwater.validate accepts only with ``decays`` (a DecayQueueTank's)
+    "QueueGroundwater": frozenset({"timearea", "decays", "number_of_timesteps"}),
+    # storage.py:610-658: the shape and routing, then the 13 biochemistry attributes
+    # (:620-644); ``bulk_density`` is set and never read (``model.unread``, D10)
+    "River": frozenset(
+        {
+            "length",
+            "width",
+            "velocity",
+            "damp",
+            "mrf",
+            "uptake_PNratio",
+            "bulk_density",
+            "denpar_w",
+            "T_wdays",
+            "halfsatINwater",
+            "hsatTP",
+            "limpppar",
+            "prodNpar",
+            "prodPpar",
+            "muptNpar",
+            "muptPpar",
+            "max_temp_lag",
+            "max_phosphorus_lag",
+        }
+    ),
     "RiverReservoir": frozenset({"environmental_flow"}),  # storage.py:1045-1058
     "WTW": frozenset(  # wtw.py:130-153
         {
@@ -275,7 +304,7 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     # warning), so only ``area`` and ``depth`` reach the tank; ``Tank.apply_overrides``
     # (tanks.py:55-68) then takes ``datum``.
     "Tank": frozenset({"datum"}),
-    "DecayTank": frozenset(),  # ``decays`` (tanks.py:430-440): refused (3b)
+    "DecayTank": frozenset({"decays"}),  # tanks.py:430-440 (a Surface's merges per surface: D13)
     "Surface": frozenset({"surface", "pollutant_load", "area", "depth"}),
     # land.py:623-643; ``depth`` is popped and ignored (a printed error)
     "ImperviousSurface": frozenset({"et0_to_e", "pore_depth"}),
@@ -314,6 +343,30 @@ _DERIVED = {
 }
 
 
+# every node class reaches ``Node.apply_overrides`` (nodes.py:93-99), whatever its constructor chain
+_NODE_CLASSES = (
+    "Node",
+    "Catchment",
+    "Demand",
+    "NonResidentialDemand",
+    "ResidentialDemand",
+    "Distribution",
+    "UnlimitedDistribution",
+    "Land",
+    "Sewer",
+    "Storage",
+    "Groundwater",
+    "QueueGroundwater",
+    "River",
+    "Reservoir",
+    "RiverReservoir",
+    "Waste",
+    "WTW",
+    "WWTW",
+    "FWTW",
+)
+
+
 def _chain(name: str) -> list[str]:
     classes = [name]
     while _CONSTRUCTORS[classes[-1]][1] is not None:
@@ -328,6 +381,8 @@ def _schema(name: str) -> ClassSchema:
         for key, value in _CONSTRUCTORS[cls][0].items():
             parameters.setdefault(key, copy.deepcopy(value))
         override_keys |= _OVERRIDES.get(cls, frozenset())
+    if name in _NODE_CLASSES:
+        override_keys |= _OVERRIDES["Node"]
     override_keys -= _NOT_OVERRIDES.get(name, frozenset())
     return ClassSchema(
         name=name,
@@ -338,30 +393,7 @@ def _schema(name: str) -> ClassSchema:
     )
 
 
-NODE_SCHEMAS: dict[str, ClassSchema] = {
-    name: _schema(name)
-    for name in (
-        "Node",
-        "Catchment",
-        "Demand",
-        "NonResidentialDemand",
-        "ResidentialDemand",
-        "Distribution",
-        "UnlimitedDistribution",
-        "Land",
-        "Sewer",
-        "Storage",
-        "Groundwater",
-        "QueueGroundwater",
-        "River",
-        "Reservoir",
-        "RiverReservoir",
-        "Waste",
-        "WTW",
-        "WWTW",
-        "FWTW",
-    )
-}
+NODE_SCHEMAS: dict[str, ClassSchema] = {name: _schema(name) for name in _NODE_CLASSES}
 SURFACE_SCHEMAS: dict[str, ClassSchema] = {
     name: _schema(name) for name in ("Surface", "ImperviousSurface", "PerviousSurface")
 }
@@ -375,13 +407,13 @@ ARC_SCHEMAS: dict[str, ClassSchema] = {
         "PushArc",
         "SewerArc",
         "WeirArc",
+        "DecayArc",
+        "DecayArcAlt",
     )
 }
 
 # Classes WSIMOD has and this port does not, with where they go (spec, Scope).
 OUT_OF_SCOPE: dict[str, str] = {
-    "DecayArc": "3b",
-    "DecayArcAlt": "3b",
     "GrowingSurface": "3c",
     "IrrigationSurface": "3c",
     "GardenSurface": "3c",

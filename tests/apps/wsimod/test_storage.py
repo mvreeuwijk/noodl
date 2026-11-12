@@ -13,10 +13,12 @@ import random
 import pytest
 import torch
 
-from noodl.apps.wsimod.arcs import ARC_CLASSES
+from noodl.apps.wsimod import build_model, initial_drivers, initial_state
+from noodl.apps.wsimod.arcs import ARC_CLASSES, DecayArcAlt
 from noodl.apps.wsimod.config import ArcSpec, NodeSpec, read_wsimod_config
 from noodl.apps.wsimod.engine import Ctx, make_node
 from noodl.apps.wsimod.node import NODE_CLASSES, Waste
+from noodl.apps.wsimod.run import wsimod_run
 from noodl.apps.wsimod.storage import (
     Groundwater,
     QueueGroundwater,
@@ -28,10 +30,13 @@ from noodl.apps.wsimod.storage import (
     pow_half,
     river_derived,
     riverrc,
+    window_sum,
 )
+from noodl.apps.wsimod.structure import forcing_readers
+from noodl.apps.wsimod.tanks import DecayQueueTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from tests.apps.wsimod._replay import ScriptedArc, StoreNode
-from tests.verification._wsimod_reference import ArcCall
+from tests.verification._wsimod_reference import ArcCall, pad_register
 
 P = QUANTITY_ONLY
 FA = 1e-11
@@ -155,40 +160,252 @@ def test_pow_half_is_pythons_pow_bitwise_with_a_zero_slope_at_zero():
 
 
 # --- decays ---------------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "cls", ["Storage", "Groundwater", "Reservoir", "QueueGroundwater", "RiverReservoir"]
-)
-def test_a_decays_dict_on_a_storage_node_is_refused(cls):
-    network = read_wsimod_config(
-        {
-            "pollutants": [],
-            "additive_pollutants": [],
-            "non_additive_pollutants": [],
-            "dates": ["2000-01-01"],
-            "nodes": [{"name": "n", "type_": cls, "decays": None}],
-            "arcs": [],
-        }
-    )
+DECAYS = {"phosphate": {"constant": 0.1, "exponent": 1.02}}
+POLLUTANT_LISTS = {
+    "pollutants": ["phosphate", "ammonia"],
+    "additive_pollutants": ["phosphate", "ammonia"],
+    "non_additive_pollutants": [],
+}
+
+
+def _decaying(type_="Storage", *, decays=DECAYS, days=3, missing=(), overrides=None, **values):
+    """A node ``r`` of ``type_`` with ``decays`` (``None`` included) and a temperature forcing
+    on every date but those at the indices ``missing``."""
+    dates = [f"2000-01-{k + 1:02d}" for k in range(days)]
+    data = {("temperature", d): 15.0 for k, d in enumerate(dates) if k not in missing}
+    node = {"name": "r", "type_": type_, "decays": decays, "data_input_dict": data, **values}
+    mapping = {
+        **POLLUTANT_LISTS,
+        "dates": dates,
+        "nodes": [node, {"name": "sink", "type_": "Waste"}],
+        "arcs": [],
+        "orchestration": [],
+    }
+    if overrides is not None:
+        mapping["overrides"] = {"nodes": {"r": overrides}}
+    return mapping
+
+
+def _override(path) -> dict:
+    return {"type_": "Groundwater", "name": "r", "filename": str(path)}
+
+
+def test_a_decaying_groundwater_needs_a_filename_override(tmp_path):
+    """The configured forcing is lost (storage.py:202-203), so the temperature comes from an
+    override's file (X11); a file that misses a date is refused by name too."""
+    network = read_wsimod_config(_decaying("Groundwater", decays=None))
     spec = network.nodes[0]
-    assert NODE_CLASSES[cls].validate(spec, network, pollutants=True) == []  # None is valid
-    for decays in ({}, {"phosphate": {"constant": 0.1, "exponent": 1.1}}):
-        spec.parameters["decays"] = decays
-        with pytest.raises(ValueError, match=r"decays.*3b"):
-            NODE_CLASSES[cls].validate(spec, network, pollutants=True)
+    assert NODE_CLASSES["Groundwater"].validate(spec, network, pollutants=True) == []
+    with pytest.raises(ValueError, match=r"Groundwater.*filename"):
+        build_model(read_wsimod_config(_decaying("Groundwater")))
+    with pytest.raises(ValueError, match=r"Groundwater.*filename"):
+        build_model(read_wsimod_config(_decaying("Groundwater", decays={})))
+    rows = "".join(f"temperature,2000-01-0{k},15.0\n" for k in (1, 2))
+    short = tmp_path / "short.csv"
+    short.write_text("variable,time,value\n" + rows, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"2000-01-03.*filename"):
+        build_model(read_wsimod_config(_decaying("Groundwater", overrides=_override(short))))
+    full = tmp_path / "full.csv"
+    full.write_text(short.read_text() + "temperature,2000-01-03,15.0\n", encoding="utf-8")
+    network = read_wsimod_config(_decaying("Groundwater", overrides=_override(full)))
+    model, _, drivers = build_model(network)
+    assert model.unread == ["r.data_input_dict"]  # the decoy
+    assert drivers["wsimod.temperature"].shape == (3, 1)
 
 
-def test_the_reader_refuses_decays_on_a_storage_node_too():
-    with pytest.raises(ValueError, match=r"decays.*3b"):
-        read_wsimod_config(
-            {
-                "pollutants": [],
-                "additive_pollutants": [],
-                "non_additive_pollutants": [],
-                "dates": ["2000-01-01"],
-                "nodes": [{"name": "n", "type_": "Storage", "decays": {}}],
-                "arcs": [],
-            }
+def _queue_override(path, **values) -> dict:
+    return {"type_": "QueueGroundwater", "name": "r", "filename": str(path), **values}
+
+
+def _temperature_file(tmp_path, days=3):
+    path = tmp_path / "temperature.csv"
+    rows = "".join(f"temperature,2000-01-{k + 1:02d},15.0\n" for k in range(days))
+    path.write_text("variable,time,value\n" + rows, encoding="utf-8")
+    return path
+
+
+def test_a_decaying_queue_groundwater_needs_a_filename_override(tmp_path):
+    """As a ``Groundwater`` (X11): the configured forcing is lost (``storage.py:291-292``), so a
+    ``decays`` dict, empty or not, needs an override's temperature; with one it builds a
+    ``DecayQueueTank`` (``storage.py:307-315``)."""
+    network = read_wsimod_config(_decaying("QueueGroundwater", decays=None))
+    spec = network.nodes[0]
+    assert NODE_CLASSES["QueueGroundwater"].validate(spec, network, pollutants=True) == []
+    for decays in (DECAYS, {}):
+        with pytest.raises(ValueError, match=r"QueueGroundwater.*filename"):
+            build_model(read_wsimod_config(_decaying("QueueGroundwater", decays=decays)))
+    override = _queue_override(_temperature_file(tmp_path))
+    network = read_wsimod_config(_decaying("QueueGroundwater", overrides=override))
+    model, _, drivers = build_model(network)
+    assert model.unread == ["r.data_input_dict"]  # the decoy
+    assert drivers["wsimod.temperature"].shape == (3, 1)
+    tank = model.wsimod_day.engine.nodes["r"].tank
+    assert isinstance(tank, DecayQueueTank) and isinstance(tank.internal_arc, DecayArcAlt)
+    assert model.wsimod_day.state_labels("wsimod.total_decayed") == [("r", "tank.internal_arc")]
+
+
+def _bound_queue_groundwater(network):
+    spec = network.nodes[0]
+    node = make_node(spec, network, network.pollutants)
+    node.ctx = Ctx(network.pollutants, FA, torch.Size(()), day=0, node_names=["r"])
+    node.bind(node.configured_parameters(network.dates[0]))
+    return node
+
+
+def test_decaying_delays_a_queue_groundwater_by_one_day(tmp_path):
+    """X12: ``DecayQueueTank``'s default ``number_of_timesteps`` is 1 (``tanks.py:648``) and
+    ``QueueGroundwater`` passes none (``storage.py:308-315``): with time-area ``{0: 0.5, 1:
+    0.5}``, WSIMOD's queue holds the push under keys 1 and 2, and so does noodl's register;
+    without ``decays`` the half under time 0 is active at once."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    push = {"volume": 4.0, "phosphate": 0.4, "ammonia": 0.2}
+    for decays, keys in ((DECAYS, [1, 2]), (None, [1])):
+        override = _queue_override(_temperature_file(tmp_path)) if decays else None
+        mapping = _decaying(
+            "QueueGroundwater",
+            decays=decays,
+            overrides=override,
+            timearea={0: 0.5, 1: 0.5},
+            capacity=100.0,
         )
+        model = wsimod_model(mapping)
+        theirs = model.nodes["r"]
+        theirs.t = model.dates[0]
+        theirs.push_set(dict(push))
+        queue = theirs.tank.internal_arc.queue
+        assert sorted(k for k, v in queue.items() if v["volume"] > 0) == keys
+        ours = _bound_queue_groundwater(read_wsimod_config(mapping))
+        ours.push_set(ours.p.to_vqip(push), "default", active=torch.tensor(True))
+        register = ours.tank.internal_arc.register
+        assert [t for t in range(register.shape[-2]) if register[t, 0] > 0] == keys
+        for t in keys:
+            assert ours.tank.internal_arc.present[t]
+            assert register[t, 0].item() == queue[t]["volume"]
+            assert register[t, 1].item() == queue[t]["phosphate"]
+        active = 0.0 if decays else 2.0  # the share under time 0
+        assert ours.tank.active_storage[0].item() == theirs.tank.active_storage["volume"] == active
+
+
+def test_number_of_timesteps_override(tmp_path):
+    """X28: on a decaying ``QueueGroundwater`` the override ``number_of_timesteps`` sets the
+    tank's and its internal arc's, as ``DecayQueueTank.apply_overrides`` does
+    (``tanks.py:682-685``); on a non-decaying one it is refused by name, as in 3a."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    override = _queue_override(_temperature_file(tmp_path), number_of_timesteps=0)
+    mapping = _decaying("QueueGroundwater", overrides=override, timearea={0: 0.5, 2: 0.5})
+    tank = wsimod_model(mapping).nodes["r"].tank
+    assert (tank.number_of_timesteps, tank.internal_arc.number_of_timesteps) == (0, 0)
+    ours = _bound_queue_groundwater(read_wsimod_config(mapping)).tank
+    assert (ours.number_of_timesteps, ours.internal_arc.number_of_timesteps) == (0, 0)
+    assert ours.internal_arc.length == 2  # 0 + the largest time-area key
+    plain = _decaying("QueueGroundwater", decays=None, overrides=dict(override))
+    with pytest.raises(ValueError, match="number_of_timesteps"):
+        build_model(read_wsimod_config(plain))
+    bad = _queue_override(_temperature_file(tmp_path), number_of_timesteps=1.5)
+    with pytest.raises(ValueError, match="number_of_timesteps"):
+        build_model(read_wsimod_config(_decaying("QueueGroundwater", overrides=bad)))
+
+
+@pytest.mark.parametrize("cls", ["Storage", "Reservoir", "RiverReservoir", "River"])
+def test_storage_with_decays_reads_its_temperature(cls):
+    """The DecayTank reads ``("temperature", t)`` at the end of every day (``core.py:484-487``),
+    also with an empty ``decays``; a node with ``decays: None`` needs none."""
+    for decays in (DECAYS, {}):
+        missing = r"node 'r' has no 'temperature' forcing on 2000-01-02"
+        with pytest.raises(ValueError, match=missing):
+            build_model(read_wsimod_config(_decaying(cls, decays=decays, missing=(1, 2))))
+        build_model(read_wsimod_config(_decaying(cls, decays=decays)))
+    build_model(read_wsimod_config(_decaying(cls, decays=None, missing=(0, 1, 2))))
+
+
+def test_a_decaying_storage_family_node_is_a_temperature_reader():
+    network = read_wsimod_config(_decaying("Reservoir", decays={}))
+    assert forcing_readers(network)["temperature"] == ["r"]
+    network = read_wsimod_config(_decaying("Reservoir", decays=None))
+    assert "temperature" not in forcing_readers(network)
+
+
+def test_the_decays_drivers_are_dense_with_inert_rows_for_a_node_without_decays():
+    """X9, X34: ``(n, K)`` rows, the node's own decays where listed, ``(0, 1)`` elsewhere."""
+    mapping = _decaying("Storage")
+    mapping["nodes"].insert(1, {"name": "plain", "type_": "Storage", "decays": None})
+    model, _, drivers = build_model(read_wsimod_config(mapping))
+    constant = drivers["wsimod.Storage.decays.constant"]
+    exponent = drivers["wsimod.Storage.decays.exponent"]
+    assert model.wsimod_day.drivers["wsimod.Storage.decays.constant"].labels == ["r", "plain"]
+    assert constant.tolist() == [[0.1, 0.0], [0.0, 0.0]]
+    assert exponent.tolist() == [[1.02, 1.0], [1.0, 1.0]]
+
+
+def test_a_decays_override_merges_into_a_dict_and_is_refused_on_none():
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    merged = {"ammonia": {"constant": 0.2, "exponent": 1.0}}
+    override = {"type_": "Storage", "name": "r", "decays": merged}
+    mapping = _decaying("Storage", overrides=override)
+    ours = read_wsimod_config(mapping).nodes[0].parameters["decays"]
+    theirs = wsimod_model(mapping).nodes["r"].decays
+    assert ours == theirs == {**DECAYS, **merged}
+    # a decays-None node refuses it, as WSIMOD does (storage.py:96-100)
+    with pytest.raises(ValueError, match="decays"):
+        read_wsimod_config(_decaying("Storage", decays=None, overrides=override))
+    with pytest.raises(ValueError, match="decays"):
+        wsimod_model(_decaying("Storage", decays=None, overrides=override))
+    # an entry replaces the pollutant's whole dict (dict.update), so a lone constant is refused
+    # by build_model after the merge, as WSIMOD's make_decay would crash on the missing exponent
+    partial = {"type_": "Storage", "name": "r", "decays": {"phosphate": {"constant": 0.3}}}
+    network = read_wsimod_config(_decaying("Storage", overrides=partial))
+    assert network.nodes[0].parameters["decays"] == {"phosphate": {"constant": 0.3}}
+    with pytest.raises(ValueError, match="exponent"):
+        build_model(network)
+
+
+def test_a_decays_none_node_refuses_a_changed_inert_driver():
+    """D15: ``Reservoir.bind`` refuses a ``decays.*`` entry other than ``(0, 1)`` on a node
+    without ``decays`` (and on a pollutant its ``decays`` does not list), naming node and
+    pollutant."""
+    model, _, _ = build_model(read_wsimod_config(_decaying("Reservoir", decays=None)))
+    for key, pollutant, value in (
+        ("wsimod.Reservoir.decays.constant", "phosphate", 0.1),
+        ("wsimod.Reservoir.decays.exponent", "ammonia", 1.1),
+    ):
+        drivers = initial_drivers(model, values={key: {"r": {pollutant: value}}})
+        with pytest.raises(ValueError, match=rf"node 'r'.*{key.rsplit('.', 1)[1]}.*{pollutant}"):
+            model.step(initial_state(model), drivers, dt=86400.0, t=0.0)
+    # a listed pollutant takes any value; an unlisted one stays inert
+    model, _, _ = build_model(read_wsimod_config(_decaying("Reservoir")))
+    key = "wsimod.Reservoir.decays.constant"
+    drivers = initial_drivers(model, values={key: {"r": {"phosphate": 0.3}}})
+    model.step(initial_state(model), drivers, dt=86400.0, t=0.0)
+    drivers = initial_drivers(model, values={key: {"r": {"ammonia": 0.3}}})
+    with pytest.raises(ValueError, match="ammonia"):
+        model.step(initial_state(model), drivers, dt=86400.0, t=0.0)
+
+
+def test_a_decaying_storage_decays_at_the_end_of_the_day_and_closes_the_balance():
+    """``DecayTank.end_timestep_decay``: ``phosphate`` falls by ``constant * exponent ** (T -
+    20)`` of its storage; the decayed mass is the ``"DecayTank.decayed"`` term and leaves the
+    system, so the balance closes; ``total_decayed`` is a per-day store, not carried."""
+    initial = {"volume": 10.0, "phosphate": 4.0, "ammonia": 1.0}
+    network = read_wsimod_config(_decaying("Storage", initial_storage=initial))
+    model, state, drivers = build_model(network)
+    result = wsimod_run(model, state, drivers)
+    factor = 0.1 * 1.02 ** (15.0 - 20.0)
+    decayed = result.mass_balance.terms["DecayTank.decayed"]
+    assert decayed[0].tolist() == [0.0, 4.0 * factor, 0.0]
+    assert float(result.mass_balance.residual.abs().max()) < 1e-12
+    node = model.wsimod_day.engine.nodes["r"]
+    assert "tank.total_decayed" in node.store_paths
+    assert "tank.total_decayed" not in node.carried_paths
+    # WSIMOD's record_all lists Tank, QueueTank and ResidenceTank only: the DecayTank drops out
+    # of the tank_* results while its storage stays in the state (X40)
+    assert model.wsimod_day.tank_names == []
+    assert model.wsimod_day.state_labels("wsimod.storage") == [("r", "tank")]
 
 
 def _validate(cls, **parameters):
@@ -687,23 +904,6 @@ def test_river_derived_warns_when_the_depth_is_not_the_default():
     assert river_derived(quiet) == {"area": 30.0, "capacity": 1e15}
 
 
-def test_a_river_with_nitrate_is_refused():
-    network = read_wsimod_config(
-        {
-            "pollutants": ["nitrate", "temperature"],
-            "additive_pollutants": ["nitrate"],
-            "non_additive_pollutants": ["temperature"],
-            "dates": ["2000-01-01"],
-            "nodes": [{"name": "r", "type_": "River"}],
-            "arcs": [],
-        }
-    )
-    with pytest.raises(ValueError, match="nitrate.*3b"):
-        River.validate(network.nodes[0], network, pollutants=True)
-    # a quantity-only run reads no pollutant (W10)
-    assert River.validate(network.nodes[0], network, pollutants=False) == []
-
-
 @pytest.mark.parametrize(
     ("parameters", "match"),
     [
@@ -863,3 +1063,626 @@ def test_the_river_distribute_gradient_of_the_arc_flow():
         e = math.exp(-1 / d)
         assert damp.grad[i].item() == pytest.approx(40.0 * (-1 + e + e / d), rel=1e-12)
     assert damp.grad[2].item() == 0.0
+
+
+# --- River biochemistry (storage.py:723-898) ----------------------------------------------------
+BIO_POLLUTANTS = (
+    "temperature",
+    "phosphate",
+    "org-phosphorus",
+    "ammonia",
+    "nitrate",
+    "org-nitrogen",
+)
+BIO = Pollutants(BIO_POLLUTANTS, BIO_POLLUTANTS[1:], ("temperature",))
+BIO_LISTS = {
+    "pollutants": list(BIO.names),
+    "additive_pollutants": list(BIO.additive),
+    "non_additive_pollutants": list(BIO.non_additive),
+}
+BIO_PARAMETERS = (
+    "uptake_PNratio",
+    "denpar_w",
+    "T_wdays",
+    "halfsatINwater",
+    "hsatTP",
+    "limpppar",
+    "prodNpar",
+    "prodPpar",
+    "muptNpar",
+    "muptPpar",
+)
+SITE = "node:r/biochemical_processes"
+
+
+def bio_river(state, t_air, temperatures, phosphorus, *, p=BIO, record=False, **parameters):
+    """A River with biochemistry at one state: ``state`` a VQIP mapping, the registers padded
+    from WSIMOD-style lists."""
+    node = make_node(NodeSpec("r", "River", "River", parameters), None, p)
+    ctx = Ctx(p, FA, torch.Size(()), day=0, node_names=["r"], record_decisions=record)
+    node.ctx = ctx
+    node.tank.storage = p.to_vqip(state)
+    node.lagged_temperatures = pad_register(temperatures, node.lag_sizes[0])
+    node.lagged_total_phosphorus = pad_register(phosphorus, node.lag_sizes[1])
+    node.bind({"temperature": torch.tensor(t_air, dtype=torch.float64)})
+    return node, ctx
+
+
+# a point away from every guard and cap: warm (T > 5), producing, nothing capped
+HAND_STATE = {
+    "volume": 1000.0,
+    "temperature": 12.0,
+    "phosphate": 1.0,
+    "org-phosphorus": 0.3,
+    "ammonia": 3.0,
+    "nitrate": 10.0,
+    "org-nitrogen": 2.0,
+}
+HAND_TEMPERATURES = [5.0 + 0.5 * i for i in range(21)]  # full, and rising
+HAND_PHOSPHORUS = [0.002] * 366  # full
+
+
+def test_one_biochemistry_call_by_hand():
+    """Steps 1-8 of the spec at one point, every intermediate a Python expression from the
+    defaults table (``storage.py:539-564``, ``:723-898``)."""
+    node, ctx = bio_river(HAND_STATE, 17.0, HAND_TEMPERATURES, HAND_PHOSPHORUS, record=True)
+    in_, out_ = node.biochemical_processes(active=TRUE)
+    uptake_PNratio, denpar_w, T_wdays = 1 / 7.2, 0.0015, 5
+    halfsatINwater, hsatTP, limpppar = 1.5 * 1e-3, 0.05 * 1e-3, 0.1 * 1e-3
+    prodNpar, prodPpar, muptNpar, muptPpar = 0.001, 0.0001, 0.001, 0.0001
+    max_temp_lag, max_phosphorus_lag = 20, 365
+    s = dict(HAND_STATE)
+    area = 200 * 20
+    # 1. depth
+    current_depth = s["volume"] / area
+    # 2. temperature relaxation
+    s["temperature"] = (1 - 1 / T_wdays) * s["temperature"] + (1 / T_wdays) * 17.0
+    T = s["temperature"]
+    # 3. lags (full lists: the oldest goes)
+    temperatures = HAND_TEMPERATURES[1:] + [T]
+    phosphorus = HAND_PHOSPHORUS[1:] + [s["phosphate"] + s["org-phosphorus"]]
+    assert len(temperatures) == max_temp_lag + 1 and len(phosphorus) == max_phosphorus_lag + 1
+    # 4. no guard: wet and warm
+    assert s["volume"] >= FA and T > 0
+    # 5. denitrification
+    tempfcn = 2 ** ((T - 20) / 10)
+    assert not T < 5
+    din = sum([s["ammonia"], s["nitrate"]])
+    din_concentration = din / s["volume"]
+    confcn = din_concentration / (din_concentration + halfsatINwater)
+    denitri_water = denpar_w * area * tempfcn * confcn
+    assert denitri_water < 0.5 * din
+    din_before = din
+    din_ = din - denitri_water
+    gain = {n: 0.0 for n in BIO_POLLUTANTS}
+    loss = {n: 0.0 for n in BIO_POLLUTANTS}
+    for pol in ("ammonia", "nitrate"):
+        lost = (din - din_) / din * s[pol]
+        loss[pol] += lost
+        s[pol] -= lost
+    din = sum([s["ammonia"], s["nitrate"]])
+    # 6. means and coefficients
+    temp_10_day = sum(temperatures[-10:]) / 10
+    temp_20_day = sum(temperatures[-20:]) / 20
+    total_phos_365_day = sum(phosphorus) / max_phosphorus_lag
+    tempfcn = T / 20 * (temp_10_day - temp_20_day) / 5
+    assert total_phos_365_day - limpppar + hsatTP > 0
+    totalphosfcn = (total_phos_365_day - limpppar) / (total_phos_365_day - limpppar + hsatTP)
+    # 7. production
+    minprodN = prodNpar * totalphosfcn * tempfcn * area * current_depth
+    minprodP = prodPpar * totalphosfcn * tempfcn * area * current_depth * uptake_PNratio
+    assert minprodN > 0 and minprodN < 0.5 * din and minprodP < 0.5 * s["phosphate"]
+    s_phosphate, din_production = s["phosphate"], din
+    loss["phosphate"] = minprodP
+    s["phosphate"] -= minprodP
+    gain["org-phosphorus"] = minprodP
+    s["org-phosphorus"] += minprodP
+    for pol in ("ammonia", "nitrate"):
+        lost = minprodN * s[pol] / din
+        loss[pol] += lost
+        s[pol] -= lost
+    gain["org-nitrogen"] = minprodN
+    s["org-nitrogen"] += minprodN
+    din = sum([s["ammonia"], s["nitrate"]])
+    # 8. macrophytes
+    tempfcn1 = (max(0, T) / 20) ** 0.3
+    tempfcn2 = (T - temp_20_day) / 5
+    tempfcn = max(0, tempfcn1 * tempfcn2)
+    macrouptN = muptNpar * tempfcn * area
+    assert 0 < macrouptN < 0.5 * din
+    for pol in ("ammonia", "nitrate"):
+        lost = macrouptN * s[pol] / din
+        loss[pol] += lost
+        s[pol] -= lost
+    macrouptP = muptPpar * tempfcn * max(0, totalphosfcn) * area
+    phosphate_before_macro = s["phosphate"]
+    assert 0 < macrouptP < 0.5 * s["phosphate"]
+    loss["phosphate"] += macrouptP
+    s["phosphate"] -= macrouptP
+    assert torch.equal(node.tank.storage, BIO.to_vqip(s))
+    assert torch.equal(in_, BIO.to_vqip(gain))
+    assert torch.equal(out_, BIO.to_vqip(loss))
+    assert torch.equal(node.lagged_temperatures, torch.tensor(temperatures, dtype=torch.float64))
+    assert torch.equal(node.lagged_total_phosphorus, torch.tensor(phosphorus, dtype=torch.float64))
+    sites = [d.site.rsplit("/", 1)[-1] for d in ctx.decisions]
+    margins = {d.site.rsplit("/", 1)[-1]: float(d.margin) for d in ctx.decisions}
+    # the caps' operand orders (Python's min(a, b) is b when b < a): margin = b - a
+    assert margins["denitrification_cap"] == 0.5 * din_before - denitri_water
+    assert margins["production_cap:N"] == minprodN - 0.5 * din_production
+    assert margins["production_cap:P"] == minprodP - 0.5 * s_phosphate
+    assert margins["macrophyte_cap:N"] == macrouptN - 0.5 * din
+    assert margins["macrophyte_cap:P"] == macrouptP - 0.5 * phosphate_before_macro
+    assert sites == [
+        "dry",
+        "frozen",
+        "cold",
+        "denitrification_cap",
+        "din:denitrification",
+        "totalphosfcn",
+        "production",
+        "production_cap:N",
+        "production_cap:P",
+        "din:production",
+        "mineralisation_cap:N",
+        "mineralisation_cap:P",
+        "din:mineralisation",
+        "macrophyte_temperature",
+        "macrophyte_factor",
+        "macrophyte_cap:N",
+        "din:macrophyte",
+        "macrophyte_phosphorus",
+        "macrophyte_cap:P",
+    ]
+    assert all(d.site.startswith(SITE) and d.call == 0 for d in ctx.decisions)
+    # the mineralisation branch is evaluated under its own (here empty) mask
+    masks = {d.site.rsplit("/", 1)[-1]: bool(d.active) for d in ctx.decisions}
+    assert masks["production_cap:N"] and not masks["mineralisation_cap:N"]
+
+
+def _random_bio_state(rng):
+    """One random River state with lists of random lengths, across the guards and caps."""
+    kind = rng.random()
+    volume = 0.0 if kind < 0.03 else 5e-12 if kind < 0.06 else 10 ** rng.uniform(-3, 5)
+    din_free = rng.random() < 0.1
+    low_p = rng.random() < 0.3
+
+    def mass(lo, hi):
+        return 0.0 if rng.random() < 0.05 else 10 ** rng.uniform(lo, hi)
+
+    state = {
+        "volume": volume,
+        "temperature": rng.uniform(-5, 30),
+        "phosphate": mass(-6, -3) if low_p else mass(-5, 1),
+        "org-phosphorus": mass(-6, -3) if low_p else mass(-5, 1),
+        "ammonia": 0.0 if din_free else mass(-6, 2),
+        "nitrate": 0.0 if din_free else mass(-6, 2),
+        "org-nitrogen": mass(-6, 2),
+    }
+    temperatures = [rng.uniform(-5, 30) for _ in range(rng.randint(0, 21))]
+    p_scale = (-6, -3.3) if low_p else (-5, 1)
+    phosphorus = [10 ** rng.uniform(*p_scale) for _ in range(rng.randint(0, 366))]
+    return state, rng.uniform(-5, 30), temperatures, phosphorus
+
+
+def test_biochemical_processes_equals_wsimods_on_random_states():
+    """500 random states in one batch against live WSIMOD's ``calculate_discharge``, one call
+    each: the storage, ``bio_in``, ``bio_out`` and both lag lists, bitwise."""
+    pytest.importorskip("wsimod")
+    from datetime import datetime
+
+    from wsimod.nodes.storage import River as WsimodRiver
+
+    from noodl.apps.wsimod import constants
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    reset_wsimod_globals()  # WSIMOD's 12 pollutants, the six among them
+    p = Pollutants(
+        constants.POLLUTANTS, constants.ADDITIVE_POLLUTANTS, constants.NON_ADDITIVE_POLLUTANTS
+    )
+    rng = random.Random(20261112)
+    cases = [_random_bio_state(rng) for _ in range(500)]
+    n = len(cases)
+    node = make_node(NodeSpec("r", "River", "River", {}), None, p)
+    ctx = Ctx(p, FA, torch.Size((n,)), day=0, node_names=["r"], record_decisions=True)
+    node.ctx = ctx
+    node.tank.storage = torch.stack([p.to_vqip(c[0]) for c in cases])
+    node.lagged_temperatures = torch.stack([pad_register(c[2], 21) for c in cases])
+    node.lagged_total_phosphorus = torch.stack([pad_register(c[3], 366) for c in cases])
+    node.bind({"temperature": torch.tensor([c[1] for c in cases], dtype=torch.float64)})
+    node.calculate_discharge(active=torch.ones(n, dtype=torch.bool))
+    t = datetime(2000, 1, 1)
+    theirs = WsimodRiver(name="r", data_input_dict={})
+    theirs.t = t
+    for i, (state, t_air, temperatures, phosphorus) in enumerate(cases):
+        theirs.tank.storage = {"volume": 0.0, **dict.fromkeys(p.names, 0.0), **state}
+        theirs.lagged_temperatures = list(temperatures)
+        theirs.lagged_total_phosphorus = list(phosphorus)
+        theirs.data_input_dict = {("temperature", t): t_air}
+        theirs.calculate_discharge()
+        for ours, ref in (
+            (node.tank.storage[i], theirs.tank.storage),
+            (node.bio_in[i], theirs.bio_in),
+            (node.bio_out[i], theirs.bio_out),
+        ):
+            assert torch.equal(ours, p.to_vqip(ref)), (i, p.to_dict(ours), ref)
+        assert torch.equal(
+            node.lagged_temperatures[i], pad_register(theirs.lagged_temperatures, 21)
+        )
+        assert torch.equal(
+            node.lagged_total_phosphorus[i], pad_register(theirs.lagged_total_phosphorus, 366)
+        )
+    # the sample crosses every guard, branch and cap both ways (the macrophyte temperature is
+    # T > 0, which the frozen guard already holds)
+    outcomes: dict[str, set[bool]] = {}
+    for d in ctx.decisions:
+        branch = d.site.rsplit("/", 1)[-1]
+        outcomes.setdefault(branch, set()).update(d.outcome[d.active].tolist())
+    for branch, seen in outcomes.items():
+        expected = {True} if branch == "macrophyte_temperature" else {True, False}
+        assert seen == expected, branch
+    assert len(outcomes) == 19
+
+
+def test_the_registers_reproduce_pythons_sums_from_a_cold_start():
+    """Over 400 calls from empty registers, the windows and the phosphorus mean equal Python's
+    sums over WSIMOD's lists, bitwise; the lists then hold 21 and 366 entries. With
+    ``max_temp_lag = 5`` both temperature windows are the whole 6-slot register."""
+    rng = random.Random(5)
+    for max_temp_lag, sizes in ((20, (21, 366)), (5, (6, 366))):
+        node, _ = bio_river({"volume": 0.0}, 0.0, [], [], max_temp_lag=max_temp_lag)
+        assert node.lag_sizes == sizes
+        temperatures: list[float] = []
+        phosphorus: list[float] = []
+        for k in range(1, 401):
+            state = {
+                "volume": 0.0,  # dry: only steps 1-3 run
+                "temperature": rng.uniform(-5, 30),
+                "phosphate": 10 ** rng.uniform(-5, 0),
+                "org-phosphorus": 10 ** rng.uniform(-5, 0),
+            }
+            node.tank.storage = BIO.to_vqip(state)
+            node.bind({"temperature": torch.tensor(rng.uniform(-5, 30), dtype=torch.float64)})
+            node.biochemical_processes(active=TRUE)
+            for values, value, lag in (
+                (temperatures, float(node.tank.storage[1]), max_temp_lag),
+                (phosphorus, state["phosphate"] + state["org-phosphorus"], 365),
+            ):
+                if len(values) > lag:  # storage.py:753-763
+                    del values[0]
+                values.append(value)
+            if k in (1, 10, 25, 400):
+                t10, t20, tp = node.lagged_means()
+                assert float(t10) == sum(temperatures[-10:]) / 10
+                assert float(t20) == sum(temperatures[-20:]) / 20
+                assert float(tp) == sum(phosphorus) / 365
+                assert torch.equal(node.lagged_temperatures, pad_register(temperatures, sizes[0]))
+        assert len(temperatures) == max_temp_lag + 1 and len(phosphorus) == 366
+
+
+def test_window_sum_is_cpythons_sum_with_the_plain_sums_gradient():
+    """X51, X55: on 200 random registers of 366 slots spanning 40 decades (both signs), batched,
+    ``window_sum`` over the last 10, 20 and 366 slots is ``torch.equal`` to Python's ``sum`` of
+    the list, differs from torch's plain sum on some rows (the compensation matters), and its
+    gradient is the plain sum's: 1 on every slot in the window, 0 before it."""
+    rng = random.Random(20261113)
+    lists = [
+        [rng.choice((-1.0, 1.0)) * 10 ** rng.uniform(-20.0, 20.0) for _ in range(366)]
+        for _ in range(200)
+    ]
+    register = torch.tensor(lists, dtype=torch.float64, requires_grad=True)
+    for length in (10, 20, 366):
+        got = window_sum(register, length)
+        expected = torch.tensor([sum(row[-length:]) for row in lists], dtype=torch.float64)
+        assert torch.equal(got.detach(), expected), length
+        assert not torch.equal(got.detach(), register.detach()[:, -length:].sum(-1)), length
+        (grad,) = torch.autograd.grad(got.sum(), register)
+        plain = torch.zeros_like(register)
+        plain[:, 366 - length :] = 1.0
+        assert torch.equal(grad, plain), length
+    assert torch.equal(window_sum(torch.zeros(3, 366, dtype=torch.float64), 366), torch.zeros(3))
+
+
+def test_minus_zero_phosphorus_enters_the_register_as_python_sums_it():
+    """X31: a slot holding ``-0.0`` (``phosphate + org-phosphorus`` of two ``-0.0``) sums as
+    CPython's ``sum``, which starts from the integer 0: ``+0.0``, whatever the padding."""
+    state = {"volume": 0.0, "temperature": 10.0, "phosphate": -0.0, "org-phosphorus": -0.0}
+    for before in ([], [-0.0] * 365):
+        node, _ = bio_river(state, 10.0, [], before)
+        node.biochemical_processes(active=TRUE)
+        listed = [*before, -0.0 + -0.0]
+        assert math.copysign(1.0, float(node.lagged_total_phosphorus[-1])) == -1.0
+        python = sum(listed) / 365
+        _, _, tp = node.lagged_means()
+        assert math.copysign(1.0, float(tp)) == math.copysign(1.0, python) == 1.0
+    assert float(window_sum(torch.tensor([-0.0, -0.0], dtype=torch.float64), 2)) == sum([-0.0])
+    assert math.copysign(1.0, float(window_sum(torch.tensor([-0.0]), 1))) == 1.0
+
+
+FALLING_TEMPERATURES = [20.0 - 0.5 * i for i in range(21)]  # T10 < T20: mineralising
+
+
+def test_mineralisation_without_din_destroys_nitrogen_and_says_so():
+    """X15 (``storage.py:856-873``): with ``din == 0`` the mineralised nitrogen leaves
+    ``org-nitrogen``, nothing gains it, ``bio_out`` lists it and ``"river_nitrogen_lost"`` holds."""
+    state = {
+        "volume": 1000.0,
+        "temperature": 10.0,
+        "phosphate": 0.5,
+        "org-phosphorus": 0.2,
+        "org-nitrogen": 1.0,
+    }
+    node, ctx = bio_river(state, 10.0, FALLING_TEMPERATURES, [0.002] * 366, record=True)
+    node.calculate_discharge(active=TRUE)
+    margins = {d.site.rsplit("/", 1)[-1]: float(d.margin) for d in ctx.decisions}
+    # min(0.5 pool, -minprodX): margin = -minprodX - 0.5 pool
+    T = (1 - 1 / 5) * 10.0 + (1 / 5) * 10.0
+    temperatures = FALLING_TEMPERATURES[1:] + [T]
+    phosphorus = [0.002] * 365 + [0.5 + 0.2]
+    t10, t20 = sum(temperatures[-10:]) / 10, sum(temperatures[-20:]) / 20
+    tp = sum(phosphorus) / 365
+    tempfcn = T / 20 * (t10 - t20) / 5
+    totalphosfcn = (tp - 0.1 * 1e-3) / (tp - 0.1 * 1e-3 + 0.05 * 1e-3)
+    area, depth = 200 * 20, 1000.0 / (200 * 20)
+    minprodN = 0.001 * totalphosfcn * tempfcn * area * depth
+    minprodP = 0.0001 * totalphosfcn * tempfcn * area * depth * (1 / 7.2)
+    assert minprodN < 0
+    assert margins["mineralisation_cap:N"] == -minprodN - 0.5 * 1.0
+    assert margins["mineralisation_cap:P"] == -minprodP - 0.5 * 0.2
+    lost = float(node.bio_out[BIO.column("org-nitrogen")])
+    assert 0 < lost <= 0.5 * 1.0
+    assert float(node.tank.storage[BIO.column("org-nitrogen")]) == 1.0 - lost
+    for pol in ("ammonia", "nitrate"):
+        assert float(node.tank.storage[BIO.column(pol)]) == 0.0
+        assert float(node.bio_in[BIO.column(pol)]) == 0.0
+    assert float(node.bio_in[BIO.column("org-nitrogen")]) == 0.0
+    assert bool(ctx.events["river_nitrogen_lost"]["r"])
+    # the lists close: the storage change is in minus out, column by column (additive)
+    change = node.tank.storage - BIO.to_vqip({**state, "temperature": 10.0})
+    assert torch.allclose(
+        change[BIO.additive_mask], (node.bio_in - node.bio_out)[BIO.additive_mask], atol=1e-15
+    )
+    assert ctx.terms["River.bio_out"][BIO.column("org-nitrogen")] == lost
+
+
+def test_minus_zero_minprodN_moves_nothing():
+    """``totalphosfcn == 0`` (a cold-start phosphorus register below ``limpppar - hsatTP``) and
+    ``tempfcn < 0`` give ``minprodN = 0.0 * (negative) = -0.0``: not ``> 0``, so the
+    mineralisation branch runs, with ``min(0.5 org-N, +0.0) = +0.0``, and moves nothing."""
+    state = {
+        "volume": 1000.0,
+        "temperature": 10.0,
+        "phosphate": 0.001,
+        "org-phosphorus": 0.001,
+        "ammonia": 1.0,
+        "nitrate": 1.0,
+        "org-nitrogen": 1.0,
+    }
+    node, ctx = bio_river(state, 10.0, FALLING_TEMPERATURES, [], record=True)
+    in_, out_ = node.biochemical_processes(active=TRUE)
+    decisions = {d.site.rsplit("/", 1)[-1]: d for d in ctx.decisions}
+    assert not bool(decisions["totalphosfcn"].outcome)
+    production = decisions["production"]
+    assert not bool(production.outcome) and math.copysign(1.0, float(production.margin)) == -1.0
+    assert bool(decisions["mineralisation_cap:N"].active)
+    for name in ("phosphate", "org-phosphorus", "org-nitrogen"):
+        c = BIO.column(name)
+        assert float(node.tank.storage[c]) == state[name]
+        assert float(out_[c]) == 0.0
+    assert torch.equal(in_, torch.zeros_like(in_))
+    assert not bool(ctx.events["river_nitrogen_lost"]["r"])
+
+
+def _bio_config(*, lists=None, overrides=None, days=2, missing=()):
+    dates = [f"2000-01-{k + 1:02d}" for k in range(days)]
+    data = {("temperature", d): 12.0 for k, d in enumerate(dates) if k not in missing}
+    initial = {"volume": 500.0, "phosphate": 0.4, "ammonia": 2.0, "nitrate": 3.0}
+    mapping = {
+        **(BIO_LISTS if lists is None else lists),
+        "dates": dates,
+        "nodes": [
+            {"name": "r", "type_": "River", "data_input_dict": data, "initial_storage": initial},
+            {"name": "sink", "type_": "Waste"},
+        ],
+        "arcs": [{"name": "out", "type_": "Arc", "in_port": "r", "out_port": "sink"}],
+    }
+    if overrides:
+        mapping["overrides"] = {"nodes": {"r": {"type_": "River", "name": "r", **overrides}}}
+    return mapping
+
+
+def _without(pollutant):
+    names = [n for n in BIO.names if n != pollutant]
+    return {
+        "pollutants": names,
+        "additive_pollutants": [n for n in BIO.additive if n != pollutant],
+        "non_additive_pollutants": [n for n in BIO.non_additive if n != pollutant],
+    }
+
+
+@pytest.mark.parametrize(
+    ("config", "driver", "match"),
+    [
+        *[
+            (dict(lists=_without(n)), None, f"biochemistry.*reads '{n}'")
+            for n in BIO_POLLUTANTS
+            if n != "nitrate"
+        ],
+        (dict(missing=(1,)), None, "'temperature' forcing.*2000-01-02"),
+        (dict(overrides={"T_wdays": 0}), {"T_wdays": 0.0}, "T_wdays is 0"),
+        (dict(overrides={"length": 0}), {"length": 0.0}, r"area = length \* width is 0"),
+        (
+            dict(overrides={"halfsatINwater": 0}),
+            {"halfsatINwater": 0.0},
+            "halfsatINwater.*not positive",
+        ),
+        (
+            dict(overrides={"halfsatINwater": -1e-3}),
+            {"halfsatINwater": -1e-3},
+            "halfsatINwater.*not positive",
+        ),
+        (
+            dict(overrides={"max_temp_lag": -1}),
+            None,
+            "max_temp_lag -1 is not a non-negative integer",
+        ),
+        (dict(overrides={"max_temp_lag": 20.5}), None, "max_temp_lag 20.5 is not a non-negative"),
+        (dict(overrides={"max_phosphorus_lag": 0}), None, "max_phosphorus_lag 0 is not a positive"),
+        (dict(overrides={"max_phosphorus_lag": 365.5}), None, "max_phosphorus_lag 365.5 is not"),
+    ],
+)
+def test_river_biochemistry_refusals(config, driver, match):
+    """X19: what WSIMOD's biochemistry cannot run, refused by name at build (in either mode,
+    since WSIMOD runs it whatever noodl's mode) and, for a driver, at ``bind``."""
+    network = read_wsimod_config(_bio_config(**config))
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match=match):
+            build_model(network, pollutants=pollutants)
+    if driver is not None:
+        node = make_node(read_wsimod_config(_bio_config()).nodes[0], None, BIO)
+        with pytest.raises(ValueError, match=match):
+            node.bind({k: torch.tensor([1.0, v], dtype=torch.float64) for k, v in driver.items()})
+
+
+def test_a_river_without_nitrate_runs_no_biochemistry():
+    """``storage.py:919``: no ``nitrate``, no biochemistry, no drivers or registers; the
+    biochemistry refusals do not apply (WSIMOD never divides)."""
+    network = read_wsimod_config(
+        _bio_config(lists=_without("nitrate"), overrides={"T_wdays": 0}, missing=(0, 1))
+    )
+    model, state, _ = build_model(network)
+    day_ = model.wsimod_day
+    assert not day_.engine.nodes["r"].biochemistry
+    assert "temperature" not in forcing_readers(network)
+    assert not any(
+        k.startswith("wsimod.River.") and k.split(".")[2] in BIO_PARAMETERS for k in day_.drivers
+    )
+    assert state["wsimod.river_temperature_lag"].shape == (0,)
+
+
+BIO_OVERRIDES = {
+    "uptake_PNratio": 0.125,
+    "bulk_density": 1250,
+    "denpar_w": 0.002,
+    "T_wdays": 4,
+    "halfsatINwater": 2e-3,
+    "hsatTP": 6e-5,
+    "limpppar": 1.2e-4,
+    "prodNpar": 0.002,
+    "prodPpar": 0.0002,
+    "muptNpar": 0.0015,
+    "muptPpar": 0.00015,
+    "max_temp_lag": 15,
+    "max_phosphorus_lag": 300,
+}
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_river_overrides_set_the_thirteen_attributes():
+    """``River.apply_overrides`` (``storage.py:620-644``) sets 13 attributes; each equals
+    WSIMOD's after ``add_overrides``. ``bulk_density`` is never read (``model.unread``, D10)."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    mapping = _bio_config(overrides=BIO_OVERRIDES)
+    theirs = wsimod_model(mapping).nodes["r"]
+    model, _, drivers = build_model(read_wsimod_config(mapping))
+    ours = model.wsimod_day.engine.nodes["r"]
+    for name in BIO_PARAMETERS:
+        assert float(ours.defaults[name]) == getattr(theirs, name), name
+        assert float(drivers[f"wsimod.River.{name}"][0]) == getattr(theirs, name), name
+    assert ours.max_temp_lag == theirs.max_temp_lag == 15
+    assert ours.max_phosphorus_lag == theirs.max_phosphorus_lag == 300
+    assert ours.lag_sizes == (16, 301)
+    assert theirs.bulk_density == 1250
+    assert model.unread == ["r.bulk_density"]
+    # and the defaults are WSIMOD's own attributes (storage.py:539-564)
+    plain = wsimod_model(_bio_config()).nodes["r"]
+    fresh = build_model(read_wsimod_config(_bio_config()))[0].wsimod_day.engine.nodes["r"]
+    for name in BIO_PARAMETERS:
+        assert float(fresh.defaults[name]) == getattr(plain, name), name
+    assert (fresh.max_temp_lag, fresh.max_phosphorus_lag) == (plain.max_temp_lag, 365)
+
+
+def test_river_biochemistry_inputs_exist_only_when_it_runs():
+    """D9: the ``"wsimod.River.<p>"`` drivers and both registers exist with biochemistry; a
+    nitrate River built quantity-only keeps its ``"wsimod.temperature"`` row (WSIMOD reads it
+    whatever the mode) and lists its configured parameters as ignored."""
+    network = read_wsimod_config(_bio_config(overrides={"denpar_w": 0.002}))
+    for pollutants in (False, True):
+        model, state, drivers = build_model(network, pollutants=pollutants)
+        day_ = model.wsimod_day
+        assert day_.drivers["wsimod.temperature"].labels == ["r"]
+        assert "wsimod.temperature" in drivers
+        params = {f"wsimod.River.{p}" for p in BIO_PARAMETERS}
+        temperature = day_.state_labels("wsimod.river_temperature_lag")
+        phosphorus = day_.state_labels("wsimod.river_phosphorus_lag")
+        if not pollutants:
+            assert not params & set(day_.drivers)
+            assert temperature == [] and phosphorus == []
+            assert state["wsimod.river_temperature_lag"].shape == (0,)
+            assert "r.denpar_w" in model.ignored_by_quantity_only
+        else:
+            assert params <= set(day_.drivers)
+            assert temperature == [("r", i) for i in range(21)]
+            assert phosphorus == [("r", i) for i in range(366)]
+            assert state["wsimod.river_phosphorus_lag"].shape == (366,)
+            assert day_.input_specs["wsimod.River.denpar_w"].unit == "kg/m2/d"
+            assert day_.input_specs["wsimod.River.halfsatINwater"].unit == "kg/m3"
+            assert day_.key_labels["wsimod.river_temperature_lag"].unit == "degC"
+            assert day_.key_labels["wsimod.river_phosphorus_lag"].unit == "kg"
+            assert float(drivers["wsimod.River.denpar_w"][0]) == 0.002
+
+
+def test_a_biochemistry_river_carries_its_registers_and_closes_its_balance():
+    """Three days of a River with biochemistry: each day appends to the registers carried in
+    the state, ``"River.bio_in"``/``"River.bio_out"`` close the balance, and a warm start from
+    the dumped registers continues them."""
+    network = read_wsimod_config(_bio_config(days=3))
+    model, state, drivers = build_model(network)
+    result = wsimod_run(model, state, drivers)
+    assert float(result.mass_balance.residual.abs().max()) < 1e-12
+    assert "River.bio_out" in result.mass_balance.terms
+    final = model.wsimod_day.last_state
+    temperatures = final["wsimod.river_temperature_lag"]
+    assert torch.equal(temperatures[:-3], torch.zeros(18, dtype=torch.float64))
+    assert bool((temperatures[-3:] != 0).all())
+    phosphorus = final["wsimod.river_phosphorus_lag"]
+    assert phosphorus[-3] == 0.4  # the first call's phosphate, before any process
+    assert torch.equal(phosphorus[:-3], torch.zeros(363, dtype=torch.float64))
+
+
+def test_gradcheck_on_one_biochemistry_call():
+    """``torch.autograd.gradcheck`` through one call at the hand-worked point, away from every
+    guard and cap: the storage's pollutants, the air temperature and five parameters."""
+
+    def f(pollutants, t_air, denpar_w, halfsat, prod_n, mupt_n, mupt_p):
+        state = {k: v for k, v in HAND_STATE.items() if k == "volume"}
+        node, _ = bio_river(state, 17.0, HAND_TEMPERATURES, HAND_PHOSPHORUS)
+        node.tank.storage = torch.cat([torch.tensor([1000.0], dtype=torch.float64), pollutants])
+        node.bind(
+            {
+                "temperature": t_air,
+                "denpar_w": denpar_w,
+                "halfsatINwater": halfsat,
+                "prodNpar": prod_n,
+                "muptNpar": mupt_n,
+                "muptPpar": mupt_p,
+            }
+        )
+        in_, out_ = node.biochemical_processes(active=TRUE)
+        return torch.cat([node.tank.storage, in_, out_])
+
+    def leaf(value):
+        return torch.tensor(value, dtype=torch.float64, requires_grad=True)
+
+    pollutants = leaf([HAND_STATE[n] for n in BIO_POLLUTANTS])
+    inputs = (
+        pollutants,
+        leaf(17.0),
+        leaf(0.0015),
+        leaf(1.5e-3),
+        leaf(0.001),
+        leaf(0.001),
+        leaf(1e-4),
+    )
+    assert torch.autograd.gradcheck(f, inputs, eps=1e-7, atol=1e-7, rtol=1e-6)

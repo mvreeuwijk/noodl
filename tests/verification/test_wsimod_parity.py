@@ -3,15 +3,19 @@ purpose-built case (spec, Verification 2 and 3; Task 17).
 
 ``quickstart`` runs in full (1456 days), ``oxford`` for its first 365 days by default and in full
 under ``-m slow``. Each demo runs twice: quantity-only on ``config.yml`` (WSIMOD runs its own
-pollutants, noodl the volumes alone, the volumes compared) and neutralised on
-``config_neutral.yml`` (every pollutant compared). Every class replays WSIMOD bitwise (replay bound
-0), so the whole model does: the worst difference of every run is exactly 0, and no admission is
-needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is only the ceiling.
+pollutants, noodl the volumes alone, the volumes compared) and in pollutant mode on
+``config_no_deposition.yml`` (every pollutant compared). Every class replays WSIMOD bitwise
+(replay bound 0), so the whole model does: the worst difference of every run is exactly 0, and
+no admission is needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is only the
+ceiling.
 
-The purpose-built cases (``_wsimod_cases.CASES``) run in full, in both modes, the same way. Cases
+The purpose-built cases (``_wsimod_cases.CASES``) run in full, in both modes, the same way,
+except ``river_nutrients``: its default run is its first 400 days (X39) and its 1100-day run,
+with the decisions that place every biochemistry branch, is ``-m slow`` (D24). Cases
 WSIMOD cannot run (``wtw_zero_input``, ``nonresidential_demand``) or runs only until a documented
 crash (``land_sewer_ponding`` with a lowered sewer capacity) are tested for the crash and for
-noodl's evident-intent run (W4).
+noodl's evident-intent run (W4). ``river_double_discharge`` is the named exception to the print
+check (D17, X32): WSIMOD's River balance is wrong by construction there and prints every day.
 """
 
 from __future__ import annotations
@@ -37,7 +41,11 @@ from noodl.apps.wsimod import (  # noqa: E402
 )
 from noodl.apps.wsimod.engine import Decision  # noqa: E402
 from noodl.apps.wsimod.structure import river_order  # noqa: E402
-from tests.verification._wsimod_cases import CASES  # noqa: E402
+from tests.verification._wsimod_cases import (  # noqa: E402
+    CASES,
+    _decay_groundwater,
+    _decay_queue_groundwater,
+)
 from tests.verification._wsimod_parity import (  # noqa: E402
     BOUND,
     Admission,
@@ -48,16 +56,16 @@ from tests.verification._wsimod_parity import (  # noqa: E402
 from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
-CONFIG = {"quantity": "config.yml", "neutral": "config_neutral.yml"}
+CONFIG = {"quantity": "config.yml", "pollutants": "config_no_deposition.yml"}
 FULL = 1456  # both demos' dates
 
 DEMOS = [
     pytest.param("quickstart", "quantity", FULL, id="quickstart-quantity"),
-    pytest.param("quickstart", "neutral", FULL, id="quickstart-neutral"),
+    pytest.param("quickstart", "pollutants", FULL, id="quickstart-pollutants"),
     pytest.param("oxford", "quantity", 365, id="oxford365-quantity"),
-    pytest.param("oxford", "neutral", 365, id="oxford365-neutral"),
+    pytest.param("oxford", "pollutants", 365, id="oxford365-pollutants"),
     pytest.param("oxford", "quantity", FULL, id="oxford-quantity", marks=pytest.mark.slow),
-    pytest.param("oxford", "neutral", FULL, id="oxford-neutral", marks=pytest.mark.slow),
+    pytest.param("oxford", "pollutants", FULL, id="oxford-pollutants", marks=pytest.mark.slow),
 ]
 
 
@@ -69,7 +77,7 @@ def theirs(case: str, mode: str, days: int):
 @functools.cache
 def ours(case: str, mode: str, days: int, decisions: bool = False):
     network = read_wsimod_config(DATA / case, config_name=CONFIG[mode])
-    model, state, drivers = build_model(network, pollutants=(mode == "neutral"))
+    model, state, drivers = build_model(network, pollutants=(mode == "pollutants"))
     diagnostics: dict = {"decisions": decisions}
     results = wsimod_run(model, state, drivers, days=days, diagnostics=diagnostics)
     diagnostics["node_names"] = model.wsimod_day.node_names
@@ -88,7 +96,7 @@ def test_demo_matches_wsimod(case, mode, days):
         reference,
         diagnostics=diagnostics,
         case=f"{case}-{days}-{mode}",
-        quality=(mode == "neutral"),
+        quality=(mode == "pollutants"),
     )
     assert found["worst"] == 0.0 and found["admissions"] == []
     assert reference.printed == []
@@ -101,16 +109,16 @@ def test_demo_matches_wsimod(case, mode, days):
 
 
 @pytest.mark.parametrize("case", ["quickstart", "oxford"])
-def test_quantity_only_equals_the_neutralised_volumes(case):
-    """Spec, Verification 3: a quantity-only run's volumes equal the neutralised run's, exactly
+def test_demo_quantity_only_equals_the_pollutant_run_volumes(case):
+    """Spec, Verification 3: a quantity-only run's volumes equal the pollutant run's, exactly
     (``torch.equal``): every arc flow, tank storage and surface field."""
     days = FULL if case == "quickstart" else 365
     quantity, _ = ours(case, "quantity", days)
-    neutral, _ = ours(case, "neutral", days)
-    assert torch.equal(quantity.arc_flow, neutral.arc_flow)
-    assert torch.equal(quantity.tank_storage, neutral.tank_storage)
+    pollutant_run, _ = ours(case, "pollutants", days)
+    assert torch.equal(quantity.arc_flow, pollutant_run.arc_flow)
+    assert torch.equal(quantity.tank_storage, pollutant_run.tank_storage)
     for field, values in quantity.surface.items():
-        other = neutral.surface[field]
+        other = pollutant_run.surface[field]
         assert torch.equal(torch.isnan(values), torch.isnan(other)), field  # not recorded
         assert torch.equal(values.nan_to_num(), other.nan_to_num()), field
 
@@ -120,8 +128,8 @@ def test_oxfords_urban_surface_holds_no_storage_after_the_first_day():
     after day 1 to rounding, and bitwise WSIMOD's. The impervious surface stores nothing between
     days; the residue (at most 7.3e-12 m3 against the 1.16e6 m3 of day 1, measured) is the
     rounding of its balance, which WSIMOD has to the bit."""
-    results, _ = ours("oxford", "neutral", 365)
-    reference = theirs("oxford", "neutral", 365)
+    results, _ = ours("oxford", "pollutants", 365)
+    reference = theirs("oxford", "pollutants", 365)
     column = results.surface_names.index(("oxford_land", "urban"))
     storage = results.surface["storage"][:, column]
     assert float(storage[0]) > 0.0
@@ -143,8 +151,8 @@ def test_the_demos_have_no_river_order_to_tie(case):
 
 # --- the comparison itself --------------------------------------------------------------------
 def _perturbed(days: int = 30):
-    results, diagnostics = ours("quickstart", "neutral", days, True)
-    return copy.deepcopy(results), diagnostics, theirs("quickstart", "neutral", days)
+    results, diagnostics = ours("quickstart", "pollutants", days, True)
+    return copy.deepcopy(results), diagnostics, theirs("quickstart", "pollutants", days)
 
 
 def _busiest_arc(reference):
@@ -294,7 +302,7 @@ def test_a_dated_print_matches_the_flag_of_its_node_and_day(kind):
 
 
 def test_a_wrong_node_name_mapping_fails_the_deficit_check():
-    names = list(ours("quickstart", "neutral", 10, True)[1]["node_names"])
+    names = list(ours("quickstart", "pollutants", 10, True)[1]["node_names"])
     assert len(names) > 1
     # flag at node 0, the print names node 0 by its right name; the mapping is reversed
     results, diagnostics, reference = _with_print("deficit", 3, 0, names=names[::-1])
@@ -338,9 +346,22 @@ CASE_RUNS = [
 ]
 
 
+# D17 (X32): the nodes whose WSIMOD mass-balance error is printed on every day by construction
+EXPECTED_MASS_BALANCE_PRINTS = {"river_double_discharge": ("riv",)}
+SLOW_CASE_RUNS = [
+    pytest.param(name, mode, id=f"{name}-{mode}")
+    for name, spec in CASES.items()
+    if spec.wsimod and spec.slow_days is not None
+    for mode in spec.modes
+]
+
+
 @functools.cache
-def case_theirs_by_day(name: str):
-    return wsimod_reference_by_day(CASES[name].build())
+def case_theirs_by_day(name: str, days: int | None = None):
+    """WSIMOD's run of the case over its default ``days`` (or ``days``), with the print days."""
+    return wsimod_reference_by_day(
+        CASES[name].build(), days=CASES[name].days if days is None else days
+    )
 
 
 def case_theirs(name: str):
@@ -348,23 +369,26 @@ def case_theirs(name: str):
 
 
 @functools.cache
-def case_ours(name: str, mode: str):
+def case_ours(name: str, mode: str, days: int | None = None, decisions: bool = False):
+    """noodl's run of the case over its default ``days`` (or ``days``)."""
     model, state, drivers = build_model(
         read_wsimod_config(CASES[name].build()), pollutants=MODES[mode]
     )
-    diagnostics: dict = {}
-    results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
+    diagnostics: dict = {"decisions": decisions}
+    results = wsimod_run(
+        model,
+        state,
+        drivers,
+        days=CASES[name].days if days is None else days,
+        diagnostics=diagnostics,
+    )
     diagnostics["node_names"] = model.wsimod_day.node_names
     return results, diagnostics
 
 
-@pytest.mark.parametrize(("name", "mode"), CASE_RUNS)
-def test_case_matches_wsimod(name, mode):
-    """Bitwise on every day, both modes: arc flows, every recorded tank and surface field (and
-    every pollutant in ``pollutants`` mode); every WSIMOD print is one noodl records on the same
-    node and day or in the same count (``assert_matches_wsimod``); the mass balance closes."""
-    results, diagnostics = case_ours(name, mode)
-    reference, print_days = case_theirs_by_day(name)
+def _assert_case_matches(name: str, mode: str, days: int | None = None) -> None:
+    results, diagnostics = case_ours(name, mode, days)
+    reference, print_days = case_theirs_by_day(name, days)
     found = assert_matches_wsimod(
         results,
         reference,
@@ -372,9 +396,10 @@ def test_case_matches_wsimod(name, mode):
         case=f"{name}-{mode}",
         quality=MODES[mode],
         print_days=print_days,
+        expected_mass_balance_prints=EXPECTED_MASS_BALANCE_PRINTS.get(name, ()),
     )
     assert found["worst"] == 0.0 and found["admissions"] == []
-    assert len(results.dates) == CASES[name].days
+    assert len(results.dates) == (CASES[name].days if days is None else days)
     assert bool(results.arc_flow.abs().sum() > 0)
     clamp = diagnostics["events"]["inaccurate_evaporation"]
     if name == "evaporation_clamp":
@@ -389,6 +414,38 @@ def test_case_matches_wsimod(name, mode):
         # WSIMOD's node check prints the water a node drops below FLOAT_ACCURACY too (the
         # percolation push-back of land_percolation_threshold); noodl counts it in "dropped"
         assert mass_balance_worst(results) <= BOUND
+
+
+@pytest.mark.parametrize(("name", "mode"), CASE_RUNS)
+def test_case_matches_wsimod(name, mode):
+    """Bitwise on every day, both modes: arc flows, every recorded tank and surface field (and
+    every pollutant in ``pollutants`` mode); every WSIMOD print is one noodl records on the same
+    node and day or in the same count (``assert_matches_wsimod``); the mass balance closes.
+    ``river_nutrients`` runs its first 400 days here, without decisions (X39);
+    ``river_double_discharge`` expects WSIMOD's River mass-balance print on every day (D17)."""
+    _assert_case_matches(name, mode)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("name", "mode"), SLOW_CASE_RUNS)
+def test_case_matches_wsimod_on_its_slow_days(name, mode):
+    """D24: every case with a ``slow_days`` horizon, over all of it: ``river_nutrients`` for 1100
+    days, three turns of its 366-slot phosphorus register and three winters."""
+    _assert_case_matches(name, mode, CASES[name].slow_days)
+
+
+def test_the_wtw_treatment_case_makes_negative_solids_on_cold_days():
+    """X22: the case's works make negative solids on some days and not on others (temperatures
+    cross 20 degC), its plant on every day (its water stays near 11 degC); each is a day the
+    parity test above compares bitwise with WSIMOD, which has no such event of its own."""
+    _, diagnostics = case_ours("wtw_treatment", "pollutants")
+    event = diagnostics["events"]["wtw_negative_solids"]
+    names = diagnostics["node_names"]
+    works = event[:, names.index("works")]
+    assert 0 < int(works.sum()) < len(works)
+    assert bool(event[:, names.index("plant")].any())
+    quantity = case_ours("wtw_treatment", "quantity")[1]["events"]["wtw_negative_solids"]
+    assert not bool(quantity.any())  # no additive pollutants, no solids to go negative
 
 
 @pytest.mark.parametrize("name", [n for n, spec in CASES.items() if set(spec.modes) >= set(MODES)])
@@ -414,18 +471,62 @@ def test_the_cases_cover_every_listed_feature():
     sewer_timearea foul_sewers groundwater_infiltrate wwtw_storm_tank fwtw_deficit_sludge
     queue_tank_time_zero wtw_zero_input impervious_only pervious_only evaporation_clamp
     temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
-    batch_divergence capacity_first_come simple_pollutants float_accuracy_override
-    node_type_override""".split()
+    batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
+    node_type_override decay_storage decay_groundwater decay_queue_groundwater
+    decay_queue_groundwater_n0 decay_arc decay_arc_mixed decay_arc_alt
+    surface_decay_nitrification land_run_twice river_nutrients river_double_discharge""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",
         "nonresidential_demand",
     }
+    # D24: the one case whose default run is a prefix of its dates
+    assert {n: spec.slow_days for n, spec in CASES.items() if spec.slow_days} == {
+        "river_nutrients": 1100
+    }
+    assert (
+        CASES["river_nutrients"].days == 400
+        and len(CASES["river_nutrients"].build()["dates"]) == 1100
+    )
 
 
 def tiny_dropped(results) -> torch.Tensor:
     """The volume the run's mass balance counts as dropped, summed over the days."""
     return results.mass_balance.terms["dropped"][:, 0].sum()
+
+
+@pytest.mark.parametrize("mode", list(MODES))
+def test_the_decay_arc_cases_exercise_what_they_are_named_for(mode):
+    """``decay_arc`` decays in all four of its ``DecayArc``s (``n`` = 2, 1, 0 and 0, the last
+    out of a catchment, X29) inside the precondition of D21: the event is false on every day,
+    one column per arc. ``decay_arc_alt``'s in-port pushes on some days and not on others, and
+    its ``DecayArcAlt`` decays. In ``quantity`` mode nothing decays and both still run."""
+    results, diagnostics = case_ours("decay_arc", mode)
+    event = diagnostics["events"]["decay_arc_order_unknown"]
+    assert event.shape == (CASES["decay_arc"].days, len(results.arc_names))
+    assert not bool(event.any())
+    model = build_model(read_wsimod_config(CASES["decay_arc"].build()))[0]
+    arcs = model.wsimod_day.engine.arcs
+    assert {
+        name: arcs[name].number_of_timesteps
+        for name in arcs
+        if "Decay" in type(arcs[name]).__name__
+    } == {
+        "src2_to_j": 0,
+        "q": 2,
+        "b_to_sink": 0,
+        "q_pull": 1,
+    }
+    terms = results.mass_balance.terms
+    alt, _ = case_ours("decay_arc_alt", mode)
+    pushed = alt.arc_flow[:, alt.arc_names.index("src_to_head")] > 0
+    assert 0 < int(pushed.sum()) < len(pushed)
+    if mode == "pollutants":
+        assert float(terms["DecayArc.decayed"][:, 1].sum()) > 0.0
+        assert float(alt.mass_balance.terms["DecayArcAlt.decayed"][:, 1:].sum()) > 0.0
+    else:
+        assert terms["DecayArc.decayed"].shape[-1] == 1
+        assert float(terms["DecayArc.decayed"].abs().sum()) == 0.0
 
 
 def test_the_new_cases_exercise_what_they_are_named_for():
@@ -495,6 +596,166 @@ def test_the_evaporation_clamp_prints_are_accepted_only_where_they_match_noodl()
     unflagged.printed = [x for x in unflagged.printed if not x.startswith("inaccurate")]
     with pytest.raises(AssertionError, match="'inaccurate_evaporation' lines"):
         assert_matches_wsimod(results, unflagged, diagnostics=diagnostics, **kwargs)
+
+
+# --- the River biochemistry cases (Task 13; X16, X32, X39) --------------------------------------
+BIO = "biochemical_processes"
+# The outcomes each river of ``river_nutrients`` is built to show (spec, Purpose-built cases),
+# per river so that no branch passes on another river's hit (X55); the sets are exact.
+# ``dmin``/``dmax`` record ``b < a`` / ``b > a`` with ``b`` the second operand, so a cap
+# ``min(0.5 pool, x)`` is taken when its outcome is False and left when it is True, and the
+# denitrification cap ``min(denitri_water, 0.5 din)`` is taken when its outcome is True
+# (``storage.py:788``, ``:840-843``, ``:860-863``, ``:882``, ``:891``). Every cap listed binds on
+# some days and not on others. ``r_up`` is the low-P river: it alone is dry (the drought), crosses
+# the ``totalphosfcn`` guard both ways, mineralises with its caps binding (its ``production_cap:N``
+# is left out: it binds there only in the DIN-free stretch, at ``din = 0``, trivially) and takes
+# the phosphorus caps. ``r_low`` (``max_temp_lag = 5``: its 10-day mean exceeds its 20-day mean
+# whenever its register sum is positive) produces on almost every day, so its ``production_cap:N``
+# is the real one; it never empties and its phosphorus saturates ``totalphosfcn`` from day 1.
+BOTH = frozenset({True, False})
+RIVER_BRANCHES: dict[str, dict[str, frozenset[bool]]] = {
+    "r_up": {
+        "dry": BOTH,
+        "frozen": BOTH,
+        "cold": BOTH,
+        "totalphosfcn": BOTH,
+        "production": BOTH,
+        "denitrification_cap": BOTH,
+        "production_cap:P": BOTH,
+        "mineralisation_cap:N": BOTH,
+        "mineralisation_cap:P": BOTH,
+        "macrophyte_cap:N": BOTH,
+        "macrophyte_cap:P": BOTH,
+        "macrophyte_phosphorus": BOTH,
+    },
+    "r_low": {
+        "dry": frozenset({False}),
+        "frozen": BOTH,
+        "cold": BOTH,
+        "totalphosfcn": frozenset({True}),
+        "production": BOTH,
+        "denitrification_cap": BOTH,
+        "production_cap:N": BOTH,
+        "production_cap:P": BOTH,
+        "macrophyte_cap:N": BOTH,
+        "macrophyte_cap:P": BOTH,
+    },
+}
+
+
+def _river_outcomes(decisions, days: int, river: str) -> dict[str, set[bool]]:
+    """``{branch: the outcomes active on some day < days}`` of ``river``'s biochemistry
+    decisions."""
+    out: dict[str, set[bool]] = {}
+    prefix = f"node:{river}/{BIO}/"
+    for day in decisions[:days]:
+        for d in day:
+            if d.site.startswith(prefix) and bool(d.active):
+                out.setdefault(d.site[len(prefix) :], set()).add(bool(d.outcome))
+    return out
+
+
+@pytest.mark.slow
+def test_river_nutrients_reaches_every_branch():
+    """R3, X39, D24: with the decisions recorded over the full 1100 days, each branch the case is
+    built for occurs active within its first 400 days (the default run) and over the full run:
+    frost, cold, the dry day, both ``totalphosfcn`` outcomes, production both ways, every 50 %
+    cap taken, and ``"river_nitrogen_lost"``. The low-P river ``r_up`` alone has the dry days,
+    the DIN-free stretch and both ``totalphosfcn`` outcomes; the full run turns its 366-slot
+    register over three times, and the phosphate pulse has left it (days 426-455), so
+    ``totalphosfcn`` returns to 0 (its guard False) from day 448, measured."""
+    spec = CASES["river_nutrients"]
+    assert spec.slow_days >= 3 * 366
+    results, diagnostics = case_ours("river_nutrients", "pollutants", spec.slow_days, True)
+    names = diagnostics["node_names"]
+    lost = diagnostics["events"]["river_nitrogen_lost"]
+    for days in (spec.days, spec.slow_days):
+        for river, branches in RIVER_BRANCHES.items():
+            seen = _river_outcomes(diagnostics["decisions"], days, river)
+            for branch, outcomes in branches.items():
+                assert seen[branch] == outcomes, (days, river, branch, seen[branch])
+        assert bool(lost[:days, names.index("r_up")].any()), days
+    assert not bool(lost[:, names.index("r_low")].any())  # r_low never empties, so din > 0
+    late = {
+        k: bool(d.outcome)
+        for k, day in enumerate(diagnostics["decisions"])
+        for d in day
+        if k >= spec.days and d.site == f"node:r_up/{BIO}/totalphosfcn" and bool(d.active)
+    }
+    assert set(late.values()) == {True, False}
+    assert min(k for k, outcome in late.items() if not outcome) == 448
+    assert len(results.dates) == spec.slow_days
+
+
+def test_river_double_discharge_runs_the_biochemistry_twice_a_day():
+    """X16, X32: WSIMOD prints the river's mass-balance error on every day (for pollutants, never
+    for the volume, which the biochemistry leaves alone) and nothing else, because its assigned
+    ``bio_in``/``bio_out`` hold the second call's terms only; noodl runs the biochemistry as
+    call 0 and call 1 on every day, its terms add both calls, and its balance closes within
+    rounding (measured 2.1e-16 of scale)."""
+    name = "river_double_discharge"
+    spec = CASES[name]
+    reference, print_days = case_theirs_by_day(name)
+    lines = [
+        (d, m)
+        for d, line in zip(print_days, reference.printed, strict=True)
+        if (m := re.fullmatch(r"mass balance error for (\S+) of (\S+) in riv", line))
+    ]
+    assert len(lines) == len(reference.printed) > 0  # nothing else is printed
+    assert {d for d, _ in lines} == set(range(spec.days))
+    assert "volume" not in {m.group(1) for _, m in lines}
+    results, diagnostics = case_ours(name, "pollutants", None, True)
+    site = f"node:riv/{BIO}/dry"
+    per_day = [[d.call for d in day if d.site == site] for day in diagnostics["decisions"]]
+    assert per_day == [[0, 1]] * spec.days
+    terms = results.mass_balance.terms
+    assert float(terms["River.bio_out"][:, 1:].abs().sum()) > 0.0
+    assert float(terms["River.bio_out"][:, 0].abs().sum()) == 0.0  # no volume moves
+    assert mass_balance_worst(results) <= BOUND
+
+
+def test_an_expected_mass_balance_print_must_appear_every_day():
+    """D17: the river's lines pass only as a complete set. Without the exception they are refused
+    (they name a pollutant, not the volume noodl's residual is compared with); with it, removing
+    one day's lines from the reference fails, naming the day; the exception needs ``print_days``
+    and a node the model has."""
+    name = "river_double_discharge"
+    results, diagnostics = case_ours(name, "pollutants")
+    reference, print_days = case_theirs_by_day(name)
+    kwargs = {"diagnostics": diagnostics, "case": name, "quality": True}
+    expected = {"expected_mass_balance_prints": ("riv",)}
+    assert_matches_wsimod(results, reference, print_days=print_days, **expected, **kwargs)
+    with pytest.raises(AssertionError, match="WSIMOD printed 'mass balance error for"):
+        assert_matches_wsimod(results, reference, print_days=print_days, **kwargs)
+    keep = [
+        k
+        for k, (d, line) in enumerate(zip(print_days, reference.printed, strict=True))
+        if not (d == 7 and line.endswith(" in riv"))
+    ]
+    assert len(keep) < len(print_days)
+    missing = copy.deepcopy(reference)
+    missing.printed = [reference.printed[k] for k in keep]
+    with pytest.raises(AssertionError, match="no mass balance error for 'riv' on day 7 "):
+        assert_matches_wsimod(
+            results, missing, print_days=[print_days[k] for k in keep], **expected, **kwargs
+        )
+    with pytest.raises(ValueError, match="needs print_days"):
+        assert_matches_wsimod(results, reference, **expected, **kwargs)
+    # a volume line of the river is not excused: it goes through the residual comparison
+    extra = copy.deepcopy(reference)
+    extra.printed = [*reference.printed, "mass balance error for volume of 1.0 in riv"]
+    with pytest.raises(AssertionError, match="mass balance errors"):
+        assert_matches_wsimod(
+            results, extra, print_days=[*print_days, print_days[-1]], **expected, **kwargs
+        )
+    with pytest.raises(AssertionError, match="unknown nodes"):
+        assert_matches_wsimod(
+            results,
+            reference,
+            print_days=print_days,
+            expected_mass_balance_prints=("nobody",),
+            **kwargs,
+        )
 
 
 def test_an_undated_print_needs_noodls_event_and_a_dated_one_its_node_and_day():
@@ -638,6 +899,29 @@ def test_case_runs_where_wsimod_crashes_wtw_zero_input():
     assert mass_balance_worst(results) <= BOUND
 
 
+def test_case_runs_where_wsimod_crashes_decay_groundwater():
+    """``decay_groundwater`` without its ``filename`` override: WSIMOD loses the groundwater's
+    configured forcing (``storage.py:202-203``), so its first decay reads ``None``
+    (``core.py:485``, ``TypeError``); noodl refuses by name (X11). With the override both run."""
+    mapping = _decay_groundwater(override=False)
+    with pytest.raises(TypeError):
+        _wsimod_run_of(wsimod_model(mapping))
+    with pytest.raises(ValueError, match="filename"):
+        build_model(read_wsimod_config(mapping))
+
+
+def test_case_runs_where_wsimod_crashes_decay_queue_groundwater():
+    """``decay_queue_groundwater`` without its ``filename`` override: WSIMOD loses the
+    groundwater's configured forcing (``storage.py:291-292``), so its ``DecayQueueTank``'s
+    first decay, at the first push or end of day, reads ``None`` (``core.py:485``,
+    ``TypeError``); noodl refuses by name (X11)."""
+    mapping = _decay_queue_groundwater(override=False)
+    with pytest.raises(TypeError):
+        _wsimod_run_of(wsimod_model(mapping))
+    with pytest.raises(ValueError, match="QueueGroundwater.*filename"):
+        build_model(read_wsimod_config(mapping))
+
+
 def test_case_runs_where_wsimod_crashes_nonresidential_demand():
     """``nonresidential_demand``: WSIMOD's ``NonResidentialDemand.get_demand`` calls itself
     (``demand.py:143-150``) and recurses until Python gives up; noodl does the evident intent
@@ -655,3 +939,24 @@ def test_case_runs_where_wsimod_crashes_nonresidential_demand():
     assert deficit.tolist() == [False] * 20 + [True] * (spec.days - 20)
     assert bool(torch.isfinite(results.arc_flow).all())
     assert mass_balance_worst(results) <= BOUND
+
+
+@pytest.mark.parametrize(
+    ("name", "times"), [("surface_decay_nitrification", 1), ("land_run_twice", 2)]
+)
+def test_the_surface_decay_cases_carry_yesterdays_decay_into_nitrate_and_nitrite(name, times):
+    """``land.py:427-439``: day ``d + 1``'s inflow of nitrate is day ``d``'s decayed nitrite and
+    of nitrite its decayed ammonia, once per ``Land.run`` (X16: twice in ``land_run_twice``).
+    Rain carries neither, so they are the whole inflow; day 0 has none. The factor reaches its
+    cap on warm days, so the cap decisions are exercised."""
+    results, diagnostics = case_ours(name, "pollutants")
+    network = read_wsimod_config(CASES[name].build())
+    columns = ["volume", *network.pollutants.additive]
+    inflow = results.mass_balance.terms["Land.running_inflow_mb"]
+    decayed = results.mass_balance.terms["DecayTank.decayed"]
+    for source, target in (("nitrite", "nitrate"), ("ammonia", "nitrite")):
+        carried = inflow[:, columns.index(target)]
+        assert float(carried[0]) == 0.0
+        assert float(decayed[:, columns.index(source)].abs().sum()) > 0.0
+        expected = times * decayed[:-1, columns.index(source)]
+        assert torch.allclose(carried[1:], expected, rtol=1e-12, atol=0.0)

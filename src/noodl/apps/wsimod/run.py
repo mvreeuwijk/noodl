@@ -13,7 +13,9 @@ Diagnostics. ``diagnostics``, a dict, receives:
 - ``"maxiter"``: ``{(node, method, call index): (..., T) bool}``, whether that distribute loop
   ended at ``MAXITER`` (WSIMOD prints "Maxiter reached ... at <date>");
 - ``"events"``: ``{name: (..., T, n_nodes) bool}`` for every name in :data:`EVENT_NAMES` (D13;
-  a condition that never fired is all False);
+  a condition that never fired is all False); an event recorded at an arc,
+  ``"decay_arc_order_unknown"`` (D21), is ``(..., T, n_arcs)`` in ``WsimodDay.arc_names``'
+  order;
 - ``"decisions"``, only when ``diagnostics["decisions"]`` is ``True`` on entry: a list over the
   days of that day's :class:`~noodl.apps.wsimod.engine.Decision` records, in call order;
 - ``"mass_balance"``: the :class:`WsimodMassBalance`, also ``WsimodResults.mass_balance``.
@@ -28,8 +30,11 @@ percolation push-back, the ``WWTW`` storm-tank rejection and ``make_discharge`` 
 ``Sewer`` ponded water) and ``"WWTW.unprocessed_input"`` (water pushed into a ``WWTW`` after its
 ``calculate_discharge``, which vanishes at ``end_timestep_``, W69). A push below
 ``FLOAT_ACCURACY`` into a ``QueueTank`` stays in its ``storage``, so it is storage, not a drop
-(W49). Arc terms cancel and are not listed. ``storage_change`` is the carried stores' water
-at the record point less at the start of the day; per-day values (``Demand``/``WTW`` totals,
+(W49). Arc flows cancel and are not listed; an arc's own terms are declared on its
+``mass_balance``, as a node's. ``storage_change`` is the carried stores' water after
+``end_timestep`` less at the start of the day (X8): the window runs from the state the day
+loads to the state it dumps, so consecutive windows meet and what ``end_timestep`` records
+counts in its day. Per-day values (``Demand``/``WTW`` totals,
 ``Land`` per-day flows and running balances) are not storage (W75). All are ``(..., T, 1 +
 K_additive)``: the volume, then the additive pollutants' masses. ``residual = inflow - outflow
 - storage_change`` and closes to rounding, apart from one known gap. One rule holds on every
@@ -74,6 +79,9 @@ EVENT_NAMES = (
     "zero_priority",
     "wtw_liquor_zero_denominator",
     "inaccurate_evaporation",
+    "wtw_negative_solids",
+    "decay_arc_order_unknown",
+    "river_nitrogen_lost",
 )
 """The warning conditions a run reports (D13): WSIMOD's prints and noodl's own."""
 
@@ -122,29 +130,34 @@ class WsimodResults:
 
 
 def _requires_grad(*groups) -> bool:
-    return any(
-        isinstance(v, Tensor) and v.requires_grad for g in groups if g for v in g.values()
-    )
+    return any(isinstance(v, Tensor) and v.requires_grad for g in groups if g for v in g.values())
 
 
 def _stack(records: list[Tensor], shape: torch.Size) -> Tensor:
     """The days' ``(..., X)`` values as ``(..., T, X)``."""
-    return torch.stack([torch.broadcast_to(r, (*shape, *r.shape[len(shape) :])) for r in records],
-                       dim=len(shape))
+    return torch.stack(
+        [torch.broadcast_to(r, (*shape, *r.shape[len(shape) :])) for r in records], dim=len(shape)
+    )
 
 
 def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBalance:
     p = day.p
     additive = p.volume_or_additive_mask
     direction: dict[str, str] = {}
-    for node in day.engine.nodes.values():
-        direction.update(node.mass_balance)
+    for element in [*day.engine.nodes.values(), *day.engine.arcs.values(), *day._internal_arcs]:
+        direction.update(element.mass_balance)
     keys: list[str] = []
     for record in records:
         keys.extend(k for k in record.terms if k not in keys)
     unknown = [k for k in keys if k not in direction]
     if unknown:
         raise RuntimeError(f"mass-balance term {unknown[0]!r} has no declared direction")
+    wrong = [k for k in keys if direction[k] not in ("in", "out")]
+    if wrong:
+        raise RuntimeError(
+            f"mass-balance term {wrong[0]!r} has direction {direction[wrong[0]]!r}; "
+            "expected 'in' or 'out'"
+        )
     width = int(additive.sum())
     zero = torch.zeros((*shape, len(records), width), dtype=F64)
     terms: dict[str, Tensor] = {}
@@ -155,13 +168,20 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
         terms[key] = _stack(days, shape)
         if direction[key] == "in":
             inflow = inflow + terms[key]
-        else:
+        elif direction[key] == "out":
             outflow = outflow + terms[key]
     terms["dropped"] = _stack([r.dropped for r in records], shape)
     outflow = outflow + terms["dropped"]
-    storage = _stack([r.storage_total for r in records], shape)
+    # the window runs from the loaded state to the state end_timestep leaves (X8)
+    unfinished = [d for d, r in enumerate(records) if r.storage_end is None]
+    if unfinished:
+        raise RuntimeError(
+            f"wsimod_run: day {unfinished[0]}'s record has no storage_end; the run was "
+            "interrupted before end_timestep (D14)"
+        )
+    end = _stack([r.storage_end for r in records], shape)
     start = _stack([r.storage_start for r in records], shape)
-    change = storage - start
+    change = end - start
     return WsimodMassBalance(
         inflow=inflow,
         outflow=outflow,
@@ -230,13 +250,21 @@ def wsimod_run(
         mass_balance=_balance(day, records, shape),
     )
     if diagnostics is not None:
-        off = torch.zeros((*shape, len(day.node_names)), dtype=torch.bool)
         names = [*EVENT_NAMES, *(k for r in records for k in r.events if k not in EVENT_NAMES)]
         diagnostics["maxiter"] = {
             site: _stack([r.maxiter[site] for r in records], shape) for site in records[0].maxiter
         }
         diagnostics["events"] = {
-            name: _stack([r.events.get(name, off) for r in records], shape)
+            name: _stack(
+                [
+                    r.events.get(
+                        name,
+                        torch.zeros((*shape, len(day.event_columns(name))), dtype=torch.bool),
+                    )
+                    for r in records
+                ],
+                shape,
+            )
             for name in dict.fromkeys(names)
         }
         diagnostics["mass_balance"] = results.mass_balance
@@ -245,4 +273,3 @@ def wsimod_run(
         else:
             diagnostics.pop("decisions", None)
     return results
-

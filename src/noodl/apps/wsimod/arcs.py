@@ -9,11 +9,12 @@ so capacity is served first come, first served (spec, Protocol). Every call take
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from torch import Tensor
 
+from noodl.apps.wsimod.decay import Decay, DecaySpec, check_inert
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.vqip import (
     Pollutants,
@@ -31,8 +32,12 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "ARC_CLASSES",
+    "ARC_EVENTS",
     "AltQueueArc",
     "Arc",
+    "DECAY_ARCS",
+    "DecayArc",
+    "DecayArcAlt",
     "PullArc",
     "PushArc",
     "QueueArc",
@@ -53,6 +58,9 @@ class Arc:
     ctx: Ctx
     # the stores carried from one day to the next (the keys of :meth:`stores`)
     carried_paths: tuple[str, ...] = ()
+    # the mass-balance terms the arc records (``Ctx.term``) with their side, ``"in"`` or
+    # ``"out"``, as ``Node.mass_balance`` (D11); ``run._balance`` collects both
+    mass_balance: ClassVar[dict[str, str]] = {}
 
     def __init__(self, spec: ArcSpec, in_port: Node, out_port: Node, pollutants: Pollutants):
         self.spec = spec
@@ -75,6 +83,38 @@ class Arc:
         """This day's ``capacity`` and ``preference`` (batched)."""
         self.capacity = torch.as_tensor(capacity, dtype=torch.float64)
         self.preference = torch.as_tensor(preference, dtype=torch.float64)
+
+    def bind_decay(self, constant: Tensor, exponent: Tensor) -> None:
+        """This day's ``decays.constant`` and ``decays.exponent`` ``(..., K)`` of a ``Decay*``
+        arc (D15): a non-inert entry at a key its ``decays`` does not list is refused, naming the
+        arc (:func:`~noodl.apps.wsimod.decay.check_inert`), then its
+        :class:`~noodl.apps.wsimod.decay.Decay` is bound at the temperature of the node it reads
+        (``core.py:464-470``): its ``parent``, else its ``in_port``. ``WsimodDay._bind`` calls it
+        after every node is bound, so that temperature is the same day's. A quantity-only run
+        decays nothing (``K = 0``); an arc without a ``decay`` attribute is refused."""
+        if not hasattr(self, "decay"):
+            raise TypeError(f"arc {self.name!r}: a {type(self).__name__} has no decay to bind")
+        if self.p.K == 0:
+            return
+        constant = torch.as_tensor(constant, dtype=torch.float64)
+        exponent = torch.as_tensor(exponent, dtype=torch.float64)
+        if self.decay is None:
+            check_inert(
+                f"arc {self.name!r}",
+                "decays.constant/exponent",
+                torch.zeros(self.p.K, dtype=torch.bool),
+                constant,
+                exponent,
+                self.p.names,
+            )
+            return
+        source = _temperature_source(self)
+        if "temperature" not in getattr(source, "params", {}):
+            raise KeyError(
+                f"arc {self.name!r}: node {source.name!r} has no ('temperature', t) forcing "
+                "(core.py:484-487)"
+            )
+        self.decay.bind(self.ctx, constant, exponent, source.params["temperature"])
 
     @classmethod
     def validate(cls, spec: ArcSpec, network: WsimodNetwork) -> None:
@@ -204,6 +244,62 @@ def check_travel_time(where: str, key: str, value: object) -> int:
     if int(value) != value or value < 0:
         raise ValueError(f"{where}: {key} {value!r} is not a whole number of days >= 0")
     return int(value)
+
+
+def _temperature_source(arc: Arc):
+    """The node a decaying arc reads its temperature from (``DecayObj.__init__``,
+    ``core.py:464-470``): its ``parent`` where it has one (a ``DecayQueueTank``'s internal arc,
+    ``tanks.py:663-669``), else its ``in_port`` (a user ``Decay*`` arc, for either direction)."""
+    parent = getattr(arc, "parent", None)
+    return arc.in_port if parent is None else parent
+
+
+def _arc_decay(arc: Arc, spec: ArcSpec, pollutants: Pollutants) -> Decay | None:
+    """A user ``Decay*`` arc's :class:`Decay` and its ``decays.*`` driver defaults, dense over the
+    ``K`` pollutants (inert ``(0, 1)`` where ``decays`` lists none, X9, X34). A quantity-only run
+    decays nothing: the keys outside its pollutants are dropped, as ``Storage._decay_spec`` does.
+    ``None`` when nothing decays; ``make_decay`` still reads the temperature then."""
+    configured = spec.decays or DecaySpec((), {}, {})
+    arc.defaults = {
+        "decays.constant": torch.tensor(
+            [configured.constant.get(n, 0.0) for n in pollutants.names], dtype=torch.float64
+        ).reshape(pollutants.K),
+        "decays.exponent": torch.tensor(
+            [configured.exponent.get(n, 1.0) for n in pollutants.names], dtype=torch.float64
+        ).reshape(pollutants.K),
+    }
+    keys = tuple(k for k in configured.keys if k in pollutants.names)
+    if not keys:
+        return None
+    known = DecaySpec(
+        keys, {k: configured.constant[k] for k in keys}, {k: configured.exponent[k] for k in keys}
+    )
+    return Decay(pollutants, known, site=arc.site)
+
+
+def _make_decay(arc: Arc, vqip: Tensor) -> tuple[Tensor, Tensor]:
+    """``DecayObj.make_decay`` (``core.py:474-492``) without the accumulation: the decayed VQIP
+    and its ``diff``. With nothing to decay the water is unchanged, but the temperature is still
+    read (``core.py:484-487``), so a missing one fails as WSIMOD's ``KeyError`` does."""
+    if arc.decay is None:
+        source = _temperature_source(arc)
+        if "temperature" not in getattr(source, "params", {}):
+            raise KeyError(f"{arc.site}: node {source.name!r} has no ('temperature', t) forcing")
+        return vqip, torch.zeros_like(vqip)
+    return arc.decay.make_decay(vqip)
+
+
+def _validate_decay_arc(spec: ArcSpec, network: WsimodNetwork) -> None:
+    """A user ``Decay*`` arc reads its ``in_port``'s ``("temperature", t)`` at every decay
+    (``core.py:484-487``), whatever the pollutants: refused by name where a date lacks it."""
+    port = next(n for n in network.nodes if n.name == spec.in_port)
+    for date, label in zip(network.dates, network.date_labels, strict=True):
+        if ("temperature", date) not in port.data:
+            raise ValueError(
+                f"arc {spec.name!r}: its in_port, node {port.name!r}, has no 'temperature' "
+                f"forcing on {label} (a {spec.cls} decays at the in_port's temperature, "
+                "core.py:464-470, :484-487)"
+            )
 
 
 def _put_row(register: Tensor, t: int, row: Tensor, mask: Tensor) -> Tensor:
@@ -351,6 +447,7 @@ class AltQueueArc(Arc):
         # enter_arc (arcs.py:423-428): average_flow = V / (time + 1)
         self.flow_in = write(run, self.flow_in + entered[..., 0] / (t + 1), self.flow_in)
         self.vqip_in = write(run, sum_vqip(p, self.vqip_in, entered), self.vqip_in)
+        entered = self._on_entry(entered, run)
         # enter_queue (arcs.py:595-601): sum into an existing key, assign a new one
         row = self.register[..., t, :]
         row = torch.where(self.present[..., t, None], sum_vqip(p, row, entered), entered)
@@ -364,6 +461,10 @@ class AltQueueArc(Arc):
         ctx.event("more_backflow_than_vqip", self.owner, run & more)
         self.vqip_in = write(run, extract_vqip(p, self.vqip_in, backflow), self.vqip_in)
         return torch.where(tiny[..., None], ctx.empty(), not_pushed)
+
+    def _on_entry(self, entered: Tensor, run: Tensor) -> Tensor:
+        """The request as it enters the queue, after ``enter_arc``: unchanged here."""
+        return entered
 
     def update_queue(self, *, active: Tensor) -> Tensor:
         """``arcs.py:603-638``: push slot 0 to the out-port without a tag; the rejected part is
@@ -388,6 +489,128 @@ class AltQueueArc(Arc):
         tail = torch.zeros_like(old[..., :1, :])
         self.register = torch.cat([first[..., None, :], old[..., 2:, :], tail], dim=-2)
         here = self.present
+        self.present = torch.cat([here[..., :-1] | here[..., 1:], here[..., -1:]], dim=-1)
+
+
+class DecayArcAlt(AltQueueArc):
+    """``DecayArcAlt`` (``arcs.py:731-805``): an :class:`AltQueueArc` whose queued water decays
+    on entry and at every end of day. It is a ``DecayQueueTank``'s internal arc
+    (``tanks.py:663-669``, built with ``parent`` the owning node) and a user arc class.
+
+    - **Entry** (``enter_queue``, ``:752-778``): ``enter_arc`` counts the request **before**
+      decay in ``vqip_in`` and ``flow_in`` (``:766``), then ``make_decay`` (``:769``), then the
+      decayed request goes into the register as in :class:`AltQueueArc`.
+    - **End of day** (``_end_timestep``, ``:780-805``): the accumulators and ``total_decayed``
+      are reset (``:787-791``); for ``i = 0 ... L - 1`` where key ``i + 1`` exists,
+      ``queue[i] = make_decay(old[i + 1])`` and ``queue[i + 1]`` is emptied (``:798-803``); then
+      ``queue[0] = sum_vqip(queue[0], make_decay(old[0]))`` (``:805``). The merge is
+      therefore ``sum_vqip(decay(old[1]), decay(old[0]))``, the other order from
+      :meth:`AltQueueArc.end_timestep`'s ``sum_vqip(old[0], old[1])`` (``:660``; X13). The blend
+      is symmetric, so the order shows only where both slots hold no water: ``sum_vqip`` then
+      keeps its first argument's non-additive values (``core.py:109``).
+
+    Every ``make_decay`` adds its ``diff`` to ``total_decayed`` (``core.py:491``), so after an
+    end of day it holds ``diff(slot 1) + ... + diff(slot L) + diff(slot 0)``, then each entry's
+    in push order (X30). An absent key adds nothing (WSIMOD skips it; its row is empty, so its
+    ``diff`` would be an exact zero). An internal arc's ``total_decayed`` is carried: a
+    ``DecayQueueTank`` extracts it from its ``storage`` at the next end of day
+    (``tanks.py:694``).
+
+    A **user** ``DecayArcAlt`` (no ``parent``) reads its ``in_port``'s temperature
+    (``core.py:464-470``) and builds its own :class:`~noodl.apps.wsimod.decay.Decay` from its
+    ``decays`` (``ArcSpec.decays``; the drivers ``"wsimod.DecayArcAlt.decays.*"``, bound by
+    :meth:`Arc.bind_decay`). Its ``total_decayed`` feeds only its own balance (``:750``), so it is
+    not carried: ``WsimodDay`` resets it when a day starts, and its value after an end of day is
+    WSIMOD's. Every ``diff`` is also the ``"out"`` term ``"DecayArcAlt.decayed"``, in the order
+    above (entries, then the end of day); an internal arc records none, as its tank's
+    ``"DecayQueueTank.decayed"`` holds the decay.
+
+    ``decay`` is ``None`` when nothing decays (an empty ``decays``, or a quantity-only run): the
+    water is unchanged, but ``make_decay`` still reads the temperature (``core.py:484-487``), so
+    a missing one fails as WSIMOD's ``KeyError`` does. No method here takes a decision: the cap
+    was evaluated at bind (the end-of-day rule, ``Engine.end_day``).
+    """
+
+    carried_paths: tuple[str, ...] = ("register", "present", "total_decayed")
+    mass_balance: ClassVar[dict[str, str]] = {"DecayArcAlt.decayed": "out"}
+
+    def __init__(
+        self,
+        spec: ArcSpec,
+        in_port,
+        out_port,
+        pollutants: Pollutants,
+        *,
+        decay=None,
+        parent=None,
+        **kwargs,
+    ) -> None:
+        self.decay = decay
+        self.parent = parent
+        super().__init__(spec, in_port, out_port, pollutants, **kwargs)
+        if parent is None and decay is None:  # a user arc decays as its own decays say
+            self.decay = _arc_decay(self, spec, pollutants)
+        self.total_decayed = empty(pollutants, ())  # core.py:472
+
+    @property
+    def user(self) -> bool:
+        """A user arc (no ``parent``): its decay is its own mass-balance term."""
+        return self.parent is None
+
+    @classmethod
+    def validate(cls, spec: ArcSpec, network: WsimodNetwork) -> None:
+        """:meth:`AltQueueArc.validate`, and the ``in_port``'s temperature on every date."""
+        super().validate(spec, network)
+        _validate_decay_arc(spec, network)
+
+    def stores(self) -> dict[str, Tensor]:
+        """The register, its key set and ``total_decayed``."""
+        return {**super().stores(), "total_decayed": self.total_decayed}
+
+    def load_stores(self, stores: Mapping[str, Tensor]) -> None:
+        stores = dict(stores)
+        if "total_decayed" in stores:
+            self.total_decayed = torch.as_tensor(stores.pop("total_decayed"), dtype=torch.float64)
+        super().load_stores(stores)
+
+    def make_decay(self, vqip: Tensor) -> tuple[Tensor, Tensor]:
+        """``DecayObj.make_decay`` (``core.py:474-492``) without the accumulation: the decayed
+        VQIP and its ``diff``."""
+        return _make_decay(self, vqip)
+
+    def _on_entry(self, entered: Tensor, run: Tensor) -> Tensor:
+        """``arcs.py:769``: the request decays after ``enter_arc`` counted it."""
+        decayed, diff = self.make_decay(entered)
+        self.total_decayed = write(
+            run, sum_vqip(self.p, self.total_decayed, diff), self.total_decayed
+        )
+        if self.user:
+            self.ctx.term("DecayArcAlt.decayed", diff, run)
+        return decayed
+
+    def end_timestep(self) -> None:
+        """``arcs.py:780-805`` (see the class text): reset, decay and shift, swapped merge."""
+        Arc.end_timestep(self)  # :787-791 (vqip_in, vqip_out, flow_in, flow_out)
+        p = self.p
+        total = empty(p, ())  # :789
+        old, here = self.register, self.present
+        rows = list(old.unbind(-2))
+        for i in range(self.length):  # :798-803; WSIMOD's max_travel covers only existing keys
+            key = here[..., i + 1]
+            if i == 0:  # arcs.py:567-568, :803: WSIMOD's key 1 always exists, as the merge below
+                key = key | True  # assumes (a loaded row with slot 1 absent cannot be WSIMOD's)
+            decayed, diff = self.make_decay(old[..., i + 1, :])
+            rows[i] = torch.where(key[..., None], decayed, rows[i])
+            rows[i + 1] = torch.where(key[..., None], torch.zeros_like(rows[i + 1]), rows[i + 1])
+            total = write(key, sum_vqip(p, total, diff), total)
+            if self.user:
+                self.ctx.term("DecayArcAlt.decayed", diff, key)
+        decayed, diff = self.make_decay(old[..., 0, :])  # :805; key 0 always exists
+        rows[0] = sum_vqip(p, rows[0], decayed)
+        self.total_decayed = sum_vqip(p, total, diff)
+        if self.user:
+            self.ctx.term("DecayArcAlt.decayed", diff, torch.ones(self.ctx.shape, dtype=torch.bool))
+        self.register = torch.stack(rows, dim=-2)
         self.present = torch.cat([here[..., :-1] | here[..., 1:], here[..., -1:]], dim=-1)
 
 
@@ -676,6 +899,7 @@ class QueueArc(Arc):
             not_pushed = v_change_vqip(p, vqip, clip)
         entered = extract_vqip(p, vqip, not_pushed)
         self._enter_arc(entered, run)
+        entered = self._on_entry(entered, run)
         backflow = self._update_queue("push", entered, j, tag, active=run, call=call)
         not_pushed = sum_vqip(p, not_pushed, backflow)
         # arcs.py:402-403: a print
@@ -711,6 +935,7 @@ class QueueArc(Arc):
         request = torch.cat([volume[..., None], vqip[..., 1:].expand(volume.shape + (p.K,))], -1)
         pulled = self.in_port.pull_set(request, active=active)
         self._enter_arc(pulled, active)
+        pulled = self._on_entry(pulled, active)
         return self._update_queue("pull", pulled, j, "default", active=active, call=call)
 
     def _enter_arc(self, vqip: Tensor, active: Tensor) -> None:
@@ -718,6 +943,154 @@ class QueueArc(Arc):
         n = self.number_of_timesteps
         self.flow_in = write(active, self.flow_in + vqip[..., 0] / (n + 1), self.flow_in)
         self.vqip_in = write(active, sum_vqip(self.p, self.vqip_in, vqip), self.vqip_in)
+
+    def _on_entry(self, entered: Tensor, run: Tensor) -> Tensor:
+        """The request as it joins the list, after ``enter_arc``: unchanged here."""
+        return entered
+
+
+class DecayArc(QueueArc):
+    """``DecayArc`` (``arcs.py:668-728``): a :class:`QueueArc` whose requests decay on entry and
+    at every end of day, at the ``in_port``'s temperature (``core.py:464-470``; a WSIMOD TODO,
+    ``:700-702``, notes it is not the water's own).
+
+    - **Entry** (``enter_queue``, ``:686-708``), for pushes (``:396``) and pulls (``:354``):
+      ``enter_arc`` counts the request undecayed in ``vqip_in`` and ``flow_in`` (``:698``), then
+      ``make_decay`` (``:705``), then it joins the list (``:708``). A pulled request decays after
+      ``in_port.pull_set`` removed it from the sender. A push's backflow is the decayed water,
+      returned to the sender and taken off ``vqip_in`` (``:399-405``). With
+      ``number_of_timesteps = 0`` a request decays once, on entry, and is delivered at once.
+    - **End of the day** (``end_timestep``, ``:710-728``): every waiting request, in list order
+      and both directions, decays in place (``:726-727``), then ``since`` advances as in
+      :class:`QueueArc` (``time = max(time - 1, 0)``, ``:728``).
+
+    Every ``diff`` is the ``"out"`` term ``"DecayArc.decayed"`` (``total_decayed``, ``:684``),
+    added one at a time from empty: the day's entries in call order, then the end of the day in
+    WSIMOD's list order (X24, X33). List order is entry order, because ``update_queue`` removes
+    requests without reordering the rest (``:518-520``): by entry age ``i + since[d]``
+    descending, then by ``entry_rank``, the position of the row's request call in the day's
+    merged static call sequence of both directions (fixed with the call labels, D2 of 3a). A
+    masked add is an exact ``+0.0``.
+
+    **The order precondition (D21, X41).** ``since`` saturates at ``n``, so a due row that is
+    still waiting (``i + since[d] >= n``, no call in its direction since it fell due) has lost
+    its true age. The term's order is exact while no end of day finds due-and-waiting rows in
+    both directions; where one does, the detached event ``"decay_arc_order_unknown"`` is
+    recorded at the arc's name, and only the term's last bit may differ. The delivered values
+    and the rows are exact in every case.
+
+    ``decay`` is ``None`` when nothing decays (an empty ``decays``, or a quantity-only run): the
+    water is unchanged, but the temperature is still read (``core.py:484-487``). No method here
+    takes a decision: the cap was evaluated at bind (D5).
+    """
+
+    mass_balance: ClassVar[dict[str, str]] = {"DecayArc.decayed": "out"}
+
+    def __init__(self, spec: ArcSpec, in_port: Node, out_port: Node, pollutants: Pollutants):
+        super().__init__(spec, in_port, out_port, pollutants)
+        self.decay = _arc_decay(self, spec, pollutants)
+        # (direction, j) -> position in the day's merged static call sequence (D2)
+        self.entry_rank: dict[tuple[str, int], int] = {}
+        self._merged = 0  # today's request calls so far, both directions
+
+    @classmethod
+    def validate(cls, spec: ArcSpec, network: WsimodNetwork) -> None:
+        """:meth:`QueueArc.validate`, and the ``in_port``'s temperature on every date."""
+        super().validate(spec, network)
+        _validate_decay_arc(spec, network)
+
+    def begin_tracing(self) -> None:
+        super().begin_tracing()
+        self.entry_rank = {}
+        self._merged = 0
+
+    def _enter(self, direction: str, tag: Tag) -> int:
+        """:meth:`QueueArc._enter`; while the labels are recorded, the call's place in the
+        merged sequence of both directions is recorded too. Once they are fixed, every later
+        day must interleave the two directions as the traced day did, or the call raises (D2:
+        the term's order of addition relies on ``entry_rank``)."""
+        recording = not self._frozen
+        j = super()._enter(direction, tag)
+        position, self._merged = self._merged, self._merged + 1
+        if recording:
+            self.entry_rank[(direction, j)] = len(self.entry_rank)
+        elif (traced := self.entry_rank.get((direction, j))) != position:
+            raise RuntimeError(
+                f"{self.site}: {direction} request call {j} is call {position} of the day in "
+                f"both directions; the traced day made it call {traced}"
+                " (D2: the call structure must not change)"
+            )
+        return j
+
+    def make_decay(self, vqip: Tensor) -> tuple[Tensor, Tensor]:
+        """``DecayObj.make_decay`` (``core.py:474-492``) without the accumulation."""
+        return _make_decay(self, vqip)
+
+    def _on_entry(self, entered: Tensor, run: Tensor) -> Tensor:
+        """``arcs.py:705``: the request decays after ``enter_arc`` counted it."""
+        decayed, diff = self.make_decay(entered)
+        self.ctx.term("DecayArc.decayed", diff, run)
+        return decayed
+
+    def end_timestep(self) -> None:
+        """``arcs.py:710-728``: decay every present row in place, add the ``diff``s to the term
+        in WSIMOD's list order, record the event of D21, then :meth:`QueueArc.end_timestep`
+        (the reset and ``since``, which is read here before it advances)."""
+        n, rows = self.number_of_timesteps, self.rows
+        width = rows.shape[-2]
+        if n and width:
+            ctx, since = self.ctx, self.since
+            present = (rows[..., 0] != 0).detach()  # (..., 2, n, J): a zero row is absent
+            # a present row outside the traced calls (a hand-built or loaded state) would be
+            # decayed but left out of the term: refused before anything changes
+            for d, direction in enumerate(_DIRECTIONS):
+                for j in range(width):
+                    if (direction, j) not in self.entry_rank and bool(present[..., d, :, j].any()):
+                        raise RuntimeError(
+                            f"{self.site}: a {direction} row at call {j} holds water, but no "
+                            "traced request call has that index (D2); its decay would be left "
+                            "out of the term"
+                        )
+            decayed, diffs = {}, {}
+            for d in range(2):
+                for i in range(n):
+                    for j in range(width):
+                        decayed[d, i, j], diffs[d, i, j] = self.make_decay(rows[..., d, i, j, :])
+            ranked = sorted(self.entry_rank, key=self.entry_rank.__getitem__)
+            for age in range(2 * n - 1, -1, -1):  # oldest first; age = i + since in [0, 2n-1]
+                for direction, j in ranked:
+                    d = _DIRECTIONS.index(direction)
+                    for i in range(max(0, age - n), min(n - 1, age) + 1):
+                        here = present[..., d, i, j] & (since[..., d] + i == age)
+                        ctx.term("DecayArc.decayed", diffs[d, i, j], here)
+            due = (since[..., :, None] + torch.arange(n, dtype=since.dtype) >= n).detach()
+            waiting = (present & due[..., None]).flatten(-2).any(-1)  # (..., 2)
+            ctx.event("decay_arc_order_unknown", self.name, waiting[..., 0] & waiting[..., 1])
+            shape = torch.broadcast_shapes(
+                rows.shape, *(x.shape[:-1] + (1, 1, 1, x.shape[-1]) for x in decayed.values())
+            )
+            new = torch.stack(
+                [
+                    torch.stack(
+                        [
+                            torch.stack(
+                                [
+                                    decayed[d, i, j].expand(*shape[:-4], shape[-1])
+                                    for j in range(width)
+                                ],
+                                dim=-2,
+                            )
+                            for i in range(n)
+                        ],
+                        dim=-3,
+                    )
+                    for d in range(2)
+                ],
+                dim=-4,
+            )
+            self.rows = torch.where(present[..., None], new, rows)
+        self._merged = 0
+        super().end_timestep()
 
 
 class PullArc(Arc):
@@ -761,9 +1134,18 @@ class WeirArc(SewerArc):
 ARC_CLASSES: dict[str, type[Arc]] = {
     "Arc": Arc,
     "AltQueueArc": AltQueueArc,
+    "DecayArc": DecayArc,
+    "DecayArcAlt": DecayArcAlt,
     "PullArc": PullArc,
     "QueueArc": QueueArc,
     "PushArc": PushArc,
     "SewerArc": SewerArc,
     "WeirArc": WeirArc,
 }
+
+# the user arc classes that decay, read their in_port's temperature and bind their decays after
+# the nodes (D15)
+DECAY_ARCS: tuple[type[Arc], ...] = (DecayArc, DecayArcAlt)
+# the events recorded at an arc's name rather than a node's (D21): DayRecord.events gives them
+# one column per arc
+ARC_EVENTS: tuple[str, ...] = ("decay_arc_order_unknown",)

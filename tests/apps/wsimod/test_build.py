@@ -19,6 +19,7 @@ from noodl.apps.wsimod import (
     initial_drivers,
     initial_state,
     read_wsimod_config,
+    wsimod_run,
 )
 from noodl.apps.wsimod.structure import (
     forcing_readers,
@@ -26,6 +27,7 @@ from noodl.apps.wsimod.structure import (
     recursion_cycles,
     river_order,
 )
+from noodl.apps.wsimod.tanks import DecayQueueTank
 from tests.verification._wsimod_cases import CASES
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "wsimod"
@@ -363,6 +365,71 @@ def test_quantity_only_lists_the_ignored_parameters():
     assert "pollutants=False" in str(refused.value)
 
 
+LISTED_3B = {
+    # one case per element kind: Storage, Reservoir, RiverReservoir, River (decays)
+    "decay_storage": ["pond.decays", "res.decays", "rr.decays", "riv.decays"],
+    # Pervious and Impervious surfaces
+    "surface_decay_nitrification": ["plot.surfaces.roads.decays", "plot.surfaces.turf.decays"],
+    "decay_queue_groundwater": ["gw.decays"],  # a QueueGroundwater's DecayQueueTank
+    "decay_arc": ["q.decays", "q_pull.decays"],  # user DecayArcs
+    "wtw_treatment": [  # WWTW and FWTW pollutant entries
+        "works.process_parameters",
+        "works.liquor_multiplier",
+        "plant.process_parameters",
+        "plant.liquor_multiplier",
+    ],
+    "river_nutrients": ["r_low.denpar_w", "r_low.prodNpar", "r_low.max_temp_lag"],
+}
+
+
+@pytest.mark.parametrize("case", list(LISTED_3B))
+def test_quantity_only_lists_the_3b_parameters(case):
+    """X49: a quantity-only run lists the decay values, the WTW pollutant entries and the River
+    biochemistry parameters as ignored; a pollutant run lists none."""
+    mapping = CASES[case].build()
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    ignored = model.ignored_by_quantity_only
+    for name in LISTED_3B[case]:
+        assert name in ignored, name
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=True)
+    assert not any(name in model.ignored_by_quantity_only for name in LISTED_3B[case])
+
+
+def test_quantity_only_lists_no_decays_of_an_element_without_any():
+    mapping = CASES["decay_storage"].build()
+    for node in mapping["nodes"]:
+        node.pop("decays", None)
+    mapping.pop("overrides", None)
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    assert not any(name.endswith(".decays") for name in model.ignored_by_quantity_only)
+
+
+def test_a_decaying_queue_groundwater_keeps_its_structure_quantity_only():
+    """X25: the ``DecayQueueTank``'s delay and end of day stay without a decay value, so the
+    volumes differ from the same case without ``decays`` (X12, X13) and equal the pollutant
+    run's."""
+    mapping = CASES["decay_queue_groundwater"].build()
+    plain = copy.deepcopy(mapping)
+    for node in plain["nodes"]:
+        node.pop("decays", None)
+    plain.pop("overrides")
+    volumes = {}
+    for label, configuration, pollutants in (
+        ("quantity", mapping, False),
+        ("pollutants", mapping, True),
+        ("plain", plain, False),
+    ):
+        model, state, drivers = build_model(
+            read_wsimod_config(configuration), pollutants=pollutants
+        )
+        results = wsimod_run(model, state, drivers)  # all 40 days
+        volumes[label] = (results.arc_flow, results.tank_storage)
+    assert volumes["quantity"][0].shape[0] == 40
+    assert not torch.equal(volumes["quantity"][0], volumes["plain"][0])
+    for quantity, pollutants in zip(volumes["quantity"], volumes["pollutants"], strict=True):
+        assert torch.equal(quantity, pollutants)
+
+
 def _residential(type_: str, override: str | None = None) -> dict:
     data = {("temperature", d): 12.0 for d in _dates(3)}
     demand = _node("homes", type_, data_input_dict=data, population=10)
@@ -441,6 +508,72 @@ def test_the_driver_names_follow_d6():
     # quantity only: no pollutant-keyed parameter, no concentrations
     assert not any(k.endswith("pollutant_load") for k in drivers)
     assert "wsimod.concentration" not in drivers
+
+
+def test_quantity_only_driver_shapes():
+    """O2, X34: the WTW drivers of a quantity-only run. ``liquor_multiplier`` keeps its volume
+    column, ``(n, 1)``; the pollutant entries have no driver."""
+    network = read_wsimod_config(DATA / "oxford")
+    model, _, drivers = build_model(network, pollutants=False)
+    n = {cls: sum(1 for s in network.nodes if s.cls == cls) for cls in ("WWTW", "FWTW")}
+    assert n["WWTW"] and n["FWTW"]
+    for cls, count in n.items():
+        template = model.driver_template[f"wsimod.{cls}.liquor_multiplier"]
+        assert template.shape == (count, 1)
+        assert model.wsimod_day.drivers[f"wsimod.{cls}.liquor_multiplier"].columns == ("volume",)
+    assert not any(".process_parameters." in key for key in drivers)
+    # O2, X34: no decays.* driver in a quantity-only run of decay_storage; the pollutant run has
+    # (n, K) rows for every node of each storage-family class, inert where nothing decays
+    mapping = CASES["decay_storage"].build()
+    model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=False)
+    assert not any(".decays." in key for key in drivers)
+    nitrifying = read_wsimod_config(CASES["surface_decay_nitrification"].build())
+    _, _, drivers = build_model(nitrifying, pollutants=False)
+    assert not any(".decays." in key for key in drivers)  # nor a surface's
+    # X25: nor a QueueGroundwater's, while its DecayQueueTank (its one-day delay, X12, and its
+    # end of day without update_queue, X13) stays, with its total_decayed row
+    queue = read_wsimod_config(CASES["decay_queue_groundwater"].build())
+    quantity, state, drivers = build_model(queue, pollutants=False)
+    assert not any(key.startswith("wsimod.QueueGroundwater.decays.") for key in drivers)
+    tank = quantity.wsimod_day.engine.nodes["gw"].tank
+    assert isinstance(tank, DecayQueueTank) and tank.decay is None
+    assert tank.number_of_timesteps == 1 and tank.internal_arc.length == 3
+    assert quantity.wsimod_day.state_labels("wsimod.total_decayed") == [("gw", "tank.internal_arc")]
+    assert state["wsimod.total_decayed"].shape == (1, 1)
+    _, _, drivers = build_model(queue, pollutants=True)
+    assert drivers["wsimod.QueueGroundwater.decays.constant"].shape == (1, 4)
+    model, _, drivers = build_model(read_wsimod_config(mapping), pollutants=True)
+    k = len(mapping["pollutants"])
+    for cls in ("Storage", "Reservoir", "RiverReservoir", "River"):
+        for field, inert in (("constant", 0.0), ("exponent", 1.0)):
+            template = drivers[f"wsimod.{cls}.decays.{field}"]
+            assert template.shape == (1, k)
+            assert model.wsimod_day.drivers[f"wsimod.{cls}.decays.{field}"].columns == tuple(
+                mapping["pollutants"]
+            )
+            assert (template == inert).sum() >= 1  # a pollutant the node does not decay
+    # X34: nor a user Decay* arc's; the pollutant run has (n_arcs_of_class, K) rows by arc
+    arcs = read_wsimod_config(CASES["decay_arc"].build())
+    _, _, drivers = build_model(arcs, pollutants=False)
+    assert not any(".decays." in key for key in drivers)
+    model, _, drivers = build_model(arcs, pollutants=True)
+    assert drivers["wsimod.DecayArc.decays.constant"].shape == (4, 2)
+    assert model.wsimod_day.drivers["wsimod.DecayArc.decays.exponent"].labels == [
+        "src2_to_j",
+        "b_to_sink",
+        "q",
+        "q_pull",
+    ]  # configuration order
+    alt = read_wsimod_config(CASES["decay_arc_alt"].build())
+    assert build_model(alt)[2]["wsimod.DecayArcAlt.decays.constant"].shape == (1, 3)
+    # the pollutant run: volume then the additive pollutants, and the constants and exponents
+    network = read_wsimod_config(DATA / "oxford", config_name="config_no_deposition.yml")
+    model, _, drivers = build_model(network, pollutants=True)
+    k = len(network.pollutants.additive)
+    for cls, count in n.items():
+        assert drivers[f"wsimod.{cls}.liquor_multiplier"].shape == (count, 1 + k)
+        for field in ("constant", "exponent"):
+            assert drivers[f"wsimod.{cls}.process_parameters.{field}"].shape == (count, k)
 
 
 def test_a_time_area_fraction_is_a_driver():
@@ -611,3 +744,161 @@ def test_a_driver_that_breaks_a_division_is_refused_by_name(case, driver, value,
     bad = {**drivers, driver: torch.full_like(drivers[driver], value)}
     with pytest.raises(ValueError, match=name):
         model.step(state, bad, dt=DAY, t=0.0)
+
+
+def test_surface_decay_drivers_have_the_surface_class_and_the_node_surface_label():
+    """O2, X34: ``wsimod.<SurfaceClass>.decays.constant`` and ``.exponent`` ``(n, K)`` with the
+    labels ``(node, surface)``, inert where nothing decays, absent in a quantity-only run."""
+    mapping = CASES["surface_decay_nitrification"].build()
+    network = read_wsimod_config(mapping)
+    model, _, drivers = build_model(network, pollutants=False)
+    assert not any(".decays." in key and "Surface" in key for key in drivers)
+    model, _, drivers = build_model(network, pollutants=True)
+    names = network.pollutants.names
+    for cls, surface in (("ImperviousSurface", "roads"), ("PerviousSurface", "turf")):
+        for field, inert in (("constant", 0.0), ("exponent", 1.0)):
+            key = f"wsimod.{cls}.decays.{field}"
+            assert drivers[key].shape == (1, len(names))
+            assert model.wsimod_day.drivers[key].labels == [("plot", surface)]
+            assert model.wsimod_day.drivers[key].columns == names
+            row = drivers[key][0]
+            assert float(row[names.index("nitrate")]) == inert  # not listed: inert
+            assert float(row[names.index("ammonia")]) != inert
+
+
+def test_the_total_decayed_state_round_trips():
+    """X35, D7: ``"wsimod.total_decayed"`` has one row per surface, labelled by the attribute
+    path ``(node, "surfaces.<name>")``, and the state is the carry-over day 0 reads (the surface
+    labels of ``"wsimod.storage"`` keep their form ``"surface:<name>"``). Without ``nitrite`` the
+    key has no rows."""
+    network = read_wsimod_config(CASES["surface_decay_nitrification"].build())
+    model, _, _ = build_model(network, pollutants=True)
+    day = model.wsimod_day
+    assert day.state_labels("wsimod.total_decayed") == [
+        ("plot", "surfaces.roads"),
+        ("plot", "surfaces.turf"),
+    ]
+    assert ("plot", "surface:turf") in day.state_labels("wsimod.storage")
+    plain = initial_state(model)
+    state = initial_state(
+        model,
+        values={"wsimod.total_decayed": {("plot", "surfaces.turf"): {"ammonia": 2.0}}},
+    )
+    assert (
+        float(state["wsimod.total_decayed"][1, 1 + network.pollutants.names.index("ammonia")])
+        == 2.0
+    )
+    assert not plain["wsimod.total_decayed"].any()
+    terms = {}
+    for tag, start in (("plain", plain), ("given", state)):
+        _, ctx, _ = next(day.run_days(start, days=1))
+        terms[tag] = ctx.terms["Land.running_inflow_mb"].clone()
+    nitrite = 1 + network.pollutants.names.index("nitrite")
+    assert float(terms["given"][nitrite] - terms["plain"][nitrite]) == 2.0  # ammonia -> nitrite
+    # a model without nitrite carries nothing
+    mapping = CASES["decay_storage"].build()
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=True)
+    assert model.wsimod_day.state_labels("wsimod.total_decayed") == []
+
+
+# --- the user Decay* arcs (X29, D15) ------------------------------------------------------------
+_ARC_PHOSPHATE = {"phosphate": {"constant": 0.1, "exponent": 1.07}}
+
+
+def _catchment_decay_arc(pollutants: list[str]) -> dict:
+    """A catchment drained by a ``DecayArc`` of one day into the sea; its temperature forcing is
+    14, 17 and 20 degC on the three days, whether or not ``temperature`` is a pollutant."""
+    data = {}
+    for k, d in enumerate(_dates(3)):
+        data[("flow", d)] = 10.0 + k
+        data[("phosphate", d)] = 0.01
+        data[("temperature", d)] = 14.0 + 3.0 * k
+    mapping = _mapping(
+        [{"name": "c", "type_": "Catchment", "data_input_dict": data}, _node("sea", "Waste")],
+        [_arc("q", "c", "sea", type_="DecayArc", number_of_timesteps=1, decays=_ARC_PHOSPHATE)],
+    )
+    mapping.update(
+        pollutants=pollutants,
+        additive_pollutants=["phosphate"],
+        non_additive_pollutants=[x for x in pollutants if x != "phosphate"],
+    )
+    return mapping
+
+
+def _factor(temperature: float) -> float:
+    return 0.1 * 1.07 ** (temperature - 20.0)  # core.py:513-515
+
+
+def test_a_decay_arc_out_of_a_catchment_reads_its_temperature_row():
+    """X29: the catchment has its own ``"wsimod.temperature"`` row, which the arc's decay reads;
+    its ``"wsimod.concentration"`` temperature column is the outflow's. Changing one leaves the
+    other's reader unchanged. Without a ``temperature`` pollutant, and in a quantity-only run,
+    the arc still runs on the row."""
+    model, state, drivers = build_model(
+        read_wsimod_config(_catchment_decay_arc(["phosphate", "temperature"]))
+    )
+    day = model.wsimod_day
+    assert day.drivers["wsimod.temperature"].labels == ["c"]
+    assert day.drivers["wsimod.concentration"].labels == ["c"]
+    arc = day.engine.arcs["q"]
+    column = 1 + day.p.names.index("phosphate")
+    temperature = 1 + day.p.names.index("temperature")
+
+    def step(values):
+        model.step(state, values, dt=DAY, t=0.0)
+        return float(arc.decay.factor[..., column]), day.last_record.terms["Catchment.flow"]
+
+    factor, flow = step(drivers)
+    assert factor == _factor(14.0) and float(flow[temperature]) == 14.0
+    warm = {**drivers, "wsimod.temperature": drivers["wsimod.temperature"].clone()}
+    warm["wsimod.temperature"][0, 0] = 30.0
+    factor, other = step(warm)
+    assert factor == _factor(30.0)
+    assert torch.equal(other, flow)  # the outflow, its temperature included, is unchanged
+    assert torch.equal(warm["wsimod.concentration"], drivers["wsimod.concentration"])
+    hot = {**drivers, "wsimod.concentration": drivers["wsimod.concentration"].clone()}
+    hot["wsimod.concentration"][0, 0, temperature - 1] = 35.0
+    factor, other = step(hot)
+    assert factor == _factor(14.0) and float(other[temperature]) == 35.0
+    # no temperature pollutant: the row exists all the same, in both modes
+    for pollutants in (True, False):
+        network = read_wsimod_config(_catchment_decay_arc(["phosphate"]))
+        model, state, drivers = build_model(network, pollutants=pollutants)
+        assert model.wsimod_day.drivers["wsimod.temperature"].labels == ["c"]
+        for k in range(3):
+            state = model.step(state, drivers, dt=DAY, t=k * DAY)
+        q = model.wsimod_day.engine.arcs["q"]
+        assert (q.decay is not None) == pollutants
+        if pollutants:
+            assert float(q.decay.factor[..., 1]) == _factor(20.0)
+        assert float(model.wsimod_day.last_record.arc_flow[0]) == 11.0  # day 1's flow arrives
+
+
+def test_decay_arcs_bind_after_their_in_ports():
+    """D15: ``bind_decay`` runs after the node loop, so the arc's factor is its in-port's
+    temperature of the same day (17 degC on day 1, not day 0's 14). A non-inert entry at a key
+    the arc's ``decays`` does not list is refused, naming the arc and the pollutant."""
+    model, state, drivers = build_model(
+        read_wsimod_config(_catchment_decay_arc(["phosphate", "temperature"]))
+    )
+    arc = model.wsimod_day.engine.arcs["q"]
+    state = model.step(state, drivers, dt=DAY, t=0.0)
+    assert float(arc.decay.factor[..., 1]) == _factor(14.0)
+    model.step(state, drivers, dt=DAY, t=DAY)
+    assert float(arc.decay.factor[..., 1]) == _factor(17.0)
+    key = "wsimod.DecayArc.decays.constant"
+    assert model.wsimod_day.drivers[key].labels == ["q"]
+    assert drivers[key].tolist() == [[0.1, 0.0]]
+    changed = {**drivers, key: torch.tensor([[0.1, 0.2]], dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"arc:q.*non-inert entry at 'temperature'"):
+        model.step(state, changed, dt=DAY, t=0.0)
+    batched = {**drivers, key: torch.tensor([[[0.1, 0.0]], [[0.2, 0.0]]], dtype=torch.float64)}
+    model.step(state, batched, dt=DAY, t=0.0)
+    assert arc.decay.factor[..., 1].tolist() == [_factor(14.0), 2 * _factor(14.0)]
+    # an arc that decays nothing refuses any non-inert entry by name
+    mapping = _catchment_decay_arc(["phosphate", "temperature"])
+    mapping["arcs"][0]["decays"] = {}
+    model, state, drivers = build_model(read_wsimod_config(mapping))
+    changed = {**drivers, key: torch.tensor([[0.3, 0.0]], dtype=torch.float64)}
+    with pytest.raises(ValueError, match=r"arc 'q'.*non-inert entry at 'phosphate'"):
+        model.step(state, changed, dt=DAY, t=0.0)

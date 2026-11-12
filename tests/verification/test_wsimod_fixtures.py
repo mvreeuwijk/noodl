@@ -45,14 +45,31 @@ def test_the_saved_pervious_depth_is_the_physical_depth():
 
 
 @pytest.mark.parametrize("case", ["quickstart", "oxford"])
-def test_the_neutral_configuration_differs_only_by_its_overrides(case):
+def test_the_no_deposition_configuration_differs_only_by_its_overrides(case):
     def load(name):
         return yaml.safe_load((DATA / case / name).read_text(encoding="utf-8"))
 
-    neutral = load("config_neutral.yml")
-    assert "overrides" in neutral
-    del neutral["overrides"]
-    assert neutral == load("config.yml")
+    config = load("config.yml")
+    no_deposition = load("config_no_deposition.yml")
+    overrides = no_deposition.pop("overrides")
+    assert no_deposition == config
+    lands = {n: node for n, node in config["nodes"].items() if node["type_"] == "Land"}
+    assert set(overrides["nodes"]) == set(lands)
+    for name, land in lands.items():
+        entry = overrides["nodes"][name]
+        assert entry == {
+            "type_": "Land",
+            "name": name,
+            "surfaces": {
+                s: {"pollutant_load": {k: 0.0 for k in surface["pollutant_load"]}}
+                for s, surface in land["surfaces"].items()
+            },
+        }
+    model = wsimod_model(DATA / case, config_name="config_no_deposition.yml")
+    for node in model.nodes.values():
+        if type(node).__name__ == "Land":
+            for surface in node.surfaces:
+                assert all(v == 0 for v in surface.pollutant_load.values())
 
 
 def test_reset_wsimod_globals_restores_the_defaults():

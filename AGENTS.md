@@ -29,10 +29,12 @@ Add the application you are changing. CI's `branch` job uses the same table
 | electrical | `tests/apps/electrical tests/layers/test_mna*.py tests/test_model_mna.py tests/operators/test_mna_operator.py tests/verification/test_power_flow_parity.py tests/verification/test_modelica_electrical_parity.py` |
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |
 
-The wsimod row runs in about 3 minutes with `-n 4` (158 s, 816 tests, measured at the end of the port), well inside
-the 10-minute budget, so nothing is cut: the default composition is quickstart in full (1456 days,
-both modes, 38-41 s each), oxford for its first 365 days (both modes, 36 s each), the sampled
-replays and the cases (the rest, under 2 minutes). Full oxford (1456 days, both modes, about
+The wsimod row runs in about 5 minutes with `-n 4` on an unloaded machine (315 s, 5,798 tests, measured
+in the last 3b task; 675 s, 5,835 tests, on a shared machine at the end of 3b), within the 10-minute
+budget when unloaded, so nothing more is cut: the default composition is quickstart in full (1456 days,
+both modes, 30-40 s each unloaded), oxford for its first 365 days (both modes, similar), the sampled
+replays, the gradients and the cases (the rest); `river_nutrients` runs 400 of its 1100 days by default.
+Full oxford (1456 days, both modes, about
 145 s each) runs under `-m slow`.
 
 For example, for the building application:

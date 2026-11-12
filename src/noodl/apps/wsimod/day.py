@@ -7,7 +7,10 @@ dates (D16) through the closure, which owns every ``"wsimod.*"`` state key:
    values reset (W68, W75);
 2. day ``k``'s slice of every driver is bound: the parameters ``"wsimod.<Class>.<parameter>"``
    (rows: the nodes of that configured class, D6), ``"wsimod.<SurfaceClass>.<parameter>"``
-   (rows: the surfaces of every ``Land``), ``"wsimod.Arc.capacity"`` and
+   (rows: the surfaces of every ``Land``), the storage family's
+   ``"wsimod.<Class>.decays.constant"`` and ``".exponent"`` ``(n, K)`` (all-inert rows for a
+   node without decays, absent in a quantity-only run; X9, X34; the surfaces' under the
+   surface class, labelled ``(node, surface)``), ``"wsimod.Arc.capacity"`` and
    ``"wsimod.Arc.preference"`` (rows: every arc), and the forcing series
    ``"wsimod.precipitation"``, ``"wsimod.et0"``, ``"wsimod.temperature"`` ``(..., T,
    n_readers)``, ``"wsimod.flow"`` ``(..., T, n_catchments)`` and ``"wsimod.concentration"``
@@ -41,6 +44,19 @@ State layout (D10; spec, State). Every key has a leading batch shape; the rows a
   anchors ``(arc, direction)``.
 - ``"wsimod.liquor"`` (every ``WWTW`` and ``FWTW``), ``"wsimod.previous_pulled"`` (``FWTW``)
   and ``"wsimod.treated"`` (``WWTW``), ``(..., n, 1+K)`` by node.
+- ``"wsimod.total_decayed"`` ``(..., n_rows, 1+K)``: the ``total_decayed`` of each decaying
+  ``QueueGroundwater``'s ``DecayQueueTank`` internal arc, ``(node, "tank.internal_arc")``
+  (extracted from the tank's ``storage`` at the next end of day, ``tanks.py:694``), and the
+  decayed mass of the last end of day of each ``Land`` surface, ``(node, "surfaces.<name>")``
+  (X35: the attribute path, where ``"wsimod.storage"`` has ``"surface:<name>"``), in the state
+  layout's order (D7). A surface's rows exist when ``nitrite`` is a pollutant: the next day's
+  ``Surface.run`` converts them (``land.py:427-439``).
+- ``"wsimod.river_temperature_lag"`` and ``"wsimod.river_phosphorus_lag"`` ``(..., n_slots)``:
+  the ``lagged_temperatures`` (``degC``) and ``lagged_total_phosphorus`` (``kg``) registers of
+  every ``River`` with biochemistry (``"nitrate"`` a pollutant, D9), ``max_temp_lag + 1`` and
+  ``max_phosphorus_lag + 1`` slots per river, labelled ``(river, i)`` with slot 0 the oldest
+  and zero-padded at the front (X17). They are not water held. A run can start from another
+  run's registers (a warm start); all zeros is WSIMOD's empty lists.
 
 Units (W20): volumes ``m3``, flows and capacities ``m3/d``, additive pollutants ``kg``,
 non-additive ones by name (``temperature`` ``degC``); never converted.
@@ -57,7 +73,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.arcs import AltQueueArc, Arc, QueueArc
+from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, DecayArcAlt, QueueArc
 from noodl.apps.wsimod.config import WsimodNetwork
 from noodl.apps.wsimod.engine import Ctx, Engine
 from noodl.apps.wsimod.structure import (
@@ -66,6 +82,7 @@ from noodl.apps.wsimod.structure import (
     orchestration_plan,
     river_order,
 )
+from noodl.apps.wsimod.tanks import DecayQueueTank, DecayTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from noodl.refs import Field
 
@@ -89,17 +106,42 @@ STATE_KEYS = (
     "wsimod.liquor",
     "wsimod.previous_pulled",
     "wsimod.treated",
+    "wsimod.total_decayed",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
 # keys that are not water held: a QueueTank's active storage is inside its storage, and an
 # FWTW's previous_pulled is the quality of yesterday's pulled water (W75)
-_NOT_HELD = ("wsimod.active_storage", "wsimod.previous_pulled")
+# a surface's total_decayed is mass that left the storage at the end of the day and returns
+# through the next day's carry-over (land.py:427-439), and a DecayQueueTank's is decay its
+# storage has not lost yet (tanks.py:694), so neither is held
+# a River's lag registers hold temperatures and phosphorus masses already in its storage
+_NOT_HELD = (
+    "wsimod.active_storage",
+    "wsimod.previous_pulled",
+    "wsimod.total_decayed",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
+)
 # keys of one value per row, not a VQIP
-_FLAT_KEYS = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
+_FLAT_KEYS = (
+    "wsimod.travel_queue_present",
+    "wsimod.arc_queue_since",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
+)
 _STATE_UNITS = {
     "wsimod.travel_queue_present": "-",
     "wsimod.arc_queue_since": "d",
+    "wsimod.river_temperature_lag": "degC",
+    "wsimod.river_phosphorus_lag": "kg",
+}
+# a River's store path -> its register's state key (D8)
+_RIVER_REGISTERS = {
+    "lagged_temperatures": "wsimod.river_temperature_lag",
+    "lagged_total_phosphorus": "wsimod.river_phosphorus_lag",
 }
 _STATE_TEXT = {
     "wsimod.storage": "every tank's and surface's storage (VQIP)",
@@ -111,6 +153,18 @@ _STATE_TEXT = {
     "wsimod.liquor": "every WWTW's and FWTW's liquor (VQIP)",
     "wsimod.previous_pulled": "every FWTW's previous day's pulled water (VQIP)",
     "wsimod.treated": "every WWTW's treated water (VQIP)",
+    "wsimod.total_decayed": (
+        "every DecayQueueTank internal arc's total_decayed and every Land surface's decayed "
+        "mass of the last end of day (VQIP)"
+    ),
+    "wsimod.river_temperature_lag": (
+        "every biochemistry River's lagged_temperatures register, max_temp_lag + 1 slots, slot "
+        "0 the oldest, zero-padded at the front (X17)"
+    ),
+    "wsimod.river_phosphorus_lag": (
+        "every biochemistry River's lagged_total_phosphorus register, max_phosphorus_lag + 1 "
+        "slots, slot 0 the oldest, zero-padded at the front (X17)"
+    ),
 }
 
 # D6 parameter units (W20); a parameter not listed has none declared
@@ -143,6 +197,8 @@ _PARAMETER_UNITS = {
     "treatment_throughput_capacity": "m3/d",
     "percent_solids": "-",
     "liquor_multiplier": "-",
+    "constant": "-",
+    "exponent": "-",
     "stormwater_storage_capacity": "m3",
     "stormwater_storage_area": "m2",
     "stormwater_storage_elevation": "m",
@@ -165,6 +221,17 @@ _PARAMETER_UNITS = {
     "soil_temp_deep": "degC",
     "timearea": "-",
     "pipe_timearea": "-",
+    # a River's biochemistry (storage.py:539-558, WSIMOD's comments)
+    "uptake_PNratio": "-",
+    "denpar_w": "kg/m2/d",
+    "T_wdays": "d",
+    "halfsatINwater": "kg/m3",
+    "hsatTP": "kg/m3",
+    "limpppar": "kg/m3",
+    "prodNpar": "kg/m3/d",
+    "prodPpar": "kg/m3/d",
+    "muptNpar": "kg/m2/d",
+    "muptPpar": "kg/m2/d",
 }
 _FORCING_UNITS = {
     "precipitation": "m/d",
@@ -187,7 +254,9 @@ _SURFACE_FIELDS = {
 @dataclass
 class DayRecord:
     """What one day records (``model.py:1063-1170``), at the state the day reached, before
-    ``end_timestep``; every tensor has the day's batch shape in front.
+    ``end_timestep``; every tensor has the day's batch shape in front. ``WsimodDay`` completes
+    the record after ``end_timestep`` (D14): ``storage_end``, and ``terms``, ``dropped``,
+    ``dropped_arcs`` and ``events`` again, so what ``end_timestep`` records counts in its day.
 
     - ``arc_flow`` ``(..., n_arcs)``: each arc's ``vqip_out`` volume (``m3/d``);
       ``arc_quality`` ``(..., n_arcs, K)`` its pollutant entries.
@@ -199,14 +268,18 @@ class DayRecord:
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
     - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
       ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``dropped_arcs`` the part
-      of it lost inside a ``QueueArc``, ``storage_start`` the water
-      held in every carried store when the day began and ``storage_total`` when it was
-      recorded, all ``(..., 1 + K_additive)`` (the volume and the additive columns).
-      ``wsimod_run`` assembles the balance from them. A ``QueueTank`` push below
+      of it lost inside a ``QueueArc``, ``storage_start`` the water held in every carried
+      store when the day began, ``storage_total`` when it was recorded and ``storage_end``
+      after ``end_timestep``, all ``(..., 1 + K_additive)`` (the volume and the additive
+      columns). ``storage_end`` is ``None`` until the record is completed: a consumer at the
+      ``run_days`` yield point must not read it. ``wsimod_run`` assembles the balance from
+      them, over the window ``storage_start`` to ``storage_end`` (X8): the next day's
+      ``storage_start`` is this day's ``storage_end``. A ``QueueTank`` push below
       ``FLOAT_ACCURACY`` stays in the tank's storage, so it is not in ``dropped`` (W49); water
       pushed into a ``WWTW`` after its ``calculate_discharge`` is the term
       ``"WWTW.unprocessed_input"`` (W69).
-    - ``events``: ``{condition: (..., n_nodes) bool}`` (D13); ``maxiter``: ``{(node, method,
+    - ``events``: ``{condition: (..., n_nodes) bool}`` (D13), ``(..., n_arcs)`` for an event
+      recorded at an arc (``"decay_arc_order_unknown"``, D21); ``maxiter``: ``{(node, method,
       call index): (...) bool}``; ``decisions``: the branch records (D12) when
       ``WsimodDay.record_decisions``, else ``None``.
     """
@@ -222,6 +295,7 @@ class DayRecord:
     dropped_arcs: Tensor
     storage_total: Tensor
     storage_start: Tensor
+    storage_end: Tensor | None
     events: dict[str, Tensor]
     maxiter: dict
     decisions: list | None
@@ -333,7 +407,7 @@ class WsimodDay:
             for slot in self._slots
             if slot.key == "wsimod.storage"
             for label in [self._labels["wsimod.storage"][slot.start]]
-            if not label[1].startswith("surface:")
+            if not label[1].startswith("surface:") and self._recorded_tank(*label)
         ]
         self.surface_names = [
             (spec.name, surface.name)
@@ -348,6 +422,16 @@ class WsimodDay:
             d.key: self._driver_field(d) for d in self._drivers.values() if self._fits(d)
         }
         self.inputs = (*self._drivers, *STATE_KEYS)
+
+    def _recorded_tank(self, node: str, attribute: str) -> bool:
+        """Whether ``record_all`` reports the tank: it lists ``Tank``, ``QueueTank`` and
+        ``ResidenceTank`` by their exact class (``model.py:1123``), so a ``DecayTank`` or a
+        ``DecayQueueTank`` drops out of the ``tank_*`` results while its storage stays in the
+        state (X40)."""
+        tank = self.engine.nodes[node]
+        for part in attribute.split("."):
+            tank = getattr(tank, part)
+        return not isinstance(tank, (DecayTank, DecayQueueTank))
 
     def to(self, device=None, dtype: torch.dtype | None = None) -> WsimodDay:
         """``Model.to`` hook: the port is float64 on the CPU only (bitwise equality with
@@ -424,9 +508,12 @@ class WsimodDay:
         pollutant_columns = p.names
         for spec in network.nodes:
             node = nodes[spec.name]
+            named = node.driver_columns()
             for name, value in self._node_parameters(node).items():
                 value = _f64(value)
-                if value.ndim == 1:  # pollutant-keyed, (K,): absent without pollutants
+                if name in named:  # one value per named column (X10, X34)
+                    add(f"wsimod.{spec.cls}.{name}", spec.name, node, name, value, named[name])
+                elif value.ndim == 1:  # pollutant-keyed, (K,): absent without pollutants
                     if p.K == 0:
                         continue
                     add(
@@ -451,6 +538,12 @@ class WsimodDay:
                         value,
                         pollutant_columns if value.ndim == 1 else None,
                     )
+        if p.K:  # a user Decay* arc's decays (X34): absent in a quantity-only run
+            for spec in network.arcs:
+                arc = self.engine.arcs[spec.name]
+                if isinstance(arc, DECAY_ARCS):
+                    for name, value in arc.defaults.items():
+                        add(f"wsimod.{spec.cls}.{name}", spec.name, arc, name, value, p.names)
         for key, d in drivers.items():
             if d.columns == "time":  # time-area dicts, (n, L+1), absent keys 0 (D6)
                 width = 1 + max(max(fractions) for fractions in values[key])
@@ -477,12 +570,19 @@ class WsimodDay:
             )
         dates = network.dates
         readers = forcing_readers(network)
+        # the in_ports of the user Decay* arcs, whose temperature row a catchment has too (X29)
+        decay_ports = {
+            a.in_port.name for a in self.engine.arcs.values() if isinstance(a, DECAY_ARCS)
+        }
         for variable in _FORCING_UNITS:
-            # a catchment's pollutant series (temperature among them) are its concentrations
+            # a catchment's pollutant series (temperature among them) are its concentrations;
+            # a catchment a Decay* arc leaves also has a temperature row, the decay's (X29)
             names = [
                 n
                 for n in readers.get(variable, [])
-                if variable == "flow" or nodes[n].spec.cls != "Catchment"
+                if variable == "flow"
+                or nodes[n].spec.cls != "Catchment"
+                or (variable == "temperature" and n in decay_ports)
             ]
             if not names:
                 continue
@@ -601,6 +701,24 @@ class WsimodDay:
                     put("wsimod.travel_queue_present", node, present, rows, (length,))
                 elif path in ("liquor", "previous_pulled", "treated"):
                     put(f"wsimod.{path}", node, path, [spec.name], (width,))
+                elif path.endswith(".internal_arc.total_decayed"):
+                    # X35: the attribute path of the internal arc (D7)
+                    put("wsimod.total_decayed", node, path, [(spec.name, head)], (width,))
+                elif path in _RIVER_REGISTERS:
+                    # (river, i), slot 0 the oldest (X26)
+                    size = stores[path].shape[-1]
+                    rows = [(spec.name, i) for i in range(size)]
+                    put(_RIVER_REGISTERS[path], node, path, rows, (size,))
+                elif path.startswith("surfaces.") and last == "total_decayed":
+                    # X35: the attribute path, not "surface:<name>" (D7)
+                    surface = path.split(".")[1]
+                    put(
+                        "wsimod.total_decayed",
+                        node,
+                        path,
+                        [(spec.name, f"surfaces.{surface}")],
+                        (width,),
+                    )
         for name, arc in self.engine.arcs.items():
             if isinstance(arc, AltQueueArc):
                 length = arc.register.shape[-2]
@@ -708,9 +826,17 @@ class WsimodDay:
             trailing = d.template.shape
             rank = len(trailing)
             if value.ndim < rank or tuple(value.shape[-rank:]) != tuple(trailing):
+                # D19 is a trailing-shape check: a 3a (B, n) batch with B == n == 1 + K_add
+                # cannot be told apart from the new layout
+                hint = ""
+                if key.endswith(".liquor_multiplier"):  # D19, X10
+                    hint = (
+                        ": 3a's (..., n) layout, the volume entry alone, is gone; the columns "
+                        "are 'volume' then the additive pollutants, (..., n, 1 + K_additive)"
+                    )
                 raise ValueError(
                     f"driver {key!r} of shape {tuple(value.shape)}; expected (..., "
-                    f"{', '.join(str(x) for x in trailing)})"
+                    f"{', '.join(str(x) for x in trailing)}){hint}"
                 )
             shapes.append(value.shape[:-rank])
         return torch.broadcast_shapes(*shapes) if shapes else torch.Size(())
@@ -727,10 +853,15 @@ class WsimodDay:
             }
             if fresh:
                 node.load_stores(fresh)
+        for arc in self.engine.arcs.values():
+            if isinstance(arc, DecayArcAlt):  # a user arc's total_decayed is not carried
+                arc.total_decayed = torch.zeros((*shape, 1 + self.p.K), dtype=F64)
         for arc in [*self.engine.arcs.values(), *self._internal_arcs]:
             Arc.end_timestep(arc)
             if hasattr(arc, "_seen"):
                 arc._seen = dict.fromkeys(arc._seen, 0)
+            if hasattr(arc, "_merged"):  # a DecayArc's merged call count (D2)
+                arc._merged = 0
             arc.vqip_in = torch.broadcast_to(arc.vqip_in, (*shape, *arc.vqip_in.shape))
             arc.vqip_out = arc.vqip_in
             arc.flow_in = torch.broadcast_to(arc.flow_in, shape)
@@ -784,8 +915,12 @@ class WsimodDay:
         return out
 
     def _bind(self, drivers: Mapping, k: int) -> None:
+        """Day ``k``'s slice of every driver: the arcs' capacity and preference, then every node
+        in configuration order, then every user ``Decay*`` arc's decay (D15: an arc's
+        temperature is its ``in_port``'s bound one, so it binds after the nodes)."""
         nodes, p = self.engine.nodes, self.p
         bound: dict[str, dict[str, Tensor]] = {name: {} for name in nodes}
+        arc_bound: dict[str, dict[str, Tensor]] = {name: {} for name in self.engine.arcs}
         for key, d in self._drivers.items():
             value = _f64(drivers[key]) if key in drivers else d.template
             if d.forcing:
@@ -793,6 +928,7 @@ class WsimodDay:
             for i, (element, name) in enumerate(d.targets):
                 row = value[..., i] if d.columns is None else value[..., i, :]
                 if isinstance(element, Arc):
+                    arc_bound[element.name][name] = row
                     continue
                 bound[element.name][name] = row
         if "wsimod.Arc.capacity" in self._drivers:
@@ -811,6 +947,13 @@ class WsimodDay:
             if node.spec.cls == "Catchment" and "concentration" not in parameters:
                 parameters["concentration"] = torch.zeros(p.K, dtype=F64)
             node.bind(parameters)
+        for name, arc in self.engine.arcs.items():  # D15: after the node loop
+            if isinstance(arc, DECAY_ARCS):
+                values = arc_bound[name]
+                arc.bind_decay(
+                    values.get("decays.constant", arc.defaults["decays.constant"]),
+                    values.get("decays.exponent", arc.defaults["decays.exponent"]),
+                )
 
     def _run_plan(self, active: Tensor) -> None:
         nodes = self.engine.nodes
@@ -880,6 +1023,7 @@ class WsimodDay:
         self.last_record = self._record(ctx, storage_start)
         yield ctx
         engine.end_day()
+        self._finish_record(ctx, shape)
         self.last_call_sequence = list(ctx.sequence)
         if self.call_sequence is not None and ctx.sequence != self.call_sequence:
             pairs = zip(ctx.sequence, self.call_sequence, strict=False)
@@ -939,7 +1083,8 @@ class WsimodDay:
         """Step days ``start, start + 1, ...`` (all the remaining dates, or ``days`` of them)
         from ``state`` (default :meth:`initial_state`) with ``drivers`` (default the configured
         ones), yielding ``(day, ctx, engine)`` after each day's orchestration, record and river
-        order, before ``end_timestep``; the day's :class:`DayRecord` is ``last_record``. The
+        order, before ``end_timestep``; the day's :class:`DayRecord` is ``last_record``, whose
+        ``storage_end`` is ``None`` until the generator resumes and completes it (D14). The
         state after the last day is ``last_state``."""
         state = dict(self.initial_state() if state is None else state)
         drivers = dict(self.driver_template() if drivers is None else drivers)
@@ -1016,18 +1161,7 @@ class WsimodDay:
                 else:  # WSIMOD records no such field for this surface (model.py:1155-1167)
                     surface[f].append(nan)
             quality.append(s.storage[..., 1:])
-        additive = p.volume_or_additive_mask
         held = self._held(shape, stores)
-        events = {
-            condition: torch.stack(
-                [
-                    torch.broadcast_to(table.get(n, torch.zeros((), dtype=torch.bool)), shape)
-                    for n in self.node_names
-                ],
-                dim=-1,
-            )
-            for condition, table in ctx.events.items()
-        }
         return DayRecord(
             arc_flow=vqip_out[..., 0],
             arc_quality=vqip_out[..., 1:],
@@ -1036,11 +1170,56 @@ class WsimodDay:
             surface={f: stack(v, ()) for f, v in surface.items()},
             surface_quality=stack(quality, (p.K,)),
             terms=dict(ctx.terms),
-            dropped=torch.broadcast_to(ctx.dropped, (*shape, 1 + p.K))[..., additive],
-            dropped_arcs=torch.broadcast_to(ctx.dropped_arcs, (*shape, 1 + p.K))[..., additive],
+            dropped=self._additive(ctx.dropped, shape),
+            dropped_arcs=self._additive(ctx.dropped_arcs, shape),
             storage_total=held,
             storage_start=storage_start,
-            events=events,
+            storage_end=None,
+            events=self._events(ctx),
             maxiter=dict(ctx.maxiter),
             decisions=list(ctx.decisions) if ctx.record_decisions else None,
         )
+
+    def _additive(self, vqip: Tensor, shape: torch.Size) -> Tensor:
+        """``vqip``'s volume and additive columns at the batch shape, ``(..., 1 + K_add)``."""
+        p = self.p
+        return torch.broadcast_to(vqip, (*shape, 1 + p.K))[..., p.volume_or_additive_mask]
+
+    def event_columns(self, condition: str) -> list[str]:
+        """The elements an event's columns stand for: the nodes, or the arcs for an event
+        recorded at an arc (``arcs.ARC_EVENTS``, D21)."""
+        return self.arc_names if condition in ARC_EVENTS else self.node_names
+
+    def _events(self, ctx: Ctx) -> dict[str, Tensor]:
+        """``ctx.events`` as ``{condition: (..., n_nodes) bool}``, or ``(..., n_arcs)`` for an
+        event recorded at an arc (:meth:`event_columns`)."""
+        off = torch.zeros((), dtype=torch.bool)
+        return {
+            condition: torch.stack(
+                [
+                    torch.broadcast_to(table.get(n, off), ctx.shape)
+                    for n in self.event_columns(condition)
+                ],
+                dim=-1,
+            )
+            for condition, table in ctx.events.items()
+        }
+
+    def _finish_record(self, ctx: Ctx, shape: torch.Size) -> None:
+        """D14: complete ``last_record`` after ``end_timestep``, on the same object (``wsimod_run``
+        holds it from the yield point). ``storage_end`` is the water held now, which the next
+        day loads, so the windows meet (X8). ``terms``, ``dropped``, ``dropped_arcs`` and
+        ``events`` are snapshotted again, so what ``end_timestep`` records counts in this day
+        (D22); it records no decision and no ``maxiter``, and the record keeps those as taken.
+        ``storage_total`` keeps the record point's value (X32).
+
+        The end-of-day rule (``Engine.end_day``): ``end_timestep`` must not call ``ctx.decide``
+        or ``ctx.call``; such a call would be absent from the D2 sequence check, and this
+        re-snapshot, which takes no decision and no ``maxiter``, would miss it. Decay caps are
+        evaluated at bind (D5)."""
+        record = self.last_record
+        record.storage_end = self._held(shape, {})
+        record.terms = dict(ctx.terms)
+        record.dropped = self._additive(ctx.dropped, shape)
+        record.dropped_arcs = self._additive(ctx.dropped_arcs, shape)
+        record.events = self._events(ctx)
