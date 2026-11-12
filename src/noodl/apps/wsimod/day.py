@@ -75,8 +75,9 @@ from torch import Tensor
 
 from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, DecayArcAlt, QueueArc
 from noodl.apps.wsimod.config import WsimodNetwork
+from noodl.apps.wsimod.constants import SURFACE_DEPOSITION
 from noodl.apps.wsimod.engine import Ctx, Engine
-from noodl.apps.wsimod.land import SURFACE_DEPOSITION, month_start
+from noodl.apps.wsimod.land import month_start
 from noodl.apps.wsimod.structure import (
     check_network,
     forcing_readers,
@@ -606,13 +607,11 @@ class WsimodDay:
                 description=f"the {variable} series of the nodes that read it",
             )
         # D8: a surface's monthly data, one value per date from the first of its month
-        lands = {spec.name: spec for spec in network.nodes}
+        by_surface = {(n.name, s.name): s for n in network.nodes for s in n.surfaces}
         for variable, rows in surface_forcing_readers(network).items():
             series = [
                 [
-                    next(s for s in lands[land].surfaces if s.name == surface).data[
-                        (variable, month_start(date))
-                    ]
+                    by_surface[(land, surface)].data[(variable, month_start(date))]
                     for land, surface in rows
                 ]
                 for date in dates

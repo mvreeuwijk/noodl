@@ -40,7 +40,12 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
+from noodl.apps.wsimod.constants import (
+    DEPOSITION_SPECIES,
+    SURFACE_DEPOSITION,
+    SURFACE_INPUTS,
+    UNBOUNDED_CAPACITY,
+)
 from noodl.apps.wsimod.decay import Decay, check_inert, read_decays
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
@@ -64,8 +69,6 @@ __all__ = [
     "ImperviousSurface",
     "Land",
     "PerviousSurface",
-    "SURFACE_DEPOSITION",
-    "SURFACE_INPUTS",
     "Surface",
     "month_start",
     "surface_derived",
@@ -90,19 +93,6 @@ PERCOLATION_TYPES = ("Groundwater",)
 RUNOFF_TYPES = ("River", "Node")
 SEWER_TYPES = ("Sewer",)
 GARDEN_TAG = ("Demand", "Garden")
-# land.py:375-380, :540-576: the surface data the deposition functions read (D8)
-SURFACE_DEPOSITION = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
-# land.py:1167-1172, :1649-1710: the fertiliser and manure data a growing surface reads (3c, later)
-SURFACE_INPUTS = (
-    "nhx-fertiliser",
-    "noy-fertiliser",
-    "srp-fertiliser",
-    "nhx-manure",
-    "noy-manure",
-    "srp-manure",
-)
-# land.py:545-548, :573-576: the pollutant each deposition variable feeds
-DEPOSITION_SPECIES = {"nhx": "ammonia", "noy": "nitrate", "srp": "phosphate"}
 # land.py:753-756: state attributes, set only through the overrides
 SOIL_TEMPERATURE_DEFAULTS = {
     "soil_temp_w_prev": 0.1,

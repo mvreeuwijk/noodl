@@ -30,9 +30,11 @@ from noodl.apps.wsimod.classes import (
 )
 from noodl.apps.wsimod.constants import (
     ADDITIVE_POLLUTANTS,
+    DEPOSITION_SPECIES,
     FLOAT_ACCURACY,
     NON_ADDITIVE_POLLUTANTS,
     POLLUTANTS,
+    SURFACE_DEPOSITION,
     UNBOUNDED_CAPACITY,
 )
 from noodl.apps.wsimod.decay import DecaySpec, read_decays
@@ -698,11 +700,6 @@ def read_wsimod_config(
                 for key in load
                 if key not in pollutants.names
             )
-    from noodl.apps.wsimod.land import (  # land imports this module (through tanks)
-        DEPOSITION_SPECIES,
-        SURFACE_DEPOSITION,
-    )
-
     # land.py:375-382, :540-581 (D15, Y21): the surface data a surface never reads. Without
     # ``nhx-dry`` in the constructor's data no deposition function is built, so every variable is
     # unread; with it, a deposition of a species that is not a run pollutant is read and dropped

@@ -20,6 +20,7 @@ from __future__ import annotations
 from noodl.apps.wsimod.arcs import ARC_CLASSES, DECAY_ARCS
 from noodl.apps.wsimod.classes import NODE_SCHEMAS
 from noodl.apps.wsimod.config import WsimodNetwork
+from noodl.apps.wsimod.constants import SURFACE_DEPOSITION
 from noodl.apps.wsimod.engine import _register_all
 
 __all__ = [
@@ -343,8 +344,6 @@ def surface_forcing_readers(network: WsimodNetwork) -> dict[str, list[tuple[str,
     unread, but the readers are listed all the same: the forcing check applies in both modes
     (D9). A variable no surface reads is absent.
     """
-    from noodl.apps.wsimod.land import SURFACE_DEPOSITION
-
     readers: dict[str, list[tuple[str, str]]] = {}
     for spec in network.nodes:
         for surface in spec.surfaces:
