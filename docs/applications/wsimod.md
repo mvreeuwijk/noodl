@@ -36,9 +36,19 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 `PullArc`, `PushArc`, `SewerArc` and `WeirArc`. The soil temperature of a `PerviousSurface` is
 live (below), and so are the treatment works' pollutant treatment and the first-order decay of
 the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces, and so is a
-`River`'s biochemistry (below); the
-other processes that change a pollutant (the decay of arcs, deposition) are later sub-projects
-and are refused unless they are neutral.
+`River`'s biochemistry (below), and the user decay arcs `DecayArc` and `DecayArcAlt`. What
+still changes a pollutant and is not ported (deposition and the land's nutrient pools,
+sub-project 3c) is refused unless it is neutral.
+
+| Class | Process ported (sub-project 3b) |
+|---|---|
+| `Storage`, `Reservoir`, `RiverReservoir`, `Groundwater` | first-order decay of the tank at the end of the day, when `decays` is given (`DecayTank`) |
+| `QueueGroundwater` | the same, in a `DecayQueueTank` whose internal queue is a `DecayArcAlt` |
+| `River` | the decaying tank, and the biochemistry: temperature relaxation, denitrification, nitrogen and phosphorus production and mineralisation, macrophyte uptake, with the two lag registers as carried state |
+| `WTW`, `WWTW`, `FWTW` | the per-pollutant treatment (`process_parameters`) and liquor multipliers |
+| `Land` surfaces | decay at the land's air temperature, and the nitrite carry-over of the day's decayed ammonia and nitrite |
+| `PerviousSurface` | the soil temperature |
+| `DecayArc`, `DecayArcAlt` (user arcs) | decay of the requests in transit, at the in-port's temperature |
 
 ### Decay in the storage family
 
@@ -487,7 +497,9 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   `"wtw_negative_solids"` (an additive solids column of a treatment works is negative) and
   `"decay_arc_order_unknown"` (an end of day of a `DecayArc` found due-and-waiting rows in both
   directions, so its decayed term's order of addition may differ from WSIMOD's in the last
-  bit, D21);
+  bit, D21) and `"river_nitrogen_lost"` (a River's mineralisation with no dissolved nitrogen
+  destroyed nitrogen, X15). The arc-keyed event, `"decay_arc_order_unknown"`, is keyed by arc,
+  `(..., T, n_arcs)`, and `WsimodDay.event_columns(condition)` names the columns (X48);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
   that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
   order, per instance. The gradient tests and the parity admission rule use it;
@@ -562,9 +574,23 @@ pollutant entries, every `decays` value (nodes, surfaces and user decay arcs; th
 (`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
 and ignores it). With `pollutants=True` (the default) the same configuration is
-refused if a process that is not ported yet would change the pollutants: until the rest of 3b and
-3c, such configurations need `pollutants=False`. The
-soil temperature is not among them (it is ported); its weights are only listed as ignored.
+refused if a process that is not ported yet would change the pollutants (deposition and the
+land's nutrient pools, 3c): until then, such configurations need `pollutants=False` or a
+neutralised copy, below. The soil temperature, the treatment, the decays and the River's
+biochemistry are ported; their parameters are only listed as ignored in a quantity-only run.
+
+### The demo configurations
+
+Each demo (`tests/data/wsimod/quickstart`, `oxford`) has two configurations: `config.yml`, as
+WSIMOD saved it, and `config_no_deposition.yml`, the same configuration plus an `overrides`
+section that sets every surface's `pollutant_load` to 0 (written by
+`scripts/regenerate_wsimod_fixtures.py`). `config.yml` runs with `pollutants=False`; the second
+runs with every pollutant, every 3b process the demo contains live: on `oxford` the `FWTW`'s and
+`WWTW`'s treatment on 11 additive pollutants and the rural surface's soil temperature; on
+`quickstart` the soil temperature and the nitrite carry-over, which adds zero with empty
+`decays`. Neither demo has a non-empty `decays`, a `DecayQueueTank`, a user decay arc or a
+`River`: the purpose-built cases cover them. What still needs neutralising for 3c is each
+surface's `pollutant_load`, in both demos.
 
 ## Refusals
 
@@ -572,8 +598,9 @@ Everything that cannot run is refused by name when the model is built, where WSI
 mid-run, hang or silently do something else:
 
 - out-of-scope classes and keys (by the reader);
-- River biochemistry that WSIMOD cannot run (above); `decays` that are not ported yet (an
-  arc's); a decaying `Groundwater` or `QueueGroundwater` without a `filename` override's
+- River biochemistry that WSIMOD cannot run (above); `decays` on an arc class other than
+  `DecayArc` and `DecayArcAlt`, `decays: None` on those two, an arc override of `decays`, and a
+  `parent` on an arc; a decaying `Groundwater` or `QueueGroundwater` without a `filename` override's
   temperature; a `number_of_timesteps` override on a `QueueGroundwater` without `decays`; a
   `decays` key that is not
   a configured pollutant, an entry without exactly `constant` and `exponent`, a non-numeric
@@ -623,12 +650,18 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `WWTW.make_discharge` rejection at or below `FLOAT_ACCURACY` | a tolerance, recorded as dropped | `test_a_tiny_discharge_rejection_vanishes_and_is_recorded_as_dropped` |
 | `decays: {}` on the `Storage` family builds a `DecayTank`, which reads the temperature and decays nothing | ported; the temperature forcing is required | `test_storage_with_decays_reads_its_temperature` |
 | WSIMOD's `record_all` skips a `DecayTank` | the tank drops out of `tank_*` (X40); its storage stays in the state | `test_a_decaying_storage_decays_at_the_end_of_the_day_and_closes_the_balance` |
-| the default `decays={}` of a surface is one dict shared by every surface built without one, so an override reaches all of them | per surface | `test_a_decays_override_reaches_only_its_surface` |
 | `Surface.run` converts `total_decayed` at every call | transcribed: a second `Land.run` on one day converts the same mass twice | case `land_run_twice` |
-| `QueueGroundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, refused by name without one (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; case `decay_queue_groundwater` |
-| `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; cases `decay_queue_groundwater` and `decay_queue_groundwater_n0` |
-| River biochemistry: the "365-day" phosphorus mean adds 366 entries; every window divides by its full length from day 1; `totalphosfcn` compares a mass with concentrations; mineralisation without dissolved nitrogen destroys nitrogen | reproduced (X14); the loss is in `bio_out` and the event `"river_nitrogen_lost"` (X15) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_mineralisation_without_din_destroys_nitrogen_and_says_so`; case `river_nutrients` (the DIN-free stretch, the low-P river crossing the `totalphosfcn` guard, more than 366 days under `-m slow`) |
-| `River.calculate_discharge` assigns `bio_in`/`bio_out` (`storage.py:923-924`): a second call a day drops the first call's terms from WSIMOD's node check, which prints an error | the processes run twice as in WSIMOD; noodl's terms add both calls and its balance closes (X16, X32) | case `river_double_discharge`: WSIMOD prints on every day (the named exception to the print check, D17), noodl's balance closes within rounding (2e-16 of scale) |
+| `Groundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:154`, `:202-203`, `nodes.py:26`): a decaying one raises `TypeError` at its first end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, and a decaying `Groundwater` without one is refused by name (X11) | `test_case_runs_where_wsimod_crashes_decay_groundwater`; `test_case_matches_wsimod[decay_groundwater-quantity]` and `[decay_groundwater-pollutants]` |
+| the same in `QueueGroundwater` (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the same (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; `test_case_matches_wsimod[decay_queue_groundwater-quantity]` and `[decay_queue_groundwater-pollutants]` |
+| `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; `test_number_of_timesteps_override`; `test_case_matches_wsimod[decay_queue_groundwater_n0-quantity]` and `[decay_queue_groundwater_n0-pollutants]` |
+| `River.calculate_discharge` assigns `bio_in`/`bio_out` (`storage.py:923-924`): a second call a day drops the first call's terms from WSIMOD's node check, which prints an error | the processes run twice as in WSIMOD; noodl's terms add both calls and its balance closes (X16, X32) | `test_case_matches_wsimod[river_double_discharge-pollutants]` (WSIMOD prints on every day, the named exception to the print check, D17; noodl's balance closes within rounding, 2e-16 of scale); `test_river_double_discharge_runs_the_biochemistry_twice_a_day` |
+| River mineralisation with `din = 0` (`storage.py:866-873`) destroys the mineralised nitrogen | reproduced (X14, X15); the loss is in `bio_out` and the event `"river_nitrogen_lost"` says so | `test_mineralisation_without_din_destroys_nitrogen_and_says_so`; `test_case_matches_wsimod[river_nutrients-pollutants]` (the DIN-free stretch) |
+| the River's "365-day" phosphorus mean adds 366 entries and divides by 365; every window divides by its full length from day 1 (cold start) | reproduced (X14) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_case_matches_wsimod[river_nutrients-pollutants]` |
+| `totalphosfcn` compares the River's phosphorus mass (kg) with the concentrations `limpppar` and `hsatTP` (kg/m3) | reproduced and documented: the evident fix has no single form (X14) | `test_river_nutrients_reaches_every_branch` (`-m slow`: both `totalphosfcn` outcomes of the low-P river, in the first 400 days and over 1100) |
+| no check of a decay's or a treatment's `exponent` (`core.py:513-515`, `wtw.py:191-193`): `0 ** negative` raises `ZeroDivisionError`, a negative base gives a complex number | an `exponent` of 0 or below is refused by name | `test_read_decays_refusals[decays2-exponent]` and the other nine refusals of that test; `test_wtw_treatment_refusals` (9 refusals) |
+| `decays` may name `volume` (`core.py:510-519`): the water itself would decay | refused by name | `test_read_decays_refusals[decays0-volume]` |
+| the default `decays={}` of a surface is one dict shared by every surface built without one, so an override reaches all of them | per surface | `test_a_decays_override_reaches_only_its_surface` |
+| `Surface.run` converts `total_decayed` at every call: a second `Land.run` on one day converts the same mass twice | transcribed (X16) | `test_case_matches_wsimod[land_run_twice-quantity]` and `[land_run_twice-pollutants]` |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
@@ -641,11 +674,17 @@ returns the water and balances. WSIMOD's `NonResidentialDemand` raises `Recursio
 
 - **Learnable.** Every numeric parameter (`"wsimod.<Class>.<parameter>"`), the arcs' capacities
   and preferences, the forcing series and the initial stores may require grad. The gradient
-  tests check 22 of them: arc capacity and preference, groundwater and land residence times,
-  impervious and pervious surface coefficients, `ihacres_p`, river `mrf` and `velocity`, a
-  sewer's time-area fractions, `Distribution.leakage`, the `WWTW` and `FWTW` throughput
-  capacities, `ResidentialDemand.per_capita`, a demand's `pollutant_load`, a catchment's flow and
-  concentration, precipitation and an initial storage.
+  tests check 49 of them. From 3a, 22: arc capacity and preference, groundwater and land
+  residence times, impervious and pervious surface coefficients, `ihacres_p`, river `mrf` and
+  `velocity`, a sewer's time-area fractions, `Distribution.leakage`, the `WWTW` and `FWTW`
+  throughput capacities, `ResidentialDemand.per_capita`, a demand's `pollutant_load`, a
+  catchment's flow and concentration, precipitation and an initial storage. From 3b, 27: the
+  decay `constant` and `exponent` of a `Storage`, a `RiverReservoir`, a `QueueGroundwater`
+  (`DecayQueueTank`) and a `DecayArc`; the temperature forcing through a decay and through the
+  treatment; the `WWTW`'s `process_parameters` (`constant`, `exponent`) and `liquor_multiplier`;
+  the three soil-temperature weights; and, through the River's biochemistry, `denpar_w`,
+  `halfsatINwater`, `prodNpar`, `muptNpar`, `T_wdays` and the air temperature, each read through
+  the nitrate and the organic-nitrogen outputs.
 - **Structural.** The topology, the classes, the pollutant lists, the orchestration, the travel
   times (whole days: they size the queues) and whether a `Distribution` has leakage at all
   (WSIMOD decorates its handlers only then) are fixed when the model is built.
@@ -658,9 +697,13 @@ returns the water and balances. WSIMOD's `NonResidentialDemand` raises `Recursio
   `diagnostics["decisions"]`) says how near a run is to such a point. A residence time near
   one day leaves a recession tail of about 1e-9 that a central difference sees as a kink.
 
-Against central differences at a relative step of 1e-6, all 22 gradients agree within 5.9e-8
+Against central differences at a relative step of 1e-6, all 49 gradients agree within 1.5e-7
 relative (the tolerance is 1e-6), and the `"decisions"` outcomes of the two perturbed runs are
-identical. The tests move a point off a kink where the default one lies on it (the preference
+identical. The worst are the River's (`T_wdays [nitrate]` 1.5e-7, `halfsatINwater [nitrate]`
+1.0e-7 and `denpar_w [org-nitrogen]` 6.8e-8, small gradients through 120 days of two rivers),
+then `Sewer.pipe_timearea` 5.9e-8; the decay entries are within 9e-10, the treatment ones within
+1.3e-10 and the soil-temperature weights within 1.7e-8. The `window_sum` of the River's
+registers carries the plain sum's gradient (X55). The tests move a point off a kink where the default one lies on it (the preference
 1.0 to 1.37, the surface residence time 1 to 3), and say so.
 
 ## Batches
@@ -680,14 +723,28 @@ Autograd is on only when a state or driver tensor requires grad (W9); otherwise 
 benchmark (`benchmarks/wsimod_run.py`) times 60 days with `wsimod.Arc.capacity` requiring grad
 and counts the autograd nodes behind the last day's storage:
 
-| Demo (quantity only) | Batch | `no_grad`, s/day | grad, s/day | Autograd nodes (60 days) |
+| Demo | Batch | `no_grad`, s/day | grad, s/day | Autograd nodes (60 days) |
 |---|---|---|---|---|
-| quickstart | 1 | 0.0185 | 0.0259 | 240,999 |
-| quickstart | 10 | 0.0186 | 0.0307 | 240,999 |
-| quickstart | 100 | 0.0189 | 0.0309 | 240,999 |
-| oxford | 1 | 0.0695 | 0.1053 | 936,765 |
-| oxford | 10 | 0.0707 | 0.1101 | 936,765 |
-| oxford | 100 | 0.0720 | 0.1153 | 936,765 |
+| quickstart (quantity only) | 1 | 0.0468 | 0.0888 | 240,999 |
+| quickstart | 10 | 0.0706 | 0.0922 | 240,999 |
+| quickstart | 100 | 0.0711 | 0.0986 | 240,999 |
+| oxford (quantity only) | 1 | 0.2776 | 0.3720 | 936,765 |
+| oxford | 10 | 0.2751 | 0.3759 | 936,765 |
+| oxford | 100 | 0.2810 | 0.3948 | 936,765 |
+| oxford, `config_no_deposition.yml`, pollutants | 1 | 0.2843 | 0.3892 | 942,436 |
+| oxford, pollutants | 10 | 0.3012 | 0.4161 | 942,436 |
+| oxford, pollutants | 100 | 0.3317 | 0.4400 | 942,436 |
+
+**These times were measured on a shared machine** (other jobs were running, every figure is 2.6
+to 3.9 times its unloaded value). The unloaded medians, measured before 3b on the same machine
+(quantity only), were, no grad / grad in s/day: quickstart 0.0179 / 0.0255 (batch 1), 0.0187 /
+0.0283 (10), 0.0188 / 0.0289 (100); oxford 0.0709 / 0.1070, 0.0723 / 0.1115, 0.0725 / 0.1179.
+The pollutant rows were not measured unloaded. What the shared run does show, because the rows
+ran back to back, is the cost of 3b's processes on `oxford`: the pollutant run takes 1.02 to
+1.18 times the quantity-only run (no grad) and 1.05 to 1.12 times (grad), and its graph is 0.6 %
+larger (942,436 nodes against 936,765). Oxford has no `River`; the `river_nutrients` case (two rivers with the biochemistry) runs 400
+days in about 3 s unloaded, so the biochemistry is not free, and a model with many rivers costs
+more.
 
 That is about 4,000 nodes a day for `quickstart` and 15,600 for `oxford`, independent of the
 batch, which only widens the tensors. Gradients through the full 1,456 days of `oxford` would
@@ -697,20 +754,21 @@ one measurement on the development machine; no budget is asserted. The per-insta
 arithmetic that keeps the result bitwise equal to WSIMOD's (`pow_half`, `exp_python` and
 `pow_python`: `** 0.5`, `exp` and `**` per instance, in a loop over the batch) costs time
 proportional to the batch; on these demos it is small next to the many small tensor operations
-of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad) or 10 % to 19 %
-(grad).
+of the day, and in the shared run above a batch of 100 costs 1 % to 6 % more than a batch of 1 on
+`oxford` (no grad, grad), 17 % and 13 % more with pollutants. On `quickstart` the batch-1 time
+is the outlier (0.0468 against 0.0706 at batch 10, no grad: noise from the other jobs; the
+unloaded medians differ by 5 %).
 
 ## Limitations
 
-- **Sub-projects 3b and 3c.** The processes that change a pollutant (the
-  decay of arcs, deposition, the land's nutrient pools, `GrowingSurface`, the garden and
+- **Sub-project 3c.** The processes that change a pollutant (deposition, the land's nutrient pools, `GrowingSurface`, the garden and
   irrigation surfaces) are refused unless neutral. The soil temperature, the treatment works'
   pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
-  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until the rest of 3b, a real configuration needs `pollutants=False`.
+  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with surface deposition or nutrient pools needs `pollutants=False` or neutralised loads.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:
-  `oxford` takes about 0.07 s a day without gradients.
+  `oxford` takes about 0.07 s a day without gradients (unloaded; pollutants add a few per cent).
 - **The closure is not re-entrant.** One `WsimodDay` holds one engine that every step reuses, so
   two steps of one model must not run at once (threads, or a step that calls another).
 - **`Model.to`.** `model.to(dtype=torch.float64)` (or a CPU device) works and changes nothing
@@ -759,24 +817,31 @@ has to be debugged, not admitted.
   run's exactly (`torch.equal`). The River biochemistry cases: `river_nutrients` runs its first
   400 days by default and all 1100 under `-m slow`, when the decisions are recorded and every
   branch is asserted (X39, D24); `river_double_discharge` runs its 40 days by default.
-- **Crashes** (`test_case_runs_where_wsimod_crashes_*`): the three cases where WSIMOD raises
-  (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`, `nonresidential_demand`) run in
-  noodl, finite and balanced.
-- **Gradients** (`tests/verification/test_wsimod_gradients.py`): 22 parameters, central
-  differences at a relative step of 1e-6, the two perturbed runs' decision outcomes identical.
-  The worst relative disagreement is 5.9e-8 (`Sewer.pipe_timearea`; then `River.mrf` 3.6e-8
-  and `Land.surface_residence_time` 1.1e-8), against a tolerance of 1e-6; the other 19 are
-  within 4e-9. Six of the quickstart ones (200 days) are `-m slow`.
+- **Crashes** (`test_case_runs_where_wsimod_crashes_*`): five cases where WSIMOD raises. Three
+  run in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,
+  `nonresidential_demand`). For the other two, a decaying `Groundwater` and `QueueGroundwater`
+  without a `filename` override (`decay_groundwater`, `decay_queue_groundwater`), noodl refuses by
+  name where WSIMOD raises `TypeError`; with the override both run and agree bitwise.
+- **Gradients** (`tests/verification/test_wsimod_gradients.py`): 49 entries (22 from 3a, 27 from
+  3b), central differences at a relative step of 1e-6, the two perturbed runs' decision outcomes
+  identical. The worst relative disagreement is 1.5e-7 (`River.T_wdays [nitrate]`; then
+  `River.halfsatINwater [nitrate]` 1.0e-7, `River.denpar_w [org-nitrogen]` 6.8e-8, `Sewer.pipe_timearea`
+  5.9e-8 and `River.mrf` 3.6e-8) against a tolerance of 1e-6. Nineteen of the 49 are `-m slow`:
+  the six quickstart ones (200 days), two soil weights and eleven of the River's (120 days of two
+  rivers, 10 s and more each); each 3b family keeps its cheapest entry in the default selection,
+  and a mutation of `pow_python` or of `window_sum` fails a default entry. The 49 take 229 s
+  with `-n 4` on a shared machine.
 
 | Run | Days | Modes | Worst difference | Default | Time (`-n 4`) |
 | --- | --- | --- | --- | --- | --- |
 | quickstart | 1456 | quantity-only, pollutant mode | 0 | yes | 41 s, 38 s |
 | oxford | 365 | quantity-only, pollutant mode | 0 | yes | 36 s, 37 s |
 | oxford | 1456 | quantity-only, pollutant mode | 0 | `-m slow` | 142 s, 146 s |
-| 47 cases | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
+| 47 cases (the 3a ones and the decay, treatment, soil-temperature and surface cases of 3b) | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
 | `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s a mode |
 | `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | about 10 s a mode unloaded (22 s, 27 s and 31 s for the branch assertions measured on a shared machine) |
-| 22 gradients | 3 to 200 | quantity-only | 5.9e-8 relative | 16 of 22 (six `-m slow`) | |
+| `river_double_discharge` | 40 | quantity-only, all pollutants | 0 (WSIMOD's own balance prints on every day; noodl's closes within 2e-16 of scale) | yes | |
+| 49 gradients | 1 to 200 | quantity-only values, pollutant runs | 1.5e-7 relative | 30 of 49 (19 `-m slow`) | 229 s in all |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
 pollutant mode runs `config_no_deposition.yml` (an `overrides` section that sets the surfaces'
@@ -787,8 +852,9 @@ cases cover those classes, with the ties kept independent. WSIMOD's source files
 modified; the committed forcing is WSIMOD's (BSD-3, `tests/data/wsimod/LICENSE-WSIMOD`).
 
 **Suite composition.** The wsimod row of the test table (the default selection) takes
-about 315 s with `-n 4` on an unloaded machine (5,798 tests; 11 to 15 min were measured while
-the machine was shared), within the 10-minute budget. One case is cut
+about 315 s with `-n 4` on an unloaded machine (5,798 tests, measured in Task 13), within the 10-minute
+budget. At the end of 3b, with the machine shared and every item 2 to 3 times slower (the four
+demo parity items 91 to 97 s each), the row took 675 s (11 min 14 s, 5,835 tests); earlier shared runs took 11 to 15 min. One case is cut
 (X39): `river_nutrients` runs 400 of its 1100 days by default, which already turns its 366-slot
 register over and holds every branch; its default items take about 3 s a mode (with the register
 sums as CPython's own `sum`, X55; 8 s before), and the 1100-day run with the branch assertions

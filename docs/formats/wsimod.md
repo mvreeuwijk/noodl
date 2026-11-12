@@ -163,6 +163,13 @@ compute derived quantities.
   `soil_temp_w_deep`, `soil_temp_deep`) are state attributes in WSIMOD, not constructor keywords.
   They are stored in `SurfaceSpec.parameters` all the same, which is where the model builder
   reads them.
+- A `River`'s biochemistry parameters are set by overrides: `uptake_PNratio`, `denpar_w`,
+  `T_wdays`, `halfsatINwater`, `hsatTP`, `limpppar`, `prodNpar`, `prodPpar`, `muptNpar`,
+  `muptPpar` (numbers; the defaults are WSIMOD's), and the structural `max_temp_lag` and
+  `max_phosphorus_lag` (whole numbers: the sizes of the two lag registers). `bulk_density` is
+  accepted and never read (`WsimodNetwork.unread`). The biochemistry runs when `nitrate` is among
+  the pollutants and needs `temperature`, `phosphate`, `org-phosphorus`, `ammonia`, `nitrate` and
+  `org-nitrogen`; `T_wdays` of 0, a river of zero area and `halfsatINwater <= 0` are refused.
 - A `QueueGroundwater` override of `number_of_timesteps` (a key of its tank, not a
   constructor keyword of the node) is accepted on a node with `decays`: it sets the
   `DecayQueueTank`'s and its internal arc's (`tanks.py:682-685`), for example to 0 instead of
@@ -193,4 +200,4 @@ WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own 
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
 and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
-(deposition) needs `pollutants=False` until sub-projects 3b and 3c. See the [WSIMOD application](../applications/wsimod.md).
+(deposition, the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config_no_deposition.yml` neutralises the surfaces' `pollutant_load` and runs every ported process. See the [WSIMOD application](../applications/wsimod.md).

@@ -1,7 +1,9 @@
 """WSIMOD application demonstration: time per day and autograd graph size of `WsimodDay`.
 
 Runs WSIMOD's two demos, `quickstart` and `oxford` (`tests/data/wsimod/`, quantity-only,
-`pollutants=False`), for 60 days at batch sizes 1, 10 and 100. The batch is the leading
+`pollutants=False`), for 60 days at batch sizes 1, 10 and 100, and then `oxford` once more on
+`config_no_deposition.yml` with `pollutants=True`, where every sub-project 3b process is live
+(decay, treatment, the soil temperature; oxford has no `River`). The batch is the leading
 dimension of `wsimod.Arc.capacity` (every instance has the same value, so every instance takes
 the same branches: the cost measured is the batch's tensor width, not divergence). Two rows per
 configuration:
@@ -55,9 +57,12 @@ def graph_size(root: torch.Tensor) -> int:
     return len(seen)
 
 
-def run(name: str, batch: int, *, grad: bool) -> tuple[float, int]:
+def run(
+    name: str, batch: int, *, grad: bool, pollutants: bool = False, config: str = "config.yml"
+) -> tuple[float, int]:
     """`(seconds per day, autograd nodes)` of a `DAYS`-day run at `batch` instances."""
-    model, _, _ = build_model(read_wsimod_config(DATA / name), pollutants=False)
+    network = read_wsimod_config(DATA / name, config_name=config)
+    model, _, _ = build_model(network, pollutants=pollutants)
     state = initial_state(model)
     base = initial_drivers(model)["wsimod.Arc.capacity"]
     capacity = base.expand(batch, *base.shape).clone().requires_grad_(grad)
@@ -72,13 +77,15 @@ def run(name: str, batch: int, *, grad: bool) -> tuple[float, int]:
 
 
 def main() -> None:
-    print(f"{DAYS}-day runs, pollutants=False; seconds per day, autograd nodes (grad rows)")
-    print(f"{'demo':<11}{'batch':>6}{'no grad s/day':>15}{'grad s/day':>13}{'graph nodes':>13}")
-    for name in DEMOS:
+    print(f"{DAYS}-day runs; seconds per day, autograd nodes (grad rows)")
+    print(f"{'demo':<22}{'batch':>6}{'no grad s/day':>15}{'grad s/day':>13}{'graph nodes':>13}")
+    rows = [(name, name, False, "config.yml") for name in DEMOS]
+    rows.append(("oxford", "oxford+pollutants", True, "config_no_deposition.yml"))
+    for name, label, pollutants, config in rows:
         for batch in BATCHES:
-            plain, _ = run(name, batch, grad=False)
-            taped, nodes = run(name, batch, grad=True)
-            print(f"{name:<11}{batch:>6}{plain:>15.4f}{taped:>13.4f}{nodes:>13}")
+            plain, _ = run(name, batch, grad=False, pollutants=pollutants, config=config)
+            taped, nodes = run(name, batch, grad=True, pollutants=pollutants, config=config)
+            print(f"{label:<22}{batch:>6}{plain:>15.4f}{taped:>13.4f}{nodes:>13}")
 
 
 if __name__ == "__main__":
