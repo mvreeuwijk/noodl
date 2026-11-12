@@ -663,3 +663,133 @@ def test_the_evaporation_clamp_residual_is_wsimods_printed_node_gap(mode):
     assert len(printed) == int(event.sum()) > 5
     bound = 1e-12 * CASES["evaporation_clamp"].scale
     assert float((ours - torch.tensor(printed, dtype=torch.float64)).abs().max()) <= bound
+
+
+# --- the contiguous window (X8, X32, D14, D22) -------------------------------------------------
+def _completed_records(day, **kw) -> list:
+    """Every day's :class:`DayRecord`, read after the generator resumed (D14)."""
+    return [day.last_record for _ in day.run_days(**kw)]
+
+
+@pytest.mark.parametrize(("name", "mode"), RUN_CASES)
+def test_consecutive_balance_windows_meet(name, mode):
+    """X8: a day's window ends at the state ``end_timestep`` leaves, which is the next day's
+    loaded state, so consecutive windows meet exactly."""
+    model, _, _ = _case(name, mode)
+    records = _completed_records(model.wsimod_day)
+    assert len(records) == CASES[name].days
+    for d in range(len(records) - 1):
+        assert torch.equal(records[d + 1].storage_start, records[d].storage_end), (name, d)
+
+
+@pytest.mark.parametrize(("name", "mode"), RUN_CASES)
+def test_end_timestep_records_no_decision_and_no_maxiter(name, mode):
+    """D22: ``end_timestep`` records no decision and no ``maxiter``; a later one that does
+    fails here, and ``_finish_record`` would have to re-snapshot it."""
+    model, _, _ = _case(name, mode)
+    day = model.wsimod_day
+    day.record_decisions = True
+    seen = []
+    try:
+        for _, ctx, _ in day.run_days():
+            seen.append((ctx, len(ctx.decisions), dict(ctx.maxiter)))
+    finally:
+        day.record_decisions = False
+    assert len(seen) == CASES[name].days
+    for ctx, decisions, maxiter in seen:
+        assert decisions > 0 and len(ctx.decisions) == decisions
+        assert ctx.maxiter.keys() == maxiter.keys()
+        assert all(ctx.maxiter[site] is maxiter[site] for site in maxiter)
+
+
+def test_storage_end_is_unset_at_the_yield_point():
+    """D14: ``run_days`` yields before ``end_timestep``; ``storage_end`` is ``None`` there and
+    set, on the same record, when the generator resumes."""
+    model, _, _ = _small()
+    day = model.wsimod_day
+    records = []
+    for _ in day.run_days(days=3):
+        assert day.last_record.storage_end is None
+        records.append(day.last_record)
+    assert all(r.storage_end is not None for r in records)
+    assert all(r.storage_end.shape == r.storage_total.shape for r in records)
+
+
+def test_storage_total_keeps_its_meaning():
+    """X32: ``storage_total`` is still the water held at the record point, before
+    ``end_timestep``; ``storage_end`` is the water held after it."""
+    model, _, _ = _case("user_alt_queue_arc")
+    day = model.wsimod_day
+    records, held = [], []
+    for _, ctx, _ in day.run_days():
+        held.append(day._held(ctx.shape, {}))
+        records.append(day.last_record)
+    for record, value in zip(records, held, strict=True):
+        assert torch.equal(record.storage_total, value)
+
+
+def _remove_one_cubic_metre(node) -> None:
+    """``node``'s ``end_timestep`` takes 1 m³ out of its tank, at the tank's concentration, and
+    records it as the out-term ``"Test.removed"`` and the event ``"test_event"``."""
+    from noodl.apps.wsimod.vqip import extract_vqip, v_change_vqip
+
+    original = node.end_timestep
+
+    def end_timestep():
+        p, ctx, tank = node.p, node.ctx, node.tank
+        removed = v_change_vqip(p, tank.storage, torch.tensor(1.0, dtype=torch.float64))
+        removed = torch.cat([torch.ones_like(removed[..., :1]), removed[..., 1:]], dim=-1)
+        tank.storage = extract_vqip(p, tank.storage, removed)
+        ctx.term("Test.removed", removed, torch.ones(ctx.shape, dtype=torch.bool))
+        ctx.event("test_event", node.name, torch.ones(ctx.shape, dtype=torch.bool))
+        original()
+
+    node.end_timestep = end_timestep
+    node.mass_balance = {**type(node).mass_balance, "Test.removed": "out"}
+
+
+def test_a_term_recorded_at_the_end_of_the_day_counts_in_that_day():
+    """X8: a term recorded during ``end_timestep`` belongs to the day it was recorded on, and
+    the water it carries leaves inside that day's window."""
+    model, state, drivers = _case("storage_distribute")
+    day = model.wsimod_day
+    node = day.engine.nodes["res"]
+    _remove_one_cubic_metre(node)
+    diagnostics: dict = {}
+    results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
+    balance = results.mass_balance
+    days = CASES["storage_distribute"].days
+    assert torch.equal(balance.terms["Test.removed"][:, 0], torch.ones(days, dtype=torch.float64))
+    scale = CASES["storage_distribute"].scale
+    assert float(balance.residual.abs().max()) <= 1e-12 * scale
+    fired = diagnostics["events"]["test_event"][:, day.node_names.index("res")]
+    assert bool(fired.all())
+
+
+def _arc_term(arc, name: str) -> None:
+    """``arc``'s ``end_timestep`` records 1 m³ of nothing as the term ``name``."""
+    original = arc.end_timestep
+
+    def end_timestep():
+        ctx = arc.ctx
+        vqip = torch.zeros((*ctx.shape, 1 + arc.p.K), dtype=torch.float64)
+        vqip[..., 0] = 1.0
+        ctx.term(name, vqip, torch.ones(ctx.shape, dtype=torch.bool))
+        original()
+
+    arc.end_timestep = end_timestep
+
+
+def test_an_arc_term_needs_a_declared_direction():
+    """Arcs declare their terms as nodes do (``Arc.mass_balance``): an undeclared one is
+    refused by name, a declared one counts in the balance."""
+    model, state, drivers = _small()
+    arc = next(iter(model.wsimod_day.engine.arcs.values()))
+    _arc_term(arc, "TestArc.made")
+    with pytest.raises(RuntimeError, match="TestArc.made"):
+        wsimod_run(model, state, drivers)
+    arc.mass_balance = {"TestArc.made": "in"}
+    balance = wsimod_run(model, state, drivers).mass_balance
+    assert torch.equal(balance.terms["TestArc.made"][:, 0], torch.ones(10, dtype=torch.float64))
+    # 1 m³ a day counted in with no water behind it: the residual is that 1 m³
+    assert float((balance.residual[:, 0] - 1.0).abs().max()) <= 1e-12

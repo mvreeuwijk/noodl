@@ -254,6 +254,15 @@ water below `FLOAT_ACCURACY`; and `terms["WWTW.unprocessed_input"]`, the water p
 in the tank's storage and never enters its queue, so it is storage and not a drop. Per-day
 values (a `Demand`'s totals, a `Land`'s running flows) are terms, not storage.
 
+**The balance window.** A day's window runs from the state it loads to the state it leaves
+after `end_timestep`, the state the next day loads, so consecutive windows meet exactly and
+nothing happens between two days' balances. A term recorded during `end_timestep` counts in
+its day. The day's record (`WsimodDay.last_record`, a `DayRecord`) holds `storage_start`, the
+water held when the day began; `storage_total`, the water held at the record point, before
+`end_timestep`, where WSIMOD records; and `storage_end`, the water held after `end_timestep`,
+which the balance uses. `storage_end` is set when the day completes: at the yield point of
+`WsimodDay.run_days`, which comes before `end_timestep`, it is still `None`.
+
 The residual closes to rounding on every day, with one known gap, and one rule for it: a
 `Land`'s outflow in WSIMOD's balance is IHACRES's evaporation, and when the soil cannot supply
 it `evaporate` removes less (the `"inaccurate_evaporation"` event). On every day the residual

@@ -189,7 +189,9 @@ _SURFACE_FIELDS = {
 @dataclass
 class DayRecord:
     """What one day records (``model.py:1063-1170``), at the state the day reached, before
-    ``end_timestep``; every tensor has the day's batch shape in front.
+    ``end_timestep``; every tensor has the day's batch shape in front. ``WsimodDay`` completes
+    the record after ``end_timestep`` (D14): ``storage_end``, and ``terms``, ``dropped``,
+    ``dropped_arcs`` and ``events`` again, so what ``end_timestep`` records counts in its day.
 
     - ``arc_flow`` ``(..., n_arcs)``: each arc's ``vqip_out`` volume (``m3/d``);
       ``arc_quality`` ``(..., n_arcs, K)`` its pollutant entries.
@@ -201,10 +203,13 @@ class DayRecord:
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
     - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
       ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``dropped_arcs`` the part
-      of it lost inside a ``QueueArc``, ``storage_start`` the water
-      held in every carried store when the day began and ``storage_total`` when it was
-      recorded, all ``(..., 1 + K_additive)`` (the volume and the additive columns).
-      ``wsimod_run`` assembles the balance from them. A ``QueueTank`` push below
+      of it lost inside a ``QueueArc``, ``storage_start`` the water held in every carried
+      store when the day began, ``storage_total`` when it was recorded and ``storage_end``
+      after ``end_timestep``, all ``(..., 1 + K_additive)`` (the volume and the additive
+      columns). ``storage_end`` is ``None`` until the record is completed: a consumer at the
+      ``run_days`` yield point must not read it. ``wsimod_run`` assembles the balance from
+      them, over the window ``storage_start`` to ``storage_end`` (X8): the next day's
+      ``storage_start`` is this day's ``storage_end``. A ``QueueTank`` push below
       ``FLOAT_ACCURACY`` stays in the tank's storage, so it is not in ``dropped`` (W49); water
       pushed into a ``WWTW`` after its ``calculate_discharge`` is the term
       ``"WWTW.unprocessed_input"`` (W69).
@@ -224,6 +229,7 @@ class DayRecord:
     dropped_arcs: Tensor
     storage_total: Tensor
     storage_start: Tensor
+    storage_end: Tensor | None
     events: dict[str, Tensor]
     maxiter: dict
     decisions: list | None
@@ -893,6 +899,7 @@ class WsimodDay:
         self.last_record = self._record(ctx, storage_start)
         yield ctx
         engine.end_day()
+        self._finish_record(ctx, shape)
         self.last_call_sequence = list(ctx.sequence)
         if self.call_sequence is not None and ctx.sequence != self.call_sequence:
             pairs = zip(ctx.sequence, self.call_sequence, strict=False)
@@ -952,7 +959,8 @@ class WsimodDay:
         """Step days ``start, start + 1, ...`` (all the remaining dates, or ``days`` of them)
         from ``state`` (default :meth:`initial_state`) with ``drivers`` (default the configured
         ones), yielding ``(day, ctx, engine)`` after each day's orchestration, record and river
-        order, before ``end_timestep``; the day's :class:`DayRecord` is ``last_record``. The
+        order, before ``end_timestep``; the day's :class:`DayRecord` is ``last_record``, whose
+        ``storage_end`` is ``None`` until the generator resumes and completes it (D14). The
         state after the last day is ``last_state``."""
         state = dict(self.initial_state() if state is None else state)
         drivers = dict(self.driver_template() if drivers is None else drivers)
@@ -1029,18 +1037,7 @@ class WsimodDay:
                 else:  # WSIMOD records no such field for this surface (model.py:1155-1167)
                     surface[f].append(nan)
             quality.append(s.storage[..., 1:])
-        additive = p.volume_or_additive_mask
         held = self._held(shape, stores)
-        events = {
-            condition: torch.stack(
-                [
-                    torch.broadcast_to(table.get(n, torch.zeros((), dtype=torch.bool)), shape)
-                    for n in self.node_names
-                ],
-                dim=-1,
-            )
-            for condition, table in ctx.events.items()
-        }
         return DayRecord(
             arc_flow=vqip_out[..., 0],
             arc_quality=vqip_out[..., 1:],
@@ -1049,11 +1046,42 @@ class WsimodDay:
             surface={f: stack(v, ()) for f, v in surface.items()},
             surface_quality=stack(quality, (p.K,)),
             terms=dict(ctx.terms),
-            dropped=torch.broadcast_to(ctx.dropped, (*shape, 1 + p.K))[..., additive],
-            dropped_arcs=torch.broadcast_to(ctx.dropped_arcs, (*shape, 1 + p.K))[..., additive],
+            dropped=self._additive(ctx.dropped, shape),
+            dropped_arcs=self._additive(ctx.dropped_arcs, shape),
             storage_total=held,
             storage_start=storage_start,
-            events=events,
+            storage_end=None,
+            events=self._events(ctx),
             maxiter=dict(ctx.maxiter),
             decisions=list(ctx.decisions) if ctx.record_decisions else None,
         )
+
+    def _additive(self, vqip: Tensor, shape: torch.Size) -> Tensor:
+        """``vqip``'s volume and additive columns at the batch shape, ``(..., 1 + K_add)``."""
+        p = self.p
+        return torch.broadcast_to(vqip, (*shape, 1 + p.K))[..., p.volume_or_additive_mask]
+
+    def _events(self, ctx: Ctx) -> dict[str, Tensor]:
+        """``ctx.events`` as ``{condition: (..., n_nodes) bool}``."""
+        off = torch.zeros((), dtype=torch.bool)
+        return {
+            condition: torch.stack(
+                [torch.broadcast_to(table.get(n, off), ctx.shape) for n in self.node_names],
+                dim=-1,
+            )
+            for condition, table in ctx.events.items()
+        }
+
+    def _finish_record(self, ctx: Ctx, shape: torch.Size) -> None:
+        """D14: complete ``last_record`` after ``end_timestep``, on the same object (``wsimod_run``
+        holds it from the yield point). ``storage_end`` is the water held now, which the next
+        day loads, so the windows meet (X8). ``terms``, ``dropped``, ``dropped_arcs`` and
+        ``events`` are snapshotted again, so what ``end_timestep`` records counts in this day
+        (D22); it records no decision and no ``maxiter``, and the record keeps those as taken.
+        ``storage_total`` keeps the record point's value (X32)."""
+        record = self.last_record
+        record.storage_end = self._held(shape, {})
+        record.terms = dict(ctx.terms)
+        record.dropped = self._additive(ctx.dropped, shape)
+        record.dropped_arcs = self._additive(ctx.dropped_arcs, shape)
+        record.events = self._events(ctx)

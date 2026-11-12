@@ -9,7 +9,7 @@ so capacity is served first come, first served (spec, Protocol). Every call take
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from torch import Tensor
@@ -53,6 +53,9 @@ class Arc:
     ctx: Ctx
     # the stores carried from one day to the next (the keys of :meth:`stores`)
     carried_paths: tuple[str, ...] = ()
+    # the mass-balance terms the arc records (``Ctx.term``) with their side, ``"in"`` or
+    # ``"out"``, as ``Node.mass_balance`` (D11); ``run._balance`` collects both
+    mass_balance: ClassVar[dict[str, str]] = {}
 
     def __init__(self, spec: ArcSpec, in_port: Node, out_port: Node, pollutants: Pollutants):
         self.spec = spec

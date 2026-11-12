@@ -28,8 +28,11 @@ percolation push-back, the ``WWTW`` storm-tank rejection and ``make_discharge`` 
 ``Sewer`` ponded water) and ``"WWTW.unprocessed_input"`` (water pushed into a ``WWTW`` after its
 ``calculate_discharge``, which vanishes at ``end_timestep_``, W69). A push below
 ``FLOAT_ACCURACY`` into a ``QueueTank`` stays in its ``storage``, so it is storage, not a drop
-(W49). Arc terms cancel and are not listed. ``storage_change`` is the carried stores' water
-at the record point less at the start of the day; per-day values (``Demand``/``WTW`` totals,
+(W49). Arc flows cancel and are not listed; an arc's own terms are declared on its
+``mass_balance``, as a node's. ``storage_change`` is the carried stores' water after
+``end_timestep`` less at the start of the day (X8): the window runs from the state the day
+loads to the state it dumps, so consecutive windows meet and what ``end_timestep`` records
+counts in its day. Per-day values (``Demand``/``WTW`` totals,
 ``Land`` per-day flows and running balances) are not storage (W75). All are ``(..., T, 1 +
 K_additive)``: the volume, then the additive pollutants' masses. ``residual = inflow - outflow
 - storage_change`` and closes to rounding, apart from one known gap. One rule holds on every
@@ -138,8 +141,8 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
     p = day.p
     additive = p.volume_or_additive_mask
     direction: dict[str, str] = {}
-    for node in day.engine.nodes.values():
-        direction.update(node.mass_balance)
+    for element in [*day.engine.nodes.values(), *day.engine.arcs.values(), *day._internal_arcs]:
+        direction.update(element.mass_balance)
     keys: list[str] = []
     for record in records:
         keys.extend(k for k in record.terms if k not in keys)
@@ -160,9 +163,10 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
             outflow = outflow + terms[key]
     terms["dropped"] = _stack([r.dropped for r in records], shape)
     outflow = outflow + terms["dropped"]
-    storage = _stack([r.storage_total for r in records], shape)
+    # the window runs from the loaded state to the state end_timestep leaves (X8)
+    end = _stack([r.storage_end for r in records], shape)
     start = _stack([r.storage_start for r in records], shape)
-    change = storage - start
+    change = end - start
     return WsimodMassBalance(
         inflow=inflow,
         outflow=outflow,
