@@ -31,7 +31,7 @@ from noodl.layers.allocation import AllocatedFlowLayer
 
 ![A request clipped by arc capacity and receiver headroom, and several edges sharing one node's headroom](../assets/app-allocation.svg)
 
-Every type this application offers — what it does and how to call it — is listed in its [catalogue](../catalogue/wsimod.md). It is set up and run like every other model; see [Using noodl](../usage.md).
+The layer is listed in the [core catalogue](../catalogue/core.md). It is set up and run like every other model; see [Using noodl](../usage.md).
 
 ## A worked example
 
@@ -72,21 +72,49 @@ drawn below zero, which is a modelling choice belonging upstream of this layer.
 
 ## From a WSIMOD topology
 
-`noodl.apps.wsimod.build_model(topology)` builds the layer and a `Model` from a WSIMOD-style
-topology (`{"nodes": [{"name"}], "arcs": [{"name", "source", "target", "capacity"}]}`,
-or a JSON file of it) and returns `(model, state, drivers)` like the other applications.
-Requests and storage are then given by arc and node name:
+A WSIMOD-style topology (`{"nodes": [{"name"}], "arcs": [{"name", "source", "target",
+"capacity"}]}`, here the committed JSON file of WSIMOD's quickstart) is a network of stores and
+capacity-limited arcs, and the layer is built on it directly. Requests and storage are then
+given by arc and node name:
 
 ```python
-from noodl.apps import wsimod
+import json
 
-model, state, drivers = wsimod.build_model("quickstart_topology.json")
-state = wsimod.initial_state(model, values={"wsimod": {"my_groundwater": 5.0}})
-drivers = wsimod.initial_drivers(model, values={"wsimod.requests": {"baseflow": 0.3}})
+import torch
+
+from noodl.layers.allocation import AllocatedFlowLayer
+from noodl.model import Model
+from noodl.refs import drivers_from, state_from
+from noodl.topology import Network
+
+with open("quickstart_topology.json") as f:
+    topology = json.load(f)
+net = Network(dtype=torch.float64)
+for node in topology["nodes"]:
+    net.add_node(node["name"])
+for arc in topology["arcs"]:
+    net.add_edge(arc["source"], arc["target"], kind="link", name=arc["name"])
+layer = AllocatedFlowLayer(
+    net, "wsimod", "link",
+    s_max=torch.full((net.n,), float("inf"), dtype=torch.float64),
+    c_arc=torch.tensor([a["capacity"] for a in topology["arcs"]], dtype=torch.float64),
+    quantity="storage", unit="m3", flow_unit="m3/s",
+)
+model = Model(net, [layer])
+state = state_from(model, {"wsimod": {"my_groundwater": 5.0}},
+                   base={"wsimod.s": torch.zeros(net.n, dtype=torch.float64)})
+drivers = drivers_from(model, {"wsimod.requests": {"baseflow": 0.3}},
+                       base={"wsimod.requests": torch.zeros(net.b, dtype=torch.float64)})
 state = model.step(state, drivers, dt=86400.0)
+print(state["wsimod.q"].tolist())
 ```
 
-See [Using noodl](../usage.md).
+```text
+[0.0, 0.0, 0.0, 0.0, 0.3, 0.0]
+```
+
+See [Using noodl](../usage.md). WSIMOD's own model, with its orchestration, its node classes and
+its arithmetic, is the [WSIMOD application](wsimod.md); this layer is the allocation rule alone.
 
 ## The API
 
@@ -258,7 +286,7 @@ The two shipped demos never bind: all but one of their 27 arcs sit at WSIMOD's
 request above about 30,934, and the replay sets $s_{\max} = \infty$. On their own they check
 only the identity path, $\min(x, c) = x$.
 
-`tests/verification/test_wsimod_capacity.py` covers the binding branches against WSIMOD's own
+`tests/verification/test_allocation_wsimod_capacity.py` covers the binding branches against WSIMOD's own
 numbers. It runs small networks built from WSIMOD's own `Arc`, `Node`, `Storage` and `Waste`
 classes, driven by WSIMOD's `push_distributed` and `pull_distributed`, and checks from
 WSIMOD's output that each targeted bound really cut a request before it compares:

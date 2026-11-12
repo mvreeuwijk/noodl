@@ -28,10 +28,11 @@ PAGES = [
     "applications/sewer.md",
     "applications/water.md",
     "applications/allocation.md",
+    "applications/wsimod.md",
     "applications/electrical.md",
     "formats/matpower.md",
 ]
-FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json", "contam/*",
+FIXTURES = ["sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",
             "modelica/ChimneyShaftWithVolume.json",
             "modelica_electrical/DC.Loads.Examples.Resistor.json"]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)

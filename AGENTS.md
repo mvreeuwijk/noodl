@@ -23,10 +23,17 @@ Add the application you are changing. CI's `branch` job uses the same table
 | --- | --- |
 | building | `tests/apps/building_physics tests/verification/test_contam_parity.py tests/verification/test_modelica_parity.py tests/verification/test_airflow_closed_forms.py tests/verification/test_natural_ventilation.py` |
 | sewer | `tests/apps/sewer tests/apps/inp tests/verification/test_sewer_*.py tests/benchmarks/test_swmm_corpus.py` |
-| water | `tests/apps/water tests/apps/inp tests/verification/test_water_parity.py tests/verification/test_water_networks.py tests/verification/test_water_quality*.py tests/verification/test_wsimod_*.py` |
+| water | `tests/apps/water tests/apps/inp tests/verification/test_water_parity.py tests/verification/test_water_networks.py tests/verification/test_water_quality*.py` |
+| wsimod | `tests/apps/wsimod tests/verification/test_allocation_wsimod_*.py tests/verification/test_wsimod_*.py` |
 | street air quality | `tests/apps/street_aq tests/verification/test_munich.py tests/verification/test_sirane*.py` |
 | electrical | `tests/apps/electrical tests/layers/test_mna*.py tests/test_model_mna.py tests/operators/test_mna_operator.py tests/verification/test_power_flow_parity.py tests/verification/test_modelica_electrical_parity.py` |
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |
+
+The wsimod row runs in about 3 minutes with `-n 4` (158 s, 816 tests, measured at the end of the port), well inside
+the 10-minute budget, so nothing is cut: the default composition is quickstart in full (1456 days,
+both modes, 38-41 s each), oxford for its first 365 days (both modes, 36 s each), the sampled
+replays and the cases (the rest, under 2 minutes). Full oxford (1456 days, both modes, about
+145 s each) runs under `-m slow`.
 
 For example, for the building application:
 

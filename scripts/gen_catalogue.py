@@ -48,9 +48,10 @@ PAGES = [
     ("water", "Water distribution", "../applications/water.md", ["noodl.apps.water"],
      "Pressurised water networks: pipes, pumps, valves, tanks and demand (EPANET `.inp` "
      "reader)."),
-    ("wsimod", "Flow allocation (WSIMOD)", "../applications/allocation.md",
+    ("wsimod", "WSIMOD", "../applications/wsimod.md",
      ["noodl.apps.wsimod"],
-     "Rule-based allocation of water between stores on capacity-limited arcs."),
+     "WSIMOD 0.8.1's daily step, transcribed: a WSIMOD `config.yml` as a noodl `Model` whose "
+     "closure runs WSIMOD's day bitwise, batched and differentiable."),
     ("electrical", "Electrical circuits", "../applications/electrical.md",
      ["noodl.apps.electrical", "noodl.apps.electrical.modelica",
       "noodl.apps.electrical.power"],
@@ -108,6 +109,10 @@ waveforms are a role of their own, and the electro-thermal module's `HeatedEdge`
 device to the `JouleHeating` closure (a coupling description, not a network component); the
 Modelica circuit reader's `CircuitNames` and `Column` describe its result (supporting types)."""
 
+NAME_ROLES = {"DayRecord": "class", "WsimodResults": "class", "WsimodMassBalance": "class"}
+"""Public names whose role their kind does not tell: WSIMOD's day record is a dataclass of
+results, not a description of a network component; likewise the run's results and mass balance."""
+
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
                "drivers_from", "state_from", "check_setup", "build_power_flow",
                "dc_power_flow"}
@@ -163,6 +168,8 @@ def _role(name: str, obj) -> str:
 
     if name in SETUP_NAMES:
         return "setup"
+    if name in NAME_ROLES:
+        return NAME_ROLES[name]
     if inspect.isclass(obj) and obj.__module__ in MODULE_ROLES:
         return MODULE_ROLES[obj.__module__]
     if not (inspect.isclass(obj) or inspect.isfunction(obj) or inspect.isbuiltin(obj)):

@@ -463,7 +463,7 @@ class AllocatedFlowLayer(TopologyGuard):
         `Node`, which accepts only what it can forward in the same step. Where several
         edges compete for one node's headroom, WSIMOD serves requests first-come-first-
         served in call order; this layer shares preference-proportionally and order-free
-        (totals agree; `tests/verification/test_wsimod_capacity.py` pins both).
+        (totals agree; `tests/verification/test_allocation_wsimod_capacity.py` pins both).
 
         Each of the fixed `n_passes` rounds: computes `tentative` flow per edge (request
         still unmet, capped by remaining arc capacity and the TARGET's headroom still

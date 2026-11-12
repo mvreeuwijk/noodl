@@ -1,7 +1,7 @@
 """WSIMOD parity where arcs genuinely BIND: capacity, receiver headroom, and several
 requests competing for one arc's remaining capacity within a timestep.
 
-`test_wsimod_parity.py` replays WSIMOD's two shipped demos, where no arc's own capacity
+`test_allocation_wsimod_replay.py` replays WSIMOD's two shipped demos, where no arc's own capacity
 ever binds. This module closes that gap two ways, both with WSIMOD 0.8.1's own `Arc` /
 `Node` / `Storage` / `Waste` classes as the reference (nothing of WSIMOD is reimplemented;
 the harness `_wsimod_reference.capture_events` records what WSIMOD actually did):
@@ -96,7 +96,7 @@ from tests.verification._wsimod_reference import capture_events  # noqa: E402
 F64 = torch.float64
 DT = 86400.0  # WSIMOD's daily timestep, s
 RTOL = 1e-12
-FIXTURE_DIR = Path(__file__).resolve().parent.parent / "data" / "wsimod"
+FIXTURE_DIR = Path(__file__).resolve().parent.parent / "data" / "allocation"
 
 
 # ---------------------------------------------------------------------------

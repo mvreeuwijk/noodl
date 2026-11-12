@@ -323,9 +323,45 @@ def test_every_key_of_every_application_reports_a_unit():
     model, state, drivers = water.build_model(water.twoloop())
     assert model.refs.water.flow.unit == "m3/s" and model.refs.water.sources.unit == "m3/s"
 
-    model, state, drivers = wsimod.build_model(DATA / "wsimod" / "quickstart_topology.json")
-    w = model.refs.wsimod
-    assert w.storage.unit == "m3" and w.requests.unit == "m3/s" and w.flow.unit == "m3/s"
-    assert w.quantity == "storage"
+    model, state, drivers = wsimod.build_model(
+        wsimod.read_wsimod_config(DATA / "wsimod" / "small")
+    )
+    fields = model.refs.fields()  # the closure's own layouts (key_labels Fields, input_specs)
+    assert fields["wsimod.storage"].unit == "m3"
+    assert fields["wsimod.storage"].labels == (("river", "tank"),)
+    assert fields["wsimod.Arc.capacity"].unit == "m3/d" and fields["wsimod.flow"].unit == "m3/d"
     # The check table shows them.
-    assert "m3/s" in str(model.check(state, drivers))
+    assert "m3/d" in str(model.check(state, drivers))
+
+
+def test_a_closure_key_labels_value_that_is_a_ready_field_is_used_as_given():
+    """`LayerRefs` takes a `{key: Field}` entry of a closure's `key_labels` as the key's own
+    Field (a layout the closure builds itself), without rebuilding it from labels."""
+    from noodl.layers.transport import TransportLayer
+
+    field = Field(
+        "demo.rows", role="state", layer=None, axis="label", labels=(("a", "x"), ("b", "y")),
+        ordering="rows of two columns", required="step", unit="m3", default=None,
+        description="a ready Field", dtype=F64, device=torch.device("cpu"),
+    )
+
+    class Closure:
+        state_keys = ("demo.rows", "demo.plain")
+        key_labels = {"demo.rows": field}
+        integrates = False
+
+        def __call__(self, state, drivers):
+            return {k: state[k] for k in self.state_keys}
+
+    net = Network(dtype=F64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="pipe")
+    layer = TransportLayer(
+        net, "c", capacity=torch.tensor([2.0], dtype=F64), flow_kind="pipe",
+        boundary=[net.nodes[1]], scheme="backward_euler",
+    )
+    model = Model(net, {"c": layer}, closures=[Closure()])
+    state = model.refs.closure_state
+    assert state["demo.rows"] is field
+    assert state["demo.plain"] == "demo.plain" and not isinstance(state["demo.plain"], Field)

@@ -111,7 +111,8 @@ CLOSURE_ATTRIBUTES: tuple[ClosureAttribute, ...] = (
         "Model (closure-carried state)"),
     ClosureAttribute(
         "key_labels", "Mapping[str, tuple]", {},
-        "Labels, in order, of the entries of an input or state key the closure declares.",
+        "Labels, in order, of the entries of an input or state key the closure declares, or "
+        "a ready `noodl.refs.Field` for a key with a trailing layout of its own.",
         "noodl.refs (LayerRefs)"),
     ClosureAttribute(
         "inputs", "tuple[str, ...]", None,

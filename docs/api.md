@@ -236,9 +236,15 @@ Constitutive laws are grouped below by the physics they express, as in
       members: [read_epanet_inp]
 ::: noodl.apps.water.report
 
-### Allocation (WSIMOD)
+### WSIMOD
 
-::: noodl.apps.wsimod.network
+::: noodl.apps.wsimod.build
+::: noodl.apps.wsimod.day
+::: noodl.apps.wsimod.run
+::: noodl.apps.wsimod.structure
+::: noodl.apps.wsimod.config
+    options:
+      members: [read_wsimod_config, WsimodNetwork, NodeSpec, ArcSpec, SurfaceSpec]
 
 ### Electrical circuits
 

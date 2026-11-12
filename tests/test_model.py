@@ -2084,6 +2084,26 @@ def test_check_reports_overwritten_undeclared_and_probed_outputs():
     assert {"overwritten-output", "undeclared-closure", "declared-vs-probed"} <= codes
 
 
+def test_a_layer_less_model_steps_an_integrating_closure():
+    """D17: a `Model` with no layers steps an integrating closure that carries its own state
+    (the WSIMOD application's `WsimodDay` is one)."""
+
+    class Counter:
+        integrates = True
+        state_keys = ("counter.n",)
+
+        def __call__(self, state, drivers, ctx):
+            if ctx is None:
+                return {}
+            return {"counter.n": state["counter.n"] + 1}
+
+    net = Network(dtype=F64)
+    net.add_node("only")
+    model = Model(net, [], closures=[Counter()])
+    out = model.step({"counter.n": torch.tensor(0.0, dtype=F64)}, {}, dt=86400.0, t=0.0)
+    assert float(out["counter.n"]) == 1.0
+
+
 class _CapturingLaw(ConstitutiveLaw):
     """`k C dp` on the air paths: `C` a learnable parameter, `k` a tensor that requires grad
     captured by a lambda, which no attribute scan reaches."""

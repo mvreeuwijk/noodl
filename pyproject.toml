@@ -37,6 +37,7 @@ sparse = ["scipy>=1.11"]
 # feature to depend on. Keep the two in step.
 test = [
     "pytest>=8", "pytest-xdist>=3", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
+    "pyyaml>=6",
 ]
 # `reference` holds the third-party engines the comparison tests run against. It is separate
 # from `test` because wntr>=1.5 requires numpy>=2.2.6, which cannot resolve against the
@@ -50,7 +51,7 @@ test = [
 # own code and its four DLLs are 10.8 MB). Test-only (`importorskip`); NOT a runtime extra,
 # for the same reason.
 # wsimod (WSIMOD comparison tests): BSD-3-Clause. Pinned exactly (`==0.8.1`), unlike
-# the `>=` pins above, because the committed fixtures under tests/data/wsimod/ freeze one
+# the `>=` pins above, because the committed fixtures under tests/data/allocation/ freeze one
 # specific wsimod run -- a newer release could
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
@@ -61,7 +62,7 @@ reference = ["pyswmm>=2.1", "wntr>=1.5", "six", "wsimod==0.8.1"]
 # suite needs, and what `pip install -e ".[dev]"` installs.
 dev = [
     "pytest>=8", "pytest-xdist>=3", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
-    "pyswmm>=2.1", "wntr>=1.5", "six", "wsimod==0.8.1",
+    "pyswmm>=2.1", "wntr>=1.5", "six", "wsimod==0.8.1", "pyyaml>=6",
 ]
 # ContamX parity: NIST's `contamxpy` ships a Windows x86-64 wheel that
 # BUNDLES the ContamX 3.4.1.7 engine, so no CONTAM installation is needed -- but there is
@@ -72,6 +73,9 @@ contam = ["contamxpy>=0.0.9; sys_platform == 'win32'"]
 # writes its classic-CDF product through `scipy.io.netcdf_file`. Nothing else in the street
 # application, and no path the core solves take, needs it.
 street_aq = ["scipy>=1.11"]
+# `wsimod` is a RUNTIME extra: `apps/wsimod/config.py` parses WSIMOD's `config.yml` with PyYAML
+# (a parsed mapping needs nothing). WSIMOD itself is never imported by `src/`.
+wsimod = ["pyyaml>=6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

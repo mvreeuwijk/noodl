@@ -1,0 +1,42 @@
+# A three-node WSIMOD model: a catchment's inflow routed through a river to a sink.
+# Quantity only: the pollutant lists are empty. Loadable by WSIMOD's Model.load as well.
+nodes:
+  inflow:
+    name: inflow
+    type_: Catchment
+    filename: inflow-inputs.csv
+  river:
+    name: river
+    type_: River
+    length: 200
+    width: 20
+    velocity: 17280.0
+    damp: 0.1
+  outlet:
+    name: outlet
+    type_: Waste
+arcs:
+  inflow_to_river:
+    name: inflow_to_river
+    type_: Arc
+    in_port: inflow
+    out_port: river
+  river_to_outlet:
+    name: river_to_outlet
+    type_: Arc
+    in_port: river
+    out_port: outlet
+pollutants: []
+additive_pollutants: []
+non_additive_pollutants: []
+dates:
+- '2000-01-01'
+- '2000-01-02'
+- '2000-01-03'
+- '2000-01-04'
+- '2000-01-05'
+- '2000-01-06'
+- '2000-01-07'
+- '2000-01-08'
+- '2000-01-09'
+- '2000-01-10'
