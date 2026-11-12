@@ -13,6 +13,7 @@ import contextlib
 import copy
 import functools
 import io
+import math
 from pathlib import Path
 
 import pytest
@@ -26,10 +27,18 @@ import torch  # noqa: E402
 from noodl.apps.wsimod.config import read_wsimod_config  # noqa: E402
 from noodl.apps.wsimod.day import WsimodDay  # noqa: E402
 from noodl.apps.wsimod.engine import Ctx, Engine, make_node  # noqa: E402
-from noodl.apps.wsimod.vqip import QUANTITY_ONLY  # noqa: E402
-from tests.apps.wsimod._replay import Mismatch, replay  # noqa: E402
+from noodl.apps.wsimod.vqip import QUANTITY_ONLY, empty, sum_vqip  # noqa: E402
+from tests.apps.wsimod._replay import (  # noqa: E402
+    Mismatch,
+    precondition_holds,
+    replay,
+    replay_arc,
+    to_vqip,
+)
 from tests.verification._wsimod_cases import CASES  # noqa: E402
 from tests.verification._wsimod_reference import (  # noqa: E402
+    ArcDay,
+    capture_arc_calls,
     capture_node_calls,
     record_wsimod_run,
     wsimod_model,
@@ -777,3 +786,185 @@ def test_demo_nodes_replay_wsimod_on_every_day(demo, config, mode, cls):
     """The same on every captured day (oxford's whole 1456-day run)."""
     _, worst = _replay_class(demo, config, mode, cls, FULL_DAYS[demo], every_day=True)
     assert worst == 0.0
+
+
+# --- the user Decay arcs (Task 11; spec, Verification 1, the replay harness) ------------------
+ARC_PAIRS = [(case, arc) for case, spec in CASES.items() if spec.wsimod for arc in spec.replay_arcs]
+ARC_IDS = [f"{case}-{arc}" for case, arc in ARC_PAIRS]
+# Task 10 / R1: decay_arc's four arcs each carry one direction, so X41's precondition holds
+# trivially there; decay_arc_mixed carries both and stays inside it.
+PRECONDITION_PAIRS = [(c, a) for c, a in ARC_PAIRS if c in ("decay_arc", "decay_arc_mixed")]
+PRECONDITION_IDS = [f"{c}-{a}" for c, a in PRECONDITION_PAIRS]
+# W19. If a case's captured days broke X41's precondition (D21), the term of those days could
+# differ from WSIMOD's in its last bits, and only there: the order of its summands is lost, while
+# the values are exact. The bound is the rounding of summing the same ``m`` terms in another
+# order, ``m * eps`` of their absolute sum. No current case breaks the precondition.
+ORDER_UNKNOWN_EPS = torch.finfo(torch.float64).eps
+
+
+@functools.cache
+def captured_arcs(case: str):
+    spec = CASES[case]
+    model = wsimod_model(spec.build())
+    with capture_arc_calls(model, spec.replay_arcs) as days:
+        record_wsimod_run(model, days=spec.days)
+    return days
+
+
+def arc_spec(network, name):
+    return next(a for a in network.arcs if a.name == name)
+
+
+@functools.cache
+def replayed(case: str, arc: str):
+    """The case's pollutants replay of one arc, with its day contexts."""
+    network = read_wsimod_config(CASES[case].build())
+    contexts: list = []
+    replay_arc(network, arc, captured_arcs(case)[arc], scale=CASES[case].scale, contexts=contexts)
+    return network, contexts
+
+
+@pytest.mark.parametrize(("case", "arc"), ARC_PAIRS, ids=ARC_IDS)
+def test_arc_replay_matches_wsimod(case, arc):
+    """The noodl arc, alone between scripted ports, makes WSIMOD's port calls and returns its
+    replies; every row, reply, accumulator and per-request ``diff`` is bitwise WSIMOD's (bound 0),
+    in both modes. A DecayArc's ``in_port`` is the node whose temperature it reads: a catchment
+    among them (``src2_to_j``)."""
+    spec = CASES[case]
+    days = captured_arcs(case)[arc]
+    assert len(days) == spec.days
+    assert any(call.method.startswith("send_") for day in days for call in day.calls)
+    network = read_wsimod_config(spec.build())
+    for mode in spec.modes:
+        pollutants = network.pollutants if mode == "pollutants" else QUANTITY_ONLY
+        replay_arc(network, arc, days, scale=spec.scale, pollutants=pollutants)
+
+
+def test_a_decay_arc_replay_reads_its_in_ports_temperature():
+    """The arc decays at the temperature of its ``in_port`` on that day, a catchment's included
+    (``src2_to_j``'s ``in_port`` is ``src2``, which lists no temperature in its
+    ``configured_parameters``): the replay sets it on the scripted port from the configuration's
+    ``("temperature", date)`` row, so a changed row fails that day's first call (``n = 0``: the
+    decayed request reaches ``j`` at once)."""
+    case, arc = "decay_arc", "src2_to_j"
+    days = captured_arcs(case)[arc]
+    network = read_wsimod_config(CASES[case].build())
+    source = next(n for n in network.nodes if n.name == arc_spec(network, arc).in_port)
+    assert source.cls == "Catchment"
+    day = next(d for d in days if d.entry_diffs and d.entry_diffs[0][1]["phosphate"] > 0)
+    source.data[("temperature", network.dates[day.day])] += 1.0
+    with pytest.raises(Mismatch, match=rf"arc 'src2_to_j' day {day.day} call 0"):
+        replay_arc(network, arc, days, scale=CASES[case].scale)
+
+
+def event_on(ctx, arc: str) -> bool:
+    return bool(ctx.events.get("decay_arc_order_unknown", {}).get(arc, False))
+
+
+@pytest.mark.parametrize(("case", "arc"), PRECONDITION_PAIRS, ids=PRECONDITION_IDS)
+def test_the_decay_arcs_cases_hold_the_order_precondition(case, arc):
+    """R1 (X41, D21): on every captured day no due request waits in both directions, by
+    WSIMOD's own queue, and noodl's ``"decay_arc_order_unknown"`` is false on every day. The
+    mixed arc holds requests in both directions, none of them due at the end of a day."""
+    days = captured_arcs(case)[arc]
+    network, contexts = replayed(case, arc)
+    n = arc_spec(network, arc).number_of_timesteps
+    assert all(precondition_holds(day, n) for day in days)
+    assert not any(event_on(ctx, arc) for ctx in contexts)
+    if case == "decay_arc_mixed":
+        directions = {r["direction"] for day in days for r in day.queue_at_end}
+        assert directions == {"push", "pull"}
+
+
+def test_the_precondition_check_sees_a_due_request_in_both_directions():
+    """``precondition_holds`` is not vacuously true: a due request (``time`` 0) waiting in each
+    direction breaks it, one direction does not, and an arc with ``n = 0`` queues nothing."""
+
+    def day(*queue):
+        return ArcDay(day=0, queue_at_end=[{"direction": d, "time": t} for d, t in queue])
+
+    assert not precondition_holds(day(("push", 0), ("pull", 0)), 2)
+    assert precondition_holds(day(("push", 0), ("push", 0), ("pull", 1)), 2)
+    assert precondition_holds(day(("push", 1), ("pull", 1)), 2)
+    assert precondition_holds(day(("push", 0), ("pull", 0)), 0)
+
+
+def rewindowed(network, day: ArcDay) -> torch.Tensor:
+    """Day d's term as WSIMOD's captured ``diff``s give it (X24): the entries of day d in call
+    order, then the end-of-day ``diff``s of day d in list order, summed from empty."""
+    p = network.pollutants
+    total = empty(p, ())
+    for _, diff in [*day.entry_diffs, *day.end_diffs]:
+        total = sum_vqip(p, total, to_vqip(p, diff))
+    return total
+
+
+@pytest.mark.parametrize(("case", "arc"), ARC_PAIRS, ids=ARC_IDS)
+def test_the_decay_arc_term_equals_wsimods_rewindowed_diffs(case, arc):
+    """X24, R6: noodl's ``"DecayArc.decayed"``/``"DecayArcAlt.decayed"`` for day d equals,
+    exactly, the day's entry ``diff``s in call order then its end-of-day ``diff``s in list
+    order. A day that broke the precondition would fall back to W19's named bound
+    (``ORDER_UNKNOWN_EPS``); none does."""
+    network, contexts = replayed(case, arc)
+    spec = arc_spec(network, arc)
+    term = f"{spec.cls}.decayed"
+    days = captured_arcs(case)[arc]
+    assert len(contexts) == len(days)
+    assert any(float(rewindowed(network, day)[1]) > 0 for day in days)  # the arc decays
+    for day, ctx in zip(days, contexts, strict=True):
+        got = ctx.terms.get(term, empty(network.pollutants, ()))
+        expected = rewindowed(network, day)
+        if precondition_holds(day, spec.number_of_timesteps):
+            assert torch.equal(got, expected), (day.day, got, expected)
+        else:  # W19: the summation order is unknown, so the last bits may differ
+            terms = [to_vqip(network.pollutants, d) for _, d in [*day.entry_diffs, *day.end_diffs]]
+            magnitude = sum(t.abs() for t in terms)
+            assert bool(
+                ((got - expected).abs() <= len(terms) * ORDER_UNKNOWN_EPS * magnitude).all()
+            )
+
+
+@pytest.mark.parametrize(("case", "arc"), ARC_PAIRS, ids=ARC_IDS)
+def test_wsimods_total_decayed_is_its_own_window(case, arc):
+    """The harness check (X24): WSIMOD's ``total_decayed`` before each ``end_timestep`` equals the
+    end-of-day ``diff``s of day d - 1 then the entry ``diff``s of day d, summed from empty in
+    that order, bitwise; after it, the end-of-day ``diff``s of day d. That window differs from
+    the term's (the entries of d, then the end of d), which is why the term is rebuilt."""
+    p = read_wsimod_config(CASES[case].build()).pollutants
+
+    def total(*parts) -> torch.Tensor:
+        out = empty(p, ())
+        for _, diff in [d for part in parts for d in part]:
+            out = sum_vqip(p, out, to_vqip(p, diff))
+        return out
+
+    days = captured_arcs(case)[arc]
+    previous: list = []
+    for day in days:
+        before = total(previous, day.entry_diffs)
+        assert torch.equal(before, to_vqip(p, day.total_decayed_before_reset)), day.day
+        assert torch.equal(total(day.end_diffs), to_vqip(p, day.total_decayed_after)), day.day
+        previous = day.end_diffs
+    assert any(float(to_vqip(p, d.total_decayed_before_reset)[1]) > 0 for d in days)
+
+
+@pytest.mark.parametrize("where", ["entry", "end"])
+def test_the_arc_replay_notices_a_difference(where):
+    """A captured ``diff`` moved by one ulp is reported, naming the arc, the day and the call or
+    row."""
+    case, arc = "decay_arc", "q"
+    days = copy.deepcopy(captured_arcs(case)[arc])
+    network = read_wsimod_config(CASES[case].build())
+    scale = CASES[case].scale
+    if where == "entry":
+        day = next(d for d in days if d.entry_diffs and d.entry_diffs[0][1]["phosphate"] > 0)
+        index, diff = day.entry_diffs[0]
+        expected = rf"arc 'q' day {day.day} entry call {index}"
+    else:
+        day = next(d for d in days if d.end_diffs and d.end_diffs[0][1]["phosphate"] > 0)
+        row, diff = day.end_diffs[0]
+        expected = rf"arc 'q' day {day.day} end row {re.escape(str(row))}"
+    diff["phosphate"] = math.nextafter(diff["phosphate"], math.inf)
+    replay_arc(network, arc, captured_arcs(case)[arc], scale=scale)  # the capture itself passes
+    with pytest.raises(Mismatch, match=expected):
+        replay_arc(network, arc, days, scale=scale)

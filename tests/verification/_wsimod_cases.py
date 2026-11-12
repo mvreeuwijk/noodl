@@ -31,6 +31,7 @@ class Case:
     days: int  # 30-120
     scale: float  # the largest volume in the forcing
     replay: tuple[str, ...] = ()  # nodes the replay test captures
+    replay_arcs: tuple[str, ...] = ()  # user Decay* arcs the arc replay captures (D16)
     modes: tuple[str, ...] = ("quantity", "pollutants")
     wsimod: bool = True  # False: noodl-only (a WSIMOD crash), Task 17
 
@@ -1881,6 +1882,20 @@ def _decay_arc() -> dict:
     return mapping
 
 
+def _decay_arc_mixed() -> dict:
+    """``decay_arc`` with the storage ``well`` made a reservoir: ``q_pull`` (``n = 1``) then
+    carries both directions. Each day ``well`` pushes its water into ``basin`` through it
+    (``Reservoir: distribute``), and then ``basin`` pulls from ``well`` through it
+    (``Abstraction: make_abstractions``), so the two directions meet in one arc in the same
+    order every day. The pull calls reach ``update_queue`` every day, so the end of the day
+    never finds a due request waiting in both directions: the case stays inside the precondition
+    of D21 (X41), and the arc's term is bitwise."""
+    mapping = _decay_arc()
+    well = next(node for node in mapping["nodes"] if node["name"] == "well")
+    well["type_"] = "Reservoir"
+    return mapping
+
+
 _DECAY_ARC_ALT_DAYS = 40
 
 
@@ -2278,12 +2293,20 @@ CASES: dict[str, Case] = {
         days=_QUEUE_ARC_DAYS,
         scale=_largest_volume(_decay_arc()),
         replay=("a", "b", "res", "basin"),
+        replay_arcs=("q", "q_pull", "b_to_sink", "src2_to_j"),
+    ),
+    "decay_arc_mixed": Case(
+        build=_decay_arc_mixed,
+        days=_QUEUE_ARC_DAYS,
+        scale=_largest_volume(_decay_arc_mixed()),
+        replay_arcs=("q_pull",),
     ),
     "decay_arc_alt": Case(
         build=_decay_arc_alt,
         days=_DECAY_ARC_ALT_DAYS,
         scale=_largest_volume(_decay_arc_alt()),
         replay=("b",),
+        replay_arcs=("head_to_b",),
     ),
     "surface_decay_nitrification": Case(
         build=_surface_decay_nitrification,
