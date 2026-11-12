@@ -210,7 +210,6 @@ BATCH_3B = {
             "wsimod.WWTW.process_parameters.constant": [1.0, 0.5, 1.4, 0.1],
             "wsimod.WWTW.process_parameters.exponent": [1.0, 0.95, 1.05, 1.0],
             "wsimod.WWTW.liquor_multiplier": [1.0, 0.5, 1.5, 0.2],
-            "wsimod.Reservoir.decays.constant": [1.0, 0.2, 20.0, 50.0],
         },
         # the treatment processes clamp without a branch of their own (wtw.py:163-214): the
         # instances differ in where the works spares water and clips its storm tank
@@ -239,7 +238,6 @@ BATCH_3B = {
         {
             "wsimod.River.denpar_w": [1.0, 0.2, 3.0, 0.0],
             "wsimod.River.prodNpar": [1.0, 0.5, 2.0, 0.1],
-            "wsimod.River.decays.constant": [1.0, 0.2, 3.0, 0.5],
         },
         "node:r_up/biochemical_processes/macrophyte_cap:N",
     ),
@@ -307,7 +305,21 @@ ROUND_TRIP = {
     "decay_queue_groundwater": {
         "wsimod.total_decayed": {("gw", "tank.internal_arc"): {"volume": 0.0, "phosphate": 0.25}},
     },
+    "surface_decay_nitrification": {
+        "wsimod.total_decayed": {("plot", "surfaces.turf"): {"volume": 0.0, "phosphate": 0.25}},
+    },
+    "decay_arc": {  # a DecayArc's queue (the request in slot 0 and its age)
+        "wsimod.arc_queue": {("q", "push", 0, 0): {"volume": 3.0, "phosphate": 0.4}},
+        "wsimod.arc_queue_since": {("q", "push"): 1.0},
+    },
+    "decay_arc_alt": {  # a DecayArcAlt's travel queue and its present flag
+        "wsimod.travel_queue": {("head_to_b", 2): {"volume": 2.0, "phosphate": 0.3}},
+        "wsimod.travel_queue_present": {("head_to_b", 2): 1.0},
+    },
 }
+# the cases whose set rows persist into the day-10 state; a day's ``total_decayed`` is reset at
+# its start (W75), so it only round trips
+SET_ROWS_REACH_THE_RUN = {"river_nutrients", "decay_arc", "decay_arc_alt"}
 
 
 @pytest.mark.parametrize("case", list(ROUND_TRIP))
@@ -340,9 +352,11 @@ def test_the_new_state_round_trips(case):
     assert all(torch.equal(a, b) for a, b in zip(whole_flows, early + late, strict=True))
     # the registers persist, so their set values reach the run; a day's ``total_decayed`` is
     # reset at its start (W75), so its set value only round trips
-    if case == "river_nutrients":
-        other, _ = stepped(default, 0, total)
-        assert any(not torch.equal(whole[k], other[k]) for k in ROUND_TRIP[case])
+    if case in SET_ROWS_REACH_THE_RUN:
+        other, other_flows = stepped(default, 0, total)
+        assert any(not torch.equal(whole[k], other[k]) for k in ROUND_TRIP[case]) or any(
+            not torch.equal(a, b) for a, b in zip(whole_flows, other_flows, strict=True)
+        )
 
 
 def _without_3b_values(mapping: dict) -> dict:

@@ -19,6 +19,7 @@ from noodl.apps.wsimod import (
     initial_drivers,
     initial_state,
     read_wsimod_config,
+    wsimod_run,
 )
 from noodl.apps.wsimod.structure import (
     forcing_readers,
@@ -421,13 +422,12 @@ def test_a_decaying_queue_groundwater_keeps_its_structure_quantity_only():
         model, state, drivers = build_model(
             read_wsimod_config(configuration), pollutants=pollutants
         )
-        flows = []
-        for k in range(20):
-            state = model.step(state, drivers, dt=DAY, t=k * DAY)
-            flows.append(model.wsimod_day.last_record.arc_flow)
-        volumes[label] = torch.stack(flows)
-    assert not torch.equal(volumes["quantity"], volumes["plain"])
-    assert torch.equal(volumes["quantity"], volumes["pollutants"])
+        results = wsimod_run(model, state, drivers)  # all 40 days
+        volumes[label] = (results.arc_flow, results.tank_storage)
+    assert volumes["quantity"][0].shape[0] == 40
+    assert not torch.equal(volumes["quantity"][0], volumes["plain"][0])
+    for quantity, pollutants in zip(volumes["quantity"], volumes["pollutants"], strict=True):
+        assert torch.equal(quantity, pollutants)
 
 
 def _residential(type_: str, override: str | None = None) -> dict:
