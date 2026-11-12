@@ -474,7 +474,8 @@ def test_the_cases_cover_every_listed_feature():
     batch_divergence soil_temperature capacity_first_come simple_pollutants float_accuracy_override
     node_type_override decay_storage decay_groundwater decay_queue_groundwater
     decay_queue_groundwater_n0 decay_arc decay_arc_mixed decay_arc_alt
-    surface_decay_nitrification land_run_twice river_nutrients river_double_discharge""".split()
+    surface_decay_nitrification land_run_twice river_nutrients river_double_discharge
+    surface_deposition""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",

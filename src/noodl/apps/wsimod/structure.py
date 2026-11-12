@@ -25,6 +25,7 @@ from noodl.apps.wsimod.engine import _register_all
 __all__ = [
     "check_network",
     "forcing_readers",
+    "surface_forcing_readers",
     "orchestration_plan",
     "recursion_cycles",
     "river_order",
@@ -330,4 +331,25 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
             variables = (*variables, "temperature")
         for variable in variables:
             readers.setdefault(variable, []).append(spec.name)
+    return readers
+
+
+def surface_forcing_readers(network: WsimodNetwork) -> dict[str, list[tuple[str, str]]]:
+    """``{variable: [(land, surface), ...]}`` of the surface data a run reads (D8), in
+    configuration order.
+
+    A surface reads the six deposition variables when its constructor data had ``nhx-dry``
+    (``land.py:375-382``, ``:540-576``); without it, or in a quantity-only run, the values are
+    unread, but the readers are listed all the same: the forcing check applies in both modes
+    (D9). A variable no surface reads is absent.
+    """
+    from noodl.apps.wsimod.land import SURFACE_DEPOSITION
+
+    readers: dict[str, list[tuple[str, str]]] = {}
+    for spec in network.nodes:
+        for surface in spec.surfaces:
+            if "nhx-dry" not in surface.constructed_variables:
+                continue
+            for variable in SURFACE_DEPOSITION:
+                readers.setdefault(variable, []).append((spec.name, surface.name))
     return readers

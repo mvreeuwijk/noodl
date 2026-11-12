@@ -76,11 +76,13 @@ from torch import Tensor
 from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, DecayArcAlt, QueueArc
 from noodl.apps.wsimod.config import WsimodNetwork
 from noodl.apps.wsimod.engine import Ctx, Engine
+from noodl.apps.wsimod.land import SURFACE_DEPOSITION, month_start
 from noodl.apps.wsimod.structure import (
     check_network,
     forcing_readers,
     orchestration_plan,
     river_order,
+    surface_forcing_readers,
 )
 from noodl.apps.wsimod.tanks import DecayQueueTank, DecayTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
@@ -238,6 +240,8 @@ _FORCING_UNITS = {
     "et0": "m/d",
     "temperature": "degC",
     "flow": "m3/d",
+    # a surface's monthly deposition data (land.py:354-359, "kg/m2/timestep"; D8)
+    **dict.fromkeys(SURFACE_DEPOSITION, "kg/m2/d"),
 }
 # record_all's surface fields (model.py:1135-1170) -> the surface attribute
 _SURFACE_FIELDS = {
@@ -600,6 +604,29 @@ class WsimodDay:
                 forcing=True,
                 unit=_FORCING_UNITS[variable],
                 description=f"the {variable} series of the nodes that read it",
+            )
+        # D8: a surface's monthly data, one value per date from the first of its month
+        lands = {spec.name: spec for spec in network.nodes}
+        for variable, rows in surface_forcing_readers(network).items():
+            series = [
+                [
+                    next(s for s in lands[land].surfaces if s.name == surface).data[
+                        (variable, month_start(date))
+                    ]
+                    for land, surface in rows
+                ]
+                for date in dates
+            ]
+            key = f"wsimod.{variable}"
+            drivers[key] = _Driver(
+                key,
+                [(land, f"surfaces.{surface}") for land, surface in rows],
+                None,
+                torch.tensor(series, dtype=F64).reshape(len(dates), len(rows)),
+                targets=[(nodes[land], f"surfaces.{surface}.{variable}") for land, surface in rows],
+                forcing=True,
+                unit=_FORCING_UNITS[variable],
+                description=f"the {variable} of the surfaces that read it, monthly (D8)",
             )
         catchments = readers.get("flow", [])
         if catchments and p.K:

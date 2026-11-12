@@ -188,7 +188,18 @@ compute derived quantities.
   by name (WSIMOD raises `RuntimeError`). On a class that reads no forcing (a `Waste`, say) the file is
   still read and the override is listed in `WsimodNetwork.unread`. A `Groundwater`'s override is
   its only forcing (X11). A surface's `filename` and any `data_input_dict` override are still
-  refused (deposition data, sub-project 3c; `land.py:413-421`).
+  refused (sub-project 3c; `land.py:413-421`).
+- A surface's `data_input_dict` (or constructor `filename`) holds its monthly deposition data:
+  the six variables `nhx-dry`, `noy-dry`, `srp-dry`, `nhx-wet`, `noy-wet` and `srp-wet`, in kg/m2/d.
+  The data are read when `nhx-dry` is among the constructor's variables (`land.py:375-382`), and
+  then all six are needed (a missing companion is refused by name, `KeyError` in WSIMOD). Day `t`
+  reads the row dated the first of its month (`get_data_input_surface`, `land.py:462-471`): a row
+  dated `"2004-01"` or `"2004-01-01"` serves every January day, one dated `"2004-01-15"` is
+  never read and the run is refused. Without `nhx-dry` no variable is read and each is listed in
+  `WsimodNetwork.unread` as `<land>.surfaces.<surface>.data_input_dict.<variable>`; so is a
+  deposition of a species (`ammonia`, `nitrate`, `phosphate`) that is not a pollutant. Any other
+  variable, `*-residue` data (residue is not ported) and fertiliser or manure data on a surface
+  that is not a growing one are refused.
 
 ## Units, order and what runs
 
@@ -200,4 +211,4 @@ WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own 
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
 and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
-(the surfaces' data deposition, the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config.yml` runs unmodified with every ported process, the surfaces' `pollutant_load` included. See the [WSIMOD application](../applications/wsimod.md).
+(the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config.yml` runs unmodified with every ported process, the surfaces' `pollutant_load` included. See the [WSIMOD application](../applications/wsimod.md).

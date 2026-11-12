@@ -37,8 +37,9 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 live (below), and so are the treatment works' pollutant treatment and the first-order decay of
 the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces, and so is a
 `River`'s biochemistry (below), and the user decay arcs `DecayArc` and `DecayArcAlt`. What
-still changes a pollutant and is not ported (the surfaces' data deposition and the land's nutrient pools,
-sub-project 3c) is refused unless it is neutral. A surface's `pollutant_load` is live.
+still changes a pollutant and is not ported (the land's nutrient pools,
+sub-project 3c) is refused unless it is neutral. A surface's `pollutant_load` and its monthly
+deposition data are live (below).
 
 | Class | Process ported (sub-project 3b) |
 |---|---|
@@ -576,10 +577,28 @@ pollutant entries, every `decays` value (nodes, surfaces and user decay arcs; th
 (`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
 and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) the same configuration is
-refused if a process that is not ported yet would change the pollutants (the surfaces' data deposition and the
+refused if a process that is not ported yet would change the pollutants (the
 land's nutrient pools, 3c): until then, such configurations need `pollutants=False`. A surface's
 `pollutant_load` is live (`Surface.simple_deposition`); a key that is not a run pollutant is listed in
-`model.unread`, as `<land>.surfaces.<surface>.pollutant_load.<key>`. The soil temperature, the treatment, the decays and the River's
+`model.unread`, as `<land>.surfaces.<surface>.pollutant_load.<key>`.
+
+### Surface deposition
+
+A surface constructed with `nhx-dry` in its `data_input_dict` runs `atmospheric_deposition` and
+`precipitation_deposition` before `simple_deposition` and its class's functions
+(`land.py:375-382`, `:462-581`): each reads `nhx`, `noy` and `srp` (kg/m2/d), multiplies by the
+area and forces the amounts into the tank as `ammonia`, `nitrate` and `phosphate` at volume 0.
+A species that is not a run pollutant is read and dropped (listed in `model.unread`). A
+non-additive species blends into the tank at volume 0, which changes its value only by rounding
+(Y43). Day `t` reads the row of the first of its month, so the data are monthly; the forcing is
+checked for every run date in both modes, and a quantity-only run lists
+`surfaces.<surface>.data_input_dict` in `model.ignored_by_quantity_only`. The data are the
+drivers `wsimod.nhx-dry` ... `wsimod.srp-wet`, `(T, n_surfaces)`, rows
+`(land, "surfaces.<name>")`, filled from the monthly table. A batched driver may vary within a
+month, which WSIMOD cannot express. The mass-balance parts `Surface.atmospheric_deposition` and
+`Surface.precipitation_deposition` record what enters. Dry data without the wet ones
+(`KeyError` in WSIMOD, L25), `*-residue` data and fertiliser or manure data on a surface that is
+not a growing one are refused. The soil temperature, the treatment, the decays and the River's
 biochemistry are ported; their parameters are only listed as ignored in a quantity-only run.
 
 ### The demo configurations
@@ -760,10 +779,10 @@ unloaded medians differ by 5 %).
 
 ## Limitations
 
-- **Sub-project 3c.** The processes that change a pollutant (the surfaces' data deposition, the land's nutrient pools, `GrowingSurface`, the garden and
-  irrigation surfaces) are refused unless neutral; a surface's `pollutant_load` is live. The soil temperature, the treatment works'
+- **Sub-project 3c.** The processes that change a pollutant (the land's nutrient pools, `GrowingSurface`, the garden and
+  irrigation surfaces) are refused unless neutral; a surface's `pollutant_load` and monthly deposition data are live. The soil temperature, the treatment works'
   pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
-  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with surface deposition data or nutrient pools needs `pollutants=False`.
+  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with nutrient pools needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:

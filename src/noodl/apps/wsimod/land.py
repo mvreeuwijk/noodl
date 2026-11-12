@@ -11,9 +11,11 @@ returns to the land's ``running_inflow_mb`` and ``running_outflow_mb`` (the mass
 ``"Land.running_inflow_mb"`` and ``"Land.running_outflow_mb"``, ``:158-162``; D11). In 3a these
 lists hold the water functions (``precipitation_evaporation``/``push_to_sewers`` of an
 impervious surface, ``ihacres``/``calculate_soil_temperature``/``route`` of a pervious one) and
-``simple_deposition`` when a ``pollutant_load`` is configured. The surface deposition of
-``nhx-dry``-style data is 3c and refused with pollutants on (D21); a quantity-only run ignores
-it, as its volumes do not depend on it.
+``simple_deposition`` when a ``pollutant_load`` is configured, and ``atmospheric_deposition`` and
+``precipitation_deposition`` ahead of them when the surface was constructed with ``nhx-dry``
+data (``:375-382``). That data is monthly (``get_data_input_surface``, ``:462-471``): day ``t``
+reads the row of the first of its month (:func:`month_start`). A quantity-only run ignores the
+data, as its volumes do not depend on it, but its forcing is still checked (D9, D21).
 
 The arithmetic is WSIMOD's ``+ - * /``, ``min``/``max`` in WSIMOD's order, and IHACRES's
 ``exp`` and ``**`` evaluated per instance by Python's own ``math.exp`` and ``float.__pow__``
@@ -62,13 +64,18 @@ __all__ = [
     "ImperviousSurface",
     "Land",
     "PerviousSurface",
+    "SURFACE_DEPOSITION",
+    "SURFACE_INPUTS",
     "Surface",
+    "month_start",
     "surface_derived",
 ]
 
 # The balance parts (D11): the name each surface function's ``(in, out)`` is recorded under
 # (``Ctx.part``), keyed by the function's name; ``WsimodMassBalance.parts``.
 PART_NAMES = {
+    "atmospheric_deposition": "Surface.atmospheric_deposition",
+    "precipitation_deposition": "Surface.precipitation_deposition",
     "simple_deposition": "Surface.simple_deposition",
     "precipitation_evaporation": "ImperviousSurface.precipitation_evaporation",
     "push_to_sewers": "ImperviousSurface.push_to_sewers",
@@ -83,8 +90,19 @@ PERCOLATION_TYPES = ("Groundwater",)
 RUNOFF_TYPES = ("River", "Node")
 SEWER_TYPES = ("Sewer",)
 GARDEN_TAG = ("Demand", "Garden")
-# land.py:375-380, :496-544: the surface data the deposition functions read (3c)
-DEPOSITION_KEYS = frozenset({"nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet"})
+# land.py:375-380, :540-576: the surface data the deposition functions read (D8)
+SURFACE_DEPOSITION = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
+# land.py:1167-1172, :1649-1710: the fertiliser and manure data a growing surface reads (3c, later)
+SURFACE_INPUTS = (
+    "nhx-fertiliser",
+    "noy-fertiliser",
+    "srp-fertiliser",
+    "nhx-manure",
+    "noy-manure",
+    "srp-manure",
+)
+# land.py:545-548, :573-576: the pollutant each deposition variable feeds
+DEPOSITION_SPECIES = {"nhx": "ammonia", "noy": "nitrate", "srp": "phosphate"}
 # land.py:753-756: state attributes, set only through the overrides
 SOIL_TEMPERATURE_DEFAULTS = {
     "soil_temp_w_prev": 0.1,
@@ -97,6 +115,13 @@ LAND_FORCING = ("precipitation", "et0", "temperature")
 
 def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
+
+
+def month_start(date: datetime) -> datetime:
+    """The first of ``date``'s month, the row ``get_data_input_surface`` reads
+    (``land.py:462-471``: ``monthyear = date.to_period("M")``, ``model.py:997``, compared by
+    ``to_datetime`` equality, ``model.py:164-170``)."""
+    return datetime(date.year, date.month, 1)
 
 
 # --- derived quantities (D5) -------------------------------------------------------------------
@@ -187,7 +212,11 @@ class Surface(DecayTank):
         }
         load = values.get("pollutant_load") or {}
         # land.py:381-382: a configured pollutant_load (any entry) adds simple_deposition
-        self.has_load = len(load) > 0
+        # (the constructor's flags, not the merged ones: an override rebuilds nothing, Y21, D9)
+        self.has_load = len(spec.constructed_load) > 0
+        self.has_deposition = "nhx-dry" in spec.constructed_variables
+        # the day's monthly data by variable, bound in ``bind`` (D8): not parameters
+        self.forcing: dict[str, Tensor] = {}
         self.defaults["pollutant_load"] = torch.tensor(
             [float(load.get(name, 0.0)) for name in pollutants.names], dtype=torch.float64
         ).reshape(pollutants.K)
@@ -220,8 +249,14 @@ class Surface(DecayTank):
             path=f"surfaces.{spec.name}",
         )
         self._set_derived(derived)
-        # land.py:381-382: simple_deposition; the data deposition (:375-380) is 3c
-        self.inflows = [self.simple_deposition] if self.has_load else []
+        # land.py:375-382: the data deposition, then simple_deposition
+        self.inflows = (
+            [self.atmospheric_deposition, self.precipitation_deposition]
+            if self.has_deposition
+            else []
+        )
+        if self.has_load:
+            self.inflows.append(self.simple_deposition)
         self.processes: list = []
         self.outflows: list = []
 
@@ -235,9 +270,12 @@ class Surface(DecayTank):
 
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
         """This day's parameters by name; the derived values are computed again from them."""
+        data = {k: v for k, v in parameters.items() if k in (*SURFACE_DEPOSITION, *SURFACE_INPUTS)}
+        parameters = {k: v for k, v in parameters.items() if k not in data}
         unknown = set(parameters) - set(self.defaults)
         if unknown:
             raise KeyError(f"{self.site}: no parameter {sorted(unknown)[0]!r}")
+        self.forcing = {k: _f64(v) for k, v in data.items()}
         self.params = {k: _f64(v) for k, v in parameters.items()}
         values = {name: self._param(name) for name in self.defaults}
         self.area = values["area"]
@@ -325,6 +363,48 @@ class Surface(DecayTank):
             parent.running_outflow_mb = write(
                 active, sum_vqip(p, parent.running_outflow_mb, out_), parent.running_outflow_mb
             )
+
+    def _datum(self, variable: str) -> Tensor:
+        """``get_data_input_surface`` (``land.py:462-471``): today's value of ``variable``."""
+        try:
+            return self.forcing[variable]
+        except KeyError:
+            raise KeyError(f"{self.site}: no {variable!r} data bound (land.py:471)") from None
+
+    def _deposition(self, kind: str) -> Tensor:
+        """``vqip`` of ``atmospheric_deposition`` (``kind="dry"``, ``:540-548``) or
+        ``precipitation_deposition`` (``"wet"``, ``:568-576``): ``ammonia``, ``nitrate`` and
+        ``phosphate`` are ``data * area``, everything else 0. A species that is not a run
+        pollutant has no column: WSIMOD writes a key no sum reads (D15)."""
+        p = self.p
+        amounts = {
+            DEPOSITION_SPECIES[v]: self._datum(f"{v}-{kind}") * self.area
+            for v in DEPOSITION_SPECIES
+        }
+        shape = torch.broadcast_shapes(*(x.shape for x in amounts.values()))
+        zero = torch.zeros(shape, dtype=torch.float64)
+        columns = [zero, *(amounts[n].expand(shape) if n in amounts else zero for n in p.names)]
+        return torch.stack(columns, dim=-1)
+
+    def dry_deposition_to_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:473-487``: the dry deposition is forced into the tank and returned."""
+        self.push_storage(vqip, force=True, active=active)
+        return vqip
+
+    def wet_deposition_to_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:489-503``: the wet deposition is forced into the tank and returned."""
+        self.push_storage(vqip, force=True, active=active)
+        return vqip
+
+    def atmospheric_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:528-554``: the day's month's dry deposition (``kg/m2/d``) times the area."""
+        in_ = self.dry_deposition_to_tank(self._deposition("dry"), active=active)
+        return in_, self.ctx.empty()
+
+    def precipitation_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:556-581``: the day's month's wet deposition (``kg/m2/d``) times the area."""
+        in_ = self.wet_deposition_to_tank(self._deposition("wet"), active=active)
+        return in_, self.ctx.empty()
 
     def simple_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:510-532``: the loads (additive ones times the area) at volume 0, forced in.
@@ -728,7 +808,15 @@ class Land(Node):
     def configured_parameters(self, date: datetime) -> dict[str, Tensor]:
         """The day's ``precipitation``, ``et0`` and ``temperature`` (``land.py:451-460``)."""
         data = self.spec.data
-        return {v: torch.tensor(data[(v, date)], dtype=torch.float64) for v in LAND_FORCING}
+        out = {v: torch.tensor(data[(v, date)], dtype=torch.float64) for v in LAND_FORCING}
+        month = month_start(date)
+        for surface in self.surfaces:
+            if surface.has_deposition:
+                for v in SURFACE_DEPOSITION:
+                    out[f"surfaces.{surface.name}.{v}"] = torch.tensor(
+                        surface.spec.data[(v, month)], dtype=torch.float64
+                    )
+        return out
 
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
         """This day's parameters: the residence times reach the tanks; the keys
@@ -916,13 +1004,55 @@ class Land(Node):
         return direction == "pull" and tag == "default"
 
 
+def _refuse_surface_data(
+    surface: SurfaceSpec, variables: set[str], network: WsimodNetwork, where: str
+) -> None:
+    """The refusals of a surface's data (D21): a variable ``get_data_input_surface`` never
+    reads, ``*-residue`` (unwired, Y36, L21), fertiliser and manure on a surface that is not a
+    growing one, a missing companion of ``nhx-dry`` (L25: ``KeyError`` in WSIMOD) and a missing
+    ``(variable, first of the month)`` on a run date (``:471``)."""
+    for variable in sorted(variables):
+        if variable.endswith("-residue"):
+            raise ValueError(
+                f"{where}: surface data {variable!r}: residue is not ported (np.py:312 calls a "
+                "dict, land.py:1281 leaves it unwired; Y36, L21); drop it"
+            )
+        if variable in SURFACE_INPUTS:
+            raise ValueError(
+                f"{where}: surface data {variable!r}: fertiliser and manure are read by a "
+                f"growing surface only, and a {surface.cls} is not one"
+            )
+        if variable not in SURFACE_DEPOSITION:
+            raise ValueError(
+                f"{where}: surface data {variable!r} is not read (a surface's data_input_dict "
+                "holds deposition only, land.py:375-380)"
+            )
+    if "nhx-dry" not in variables:
+        return  # land.py:375: no deposition function is built; the data are unread
+    absent = [v for v in SURFACE_DEPOSITION if v not in variables]
+    if absent:
+        raise ValueError(
+            f"{where}: surface data has 'nhx-dry' but not {', '.join(map(repr, absent))}: the "
+            "deposition functions read all six (land.py:540-576, KeyError at the first run; L25)"
+        )
+    for date in network.dates:
+        month = month_start(date)
+        for variable in SURFACE_DEPOSITION:
+            if (variable, month) not in surface.data:
+                raise ValueError(
+                    f"{where}: no {variable!r} data on {month:%Y-%m-%d}, the first of the month "
+                    f"of {date:%Y-%m-%d} (get_data_input_surface reads it, land.py:471)"
+                )
+
+
 def _validate_surface(
     surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
 ) -> list[str]:
     """One surface's refusals; returns its parameters a quantity-only run ignores.
 
-    - Surface data (D21): only the deposition keys (``land.py:375-380``) are accepted, and with
-      pollutants on they are refused (3c).
+    - Surface data (D21): only the six deposition variables (``land.py:375-380``) are read;
+      ``nhx-dry`` needs the five others (L25) and every ``(variable, first of the month)`` of
+      the run's dates, in either mode. A quantity-only run ignores the values.
     - ``pollutant_load``: any value is accepted (``simple_deposition``); a quantity-only run
       ignores it.
     - ``PerviousSurface``: ``total_porosity`` above ``field_capacity`` and ``wilting_point``
@@ -940,18 +1070,8 @@ def _validate_surface(
     if decays and not pollutants:  # X49: a quantity-only run reads no decay value
         ignored.append(f"{prefix}.decays")
     variables = {variable for variable, _ in surface.data}
-    other = sorted(variables - DEPOSITION_KEYS)
-    if other:
-        raise ValueError(
-            f"{where}: surface data {other[0]!r} is not read (a surface's data_input_dict holds "
-            "deposition only, land.py:375-380)"
-        )
-    if variables:
-        if pollutants:
-            raise ValueError(
-                f"{where}: surface deposition data {sorted(variables)[0]!r} is sub-project 3c; "
-                "run build_model(network, pollutants=False) until sub-project 3c"
-            )
+    _refuse_surface_data(surface, variables, network, where)
+    if variables and not pollutants:
         ignored.append(f"{prefix}.data_input_dict")
     # pollutant_load (land.py:381-382, :510-532) is live with pollutants on; a key that is not a
     # run pollutant is unread (D15, listed by the reader)

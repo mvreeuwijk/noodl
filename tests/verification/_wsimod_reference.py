@@ -446,6 +446,9 @@ def pad_register(values: Sequence[float], size: int) -> torch.Tensor:
     return register
 
 
+DEPOSITION_VARIABLES = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
+
+
 def _runs_biochemistry(node) -> bool:
     """Whether ``node`` is a WSIMOD ``River`` whose ``calculate_discharge`` runs the
     biochemistry (``"nitrate" in constants.POLLUTANTS``, ``storage.py:919``)."""
@@ -519,9 +522,12 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     records its two lag lists and ``bio_in``/``bio_out`` among the stores (as WSIMOD's lists and
     dicts; :func:`pad_register` makes a register of a list), and the day's
     ``data_input_dict[("temperature", t)]`` as ``pre["forcing.temperature"]``, so the replay
-    can check it binds the temperature WSIMOD read (``storage.py:750``). A call into a target
-    that is already in a captured call is refused (D22); the error is raised again at exit, because
-    WSIMOD's ``query_handler`` swallows exceptions and retries (``nodes.py:335-343``).
+    can check it binds the temperature WSIMOD read (``storage.py:750``). A ``Land``'s ``monthyear``
+    and each deposition surface's ``(variable, monthyear)`` values are ``pre["forcing.monthyear"]``
+    and ``pre["forcing.surfaces.<surface>.<variable>"]``, which the replay checks the same way.
+    A call into a target that is already in a captured call is refused (D22); the error is
+    raised again at exit, because WSIMOD's ``query_handler`` swallows exceptions and retries
+    (``nodes.py:335-343``).
     Everything is restored on exit.
     """
     targets = {name: model.nodes[name] for name in nodes}
@@ -543,6 +549,16 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
         ``get_data_input("temperature")`` (``storage.py:750``)."""
         if _runs_biochemistry(node):
             return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
+        if hasattr(node, "surfaces") and hasattr(node, "monthyear"):
+            # a Land: its month (model.py:997) and each deposition surface's monthly value
+            # (get_data_input_surface, land.py:462-471)
+            out: dict[str, object] = {"forcing.monthyear": str(node.monthyear)}
+            for surface in node.surfaces:
+                if "nhx-dry" in {variable for variable, _ in surface.data_input_dict}:
+                    for variable in DEPOSITION_VARIABLES:
+                        value = surface.data_input_dict[(variable, node.monthyear)]
+                        out[f"forcing.surfaces.{surface.surface}.{variable}"] = value
+            return out
         return {}
 
     def install(obj, attr: str, make) -> None:

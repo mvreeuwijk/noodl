@@ -93,6 +93,10 @@ class SurfaceSpec:
     cls: str
     parameters: dict[str, object]
     data: Data = field(default_factory=dict)
+    # D9, Y21: what the constructor was given (``land.py:375-382`` fixes the inflow list there):
+    # the data variables and the ``pollutant_load`` keys, before any override
+    constructed_variables: frozenset[str] = frozenset()
+    constructed_load: tuple[str, ...] = ()
 
 
 @dataclass
@@ -515,7 +519,15 @@ def _read_surface(
     data = _forcing(entry, base, where)
     parameters = _checked_parameters(entry, schema, where)
     read_decays(where, parameters["decays"], pollutants)  # land.py:303-581: a DecayTank
-    return SurfaceSpec(name, type_, parameters, data)
+    load = parameters.get("pollutant_load") or {}
+    return SurfaceSpec(
+        name,
+        type_,
+        parameters,
+        data,
+        constructed_variables=frozenset(variable for variable, _ in data),
+        constructed_load=tuple(load),
+    )
 
 
 def _read_arc(entry: dict, node_names: set[str], pollutants: Pollutants) -> ArcSpec:
@@ -685,6 +697,26 @@ def read_wsimod_config(
                 f"{node.name}.surfaces.{surface.name}.pollutant_load.{key}"
                 for key in load
                 if key not in pollutants.names
+            )
+    from noodl.apps.wsimod.land import (  # land imports this module (through tanks)
+        DEPOSITION_SPECIES,
+        SURFACE_DEPOSITION,
+    )
+
+    # land.py:375-382, :540-581 (D15, Y21): the surface data a surface never reads. Without
+    # ``nhx-dry`` in the constructor's data no deposition function is built, so every variable is
+    # unread; with it, a deposition of a species that is not a run pollutant is read and dropped
+    for node in nodes:
+        for surface in node.surfaces:
+            at = f"{node.name}.surfaces.{surface.name}.data_input_dict"
+            present = [v for v in SURFACE_DEPOSITION if v in surface.constructed_variables]
+            if "nhx-dry" not in surface.constructed_variables:
+                unread.extend(f"{at}.{v}" for v in present)
+                continue
+            unread.extend(
+                f"{at}.{v}"
+                for v in present
+                if DEPOSITION_SPECIES[v.split("-")[0]] not in pollutants.names
             )
     # a Decay* arc reads its in_port's forcing (core.py:464-470), so that file is read
     ports = {f"{a.in_port}.filename" for a in arcs if a.cls in _DECAY_ARCS}

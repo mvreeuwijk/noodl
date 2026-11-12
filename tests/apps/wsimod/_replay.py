@@ -388,6 +388,17 @@ def replay(
                 node.params["temperature"],
                 call.pre["forcing.temperature"],
             )
+        if "forcing.monthyear" in call.pre:  # a Land: the month and the surface data WSIMOD read
+            month = f"{network.dates[call.day]:%Y-%m}"
+            if call.pre["forcing.monthyear"] != month:
+                raise Mismatch(
+                    f"{label} monthyear: noodl reads {month}, "
+                    f"WSIMOD {call.pre['forcing.monthyear']}"
+                )
+            for key, value in call.pre.items():
+                if key.startswith("forcing.surfaces."):
+                    _, _, surface, variable = key.split(".", 3)
+                    compare.value(f"{label} {key}", node._surface(surface).forcing[variable], value)
         node.load_stores(
             {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
         )

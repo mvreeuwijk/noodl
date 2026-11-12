@@ -1072,18 +1072,39 @@ def _wtw_treatment() -> dict:
 _LAND_DAYS = 40
 
 
+def _land_dates(n: int) -> list[str]:
+    """``n`` daily dates from 2003-10-01: a run crosses a year end, 29 February 2004 and (with
+    monthly data) every month boundary."""
+    start = datetime(2003, 10, 1)
+    return [(start + timedelta(days=k)).strftime("%Y-%m-%d") for k in range(n)]
+
+
+def _monthly(variables: list[str] | tuple[str, ...], start: str, months: int) -> dict:
+    """Monthly surface data (``land.py:462-471``): per variable, ``months`` rows dated the first
+    of each month from ``start`` (``"YYYY-MM"``), in ``kg/m2/d``, seeded per variable."""
+    year, month = (int(x) for x in start.split("-"))
+    data = {}
+    for variable in variables:
+        rng = random.Random(f"monthly-{variable}")
+        for k in range(months):
+            when = f"{year + (month - 1 + k) // 12}-{(month - 1 + k) % 12 + 1:02d}-01"
+            data[(variable, when)] = round(rng.uniform(2e-7, 4e-6), 10)
+    return data
+
+
 def _land_forcing(
     days: int,
     seed: int,
     *,
     rain: tuple[float, ...] = (0.0, 0.0, 2e-4, 1e-3, 4e-3, 8e-3, 1.5e-2),
     et0: tuple[float, float] = (5e-4, 4e-3),
+    dates: list[str] | None = None,
 ) -> dict:
     """A ``Land``'s daily ``precipitation`` (drawn from ``rain``, jittered), ``et0`` and
     ``temperature`` (``land.py:451-460``; all three are read every day, spec Forcing checks)."""
     rng = random.Random(seed)
     data = {}
-    for date in _dates(days):
+    for date in _dates(days) if dates is None else dates:
         depth = rng.choice(rain)
         data[("precipitation", date)] = round(depth * rng.uniform(0.8, 1.2), 7)
         data[("et0", date)] = round(rng.uniform(*et0), 7)
@@ -1258,6 +1279,66 @@ def _temperature_blending() -> dict:
                     ),
                 ],
                 _land_forcing(days, 44),
+                surface_residence_time=2,
+            ),
+            _store("storm", "Sewer", capacity=20.0, pipe_time=1),
+            {"name": "brook", "type_": "Node"},
+            _store("river", "Waste"),
+        ],
+        "arcs": [
+            _arc("suburb_to_storm", "suburb", "storm"),
+            _arc("suburb_to_brook", "suburb", "brook"),
+            _arc("storm_to_river", "storm", "river", capacity=15.0),
+            _arc("brook_to_river", "brook", "river"),
+        ],
+        "overrides": _neutral_soil("suburb", "lawns"),
+        "orchestration": [{"Land": "run"}, {"Sewer": "make_discharge"}],
+    }
+
+
+_SURFACE_DEPOSITION_DAYS = 450
+_DEPOSITION = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
+
+
+def _surface_deposition() -> dict:
+    """Monthly ``nhx``, ``noy`` and ``srp`` dry and wet data over 15 months from 2003-10, read
+    on an impervious and a pervious surface (``land.py:462-581``): every day reads the first of
+    its month, across month and year boundaries and 29 February, and the deposition runs before
+    ``simple_deposition`` and ``ihacres``. ``nitrate`` is not a pollutant here, so ``noy`` is
+    read and dropped (D15); a third surface has wet data only, which no function reads. The
+    loads: an additive ``phosphate``, a non-additive ``temperature`` (blended at volume 0, Y43)
+    and ``nitrite``, which is not a pollutant (unread)."""
+    days = _SURFACE_DEPOSITION_DAYS
+    dates = _land_dates(days)
+    data = _monthly(_DEPOSITION, "2003-10", 15)
+    wet_only = {k: v for k, v in _monthly(_DEPOSITION[3:], "2003-10", 15).items()}
+    return {
+        **_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "suburb",
+                [
+                    _impervious(
+                        "roofs",
+                        area=1500.0,
+                        pore_depth=0.001,
+                        data_input_dict=dict(data),
+                        pollutant_load={"phosphate": 2e-6},
+                    ),
+                    _pervious(
+                        "lawns",
+                        area=3000.0,
+                        depth=0.25,
+                        wilting_point=0.1,
+                        infiltration_capacity=0.006,
+                        initial_storage=250.0,
+                        data_input_dict=dict(data),
+                        pollutant_load={"phosphate": 1e-6, "temperature": 7.0, "nitrite": 1.0},
+                    ),
+                    _impervious("yards", area=400.0, data_input_dict=wet_only),
+                ],
+                _land_forcing(days, 49, dates=dates),
                 surface_residence_time=2,
             ),
             _store("storm", "Sewer", capacity=20.0, pipe_time=1),
@@ -2442,6 +2523,12 @@ CASES: dict[str, Case] = {
         days=_LAND_DAYS,
         scale=300.0,
         replay=("suburb", "storm"),
+    ),
+    "surface_deposition": Case(
+        build=_surface_deposition,
+        days=_SURFACE_DEPOSITION_DAYS,
+        scale=300.0,
+        replay=("suburb",),
     ),
     "land_percolation_threshold": Case(
         build=_land_percolation_threshold,
