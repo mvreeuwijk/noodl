@@ -305,7 +305,13 @@ class Engine:
 
     def end_day(self) -> None:
         """``end_timestep`` on every node in configuration order, then on every arc
-        (``model.py:1172-1176``)."""
+        (``model.py:1172-1176``).
+
+        The end-of-day rule: an ``end_timestep`` must not call ``ctx.decide`` or ``ctx.call``.
+        Such a call would be absent from the D2 sequence check, and the D14 re-snapshot
+        (``WsimodDay._finish_record``) would miss it, since it re-snapshots no decision and no
+        ``maxiter``. It may record terms, drops and events. Decay caps are evaluated at bind
+        (D5), not here."""
         for node in self.nodes.values():
             node.end_timestep()
         for arc in self.arcs.values():

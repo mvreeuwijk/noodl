@@ -1078,7 +1078,12 @@ class WsimodDay:
         day loads, so the windows meet (X8). ``terms``, ``dropped``, ``dropped_arcs`` and
         ``events`` are snapshotted again, so what ``end_timestep`` records counts in this day
         (D22); it records no decision and no ``maxiter``, and the record keeps those as taken.
-        ``storage_total`` keeps the record point's value (X32)."""
+        ``storage_total`` keeps the record point's value (X32).
+
+        The end-of-day rule (``Engine.end_day``): ``end_timestep`` must not call ``ctx.decide``
+        or ``ctx.call``; such a call would be absent from the D2 sequence check, and this
+        re-snapshot, which takes no decision and no ``maxiter``, would miss it. Decay caps are
+        evaluated at bind (D5)."""
         record = self.last_record
         record.storage_end = self._held(shape, {})
         record.terms = dict(ctx.terms)

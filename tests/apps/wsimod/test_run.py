@@ -793,3 +793,29 @@ def test_an_arc_term_needs_a_declared_direction():
     assert torch.equal(balance.terms["TestArc.made"][:, 0], torch.ones(10, dtype=torch.float64))
     # 1 m³ a day counted in with no water behind it: the residual is that 1 m³
     assert float((balance.residual[:, 0] - 1.0).abs().max()) <= 1e-12
+
+
+def test_a_direction_other_than_in_or_out_is_refused():
+    """A term's direction is ``"in"`` or ``"out"``; anything else is refused by name rather
+    than counted silently as out."""
+    model, state, drivers = _small()
+    arc = next(iter(model.wsimod_day.engine.arcs.values()))
+    _arc_term(arc, "TestArc.made")
+    arc.mass_balance = {"TestArc.made": "ds"}
+    with pytest.raises(RuntimeError, match=r"'TestArc.made' has direction 'ds'"):
+        wsimod_run(model, state, drivers)
+
+
+def test_an_unfinished_record_is_refused_by_the_balance():
+    """D14: a record taken at the yield point and never completed has no ``storage_end``; the
+    balance names the day instead of failing inside ``torch.stack``."""
+    from noodl.apps.wsimod.run import _balance
+
+    model, _, _ = _small()
+    day = model.wsimod_day
+    records = []
+    for _ in day.run_days(days=2):
+        records.append(day.last_record)
+    records[1].storage_end = None
+    with pytest.raises(RuntimeError, match="interrupted before end_timestep"):
+        _balance(day, records, torch.Size(()))

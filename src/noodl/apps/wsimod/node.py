@@ -82,7 +82,7 @@ class Node:
     attribute path (the keys of :meth:`stores`), ``carried_paths`` the carried ones among them
     (the rest are per-day values); ``step_methods`` the zero-argument methods an
     orchestration slot may name; ``mass_balance`` the terms :meth:`record_terms` adds, with
-    their side (``"in"``, ``"out"``, ``"ds"``; D11).
+    their side (``"in"`` or ``"out"``; D11).
     """
 
     wsimod_type: ClassVar[str] = "Node"

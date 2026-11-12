@@ -149,6 +149,12 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
     unknown = [k for k in keys if k not in direction]
     if unknown:
         raise RuntimeError(f"mass-balance term {unknown[0]!r} has no declared direction")
+    wrong = [k for k in keys if direction[k] not in ("in", "out")]
+    if wrong:
+        raise RuntimeError(
+            f"mass-balance term {wrong[0]!r} has direction {direction[wrong[0]]!r}; "
+            "expected 'in' or 'out'"
+        )
     width = int(additive.sum())
     zero = torch.zeros((*shape, len(records), width), dtype=F64)
     terms: dict[str, Tensor] = {}
@@ -159,11 +165,17 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
         terms[key] = _stack(days, shape)
         if direction[key] == "in":
             inflow = inflow + terms[key]
-        else:
+        elif direction[key] == "out":
             outflow = outflow + terms[key]
     terms["dropped"] = _stack([r.dropped for r in records], shape)
     outflow = outflow + terms["dropped"]
     # the window runs from the loaded state to the state end_timestep leaves (X8)
+    unfinished = [d for d, r in enumerate(records) if r.storage_end is None]
+    if unfinished:
+        raise RuntimeError(
+            f"wsimod_run: day {unfinished[0]}'s record has no storage_end; the run was "
+            "interrupted before end_timestep (D14)"
+        )
     end = _stack([r.storage_end for r in records], shape)
     start = _stack([r.storage_start for r in records], shape)
     change = end - start
