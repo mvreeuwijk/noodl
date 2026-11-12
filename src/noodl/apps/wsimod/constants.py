@@ -7,6 +7,7 @@ UNBOUNDED_CAPACITY = 1e15  # constants.py:18
 DT_DAYS = 1  # constants.py:20
 DECAY_REFERENCE_TEMPERATURE = 20  # constants.py:66, degC: the exponents are relative to it
 FLOAT_ACCURACY = 1e-11  # constants.py:17, default; per model in the port
+MG_L_TO_KG_M3 = 1e-3  # constants.py:61
 
 # constants.py:21-57: WSIMOD 0.8.1's default pollutant lists.
 POLLUTANTS: tuple[str, ...] = (

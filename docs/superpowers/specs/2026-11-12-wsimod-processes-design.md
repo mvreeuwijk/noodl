@@ -596,7 +596,11 @@ slots equal WSIMOD's list, and the slots in front of them are `+0.0`. The sums r
 Python's exactly:
 
 - the windows are the last `min(10, size)`, `min(20, size)` and `size` slots;
-- they are added one slot at a time, oldest first, starting from `+0.0`;
+- they are added one slot at a time, oldest first, starting from `+0.0`. From Python 3.12
+  CPython's `sum` of floats is Neumaier's compensated sum (`bltinmodule.c`, gh-100425), and
+  noodl's `window_sum` reproduces it step for step; before 3.12 it is the plain running sum,
+  and `window_sum` follows the interpreter (`COMPENSATED_SUM`). The source wins over the
+  one-at-a-time wording above;
 - CPython's `sum` starts from the integer 0, so its first addition is `0 + x`, which gives `x`
   for every `x` except `−0.0`, where it gives `+0.0`. noodl's first addition is `+0.0 + x`,
   with the same result in every case, `−0.0` included, and a padded slot adds `+0.0`, which

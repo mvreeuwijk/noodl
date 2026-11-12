@@ -39,7 +39,17 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``send_push_request/{below_fa,clip}``). The storage family adds
   ``node:N/infiltrate/excess``, ``node:N/pull_check_active/clip``,
   ``node:N/pull_set_active/{clip,below_fa}``, ``node:N/push_check_river_reservoir/clip`` and
-  ``node:N/satisfy_environmental/owed``; a ``Demand``'s ``node:N/create_demand/deficit`` and
+  ``node:N/satisfy_environmental/owed``; a ``River`` with biochemistry (``"nitrate"`` a
+  pollutant) adds ``node:N/biochemical_processes/<branch>`` (``storage.py:766-893``, ``call``
+  the index of the day's ``calculate_discharge`` call) for the branches ``dry``, ``frozen``
+  (under ``active``), then, under the mask the guards leave, ``cold``,
+  ``denitrification_cap``, ``din:denitrification``, ``totalphosfcn``, ``production``,
+  ``production_cap:{N,P}`` and ``din:production`` (where it produces),
+  ``mineralisation_cap:{N,P}`` and ``din:mineralisation`` (where it mineralises),
+  ``macrophyte_temperature``, ``macrophyte_factor``, ``macrophyte_cap:N``, ``din:macrophyte``,
+  ``macrophyte_phosphorus`` and ``macrophyte_cap:P``, and noodl's event
+  ``"river_nitrogen_lost"`` (mineralisation with ``din == 0`` and a positive capped
+  ``minprodN``: the nitrogen is destroyed, X15); a ``Demand``'s ``node:N/create_demand/deficit`` and
   ``node:N/create_demand/not_able_to_push:<garden|house|default>`` (``demand.py:90``, ``:114``;
   events ``"demand_deficit"``, ``"demand_not_able_to_push"``); a leaking ``Distribution``'s
   ``node:N/pull_set_leakage/unsuccessful`` (``distribution.py:46``; event

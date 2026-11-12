@@ -388,6 +388,10 @@ def _override_filename(node: NodeSpec, value: object, where: str, unread: list[s
 
 def _override_node(node: NodeSpec, entry: dict, where: str, unread: list[str]) -> None:
     _apply_overrides(node.parameters, NODE_SCHEMAS[node.cls], entry, where)
+    # storage.py:540, :620-644: a River's bulk_density is set and never read (D10)
+    if node.cls == "River" and "bulk_density" in entry:
+        if f"{node.name}.bulk_density" not in unread:
+            unread.append(f"{node.name}.bulk_density")
     if "filename" in entry:
         _override_filename(node, entry["filename"], where, unread)
     surfaces = entry.get("surfaces", {})

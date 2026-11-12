@@ -193,4 +193,4 @@ WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own 
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
 and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
-(decay, river biochemistry, deposition) needs `pollutants=False` until sub-projects 3b and 3c. See the [WSIMOD application](../applications/wsimod.md).
+(deposition) needs `pollutants=False` until sub-projects 3b and 3c. See the [WSIMOD application](../applications/wsimod.md).

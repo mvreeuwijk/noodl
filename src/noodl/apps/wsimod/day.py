@@ -51,6 +51,12 @@ State layout (D10; spec, State). Every key has a leading batch shape; the rows a
   (X35: the attribute path, where ``"wsimod.storage"`` has ``"surface:<name>"``), in the state
   layout's order (D7). A surface's rows exist when ``nitrite`` is a pollutant: the next day's
   ``Surface.run`` converts them (``land.py:427-439``).
+- ``"wsimod.river_temperature_lag"`` and ``"wsimod.river_phosphorus_lag"`` ``(..., n_slots)``:
+  the ``lagged_temperatures`` (``degC``) and ``lagged_total_phosphorus`` (``kg``) registers of
+  every ``River`` with biochemistry (``"nitrate"`` a pollutant, D9), ``max_temp_lag + 1`` and
+  ``max_phosphorus_lag + 1`` slots per river, labelled ``(river, i)`` with slot 0 the oldest
+  and zero-padded at the front (X17). They are not water held. A run can start from another
+  run's registers (a warm start); all zeros is WSIMOD's empty lists.
 
 Units (W20): volumes ``m3``, flows and capacities ``m3/d``, additive pollutants ``kg``,
 non-additive ones by name (``temperature`` ``degC``); never converted.
@@ -101,6 +107,8 @@ STATE_KEYS = (
     "wsimod.previous_pulled",
     "wsimod.treated",
     "wsimod.total_decayed",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
@@ -109,12 +117,31 @@ STATE_KEYS = (
 # a surface's total_decayed is mass that left the storage at the end of the day and returns
 # through the next day's carry-over (land.py:427-439), and a DecayQueueTank's is decay its
 # storage has not lost yet (tanks.py:694), so neither is held
-_NOT_HELD = ("wsimod.active_storage", "wsimod.previous_pulled", "wsimod.total_decayed")
+# a River's lag registers hold temperatures and phosphorus masses already in its storage
+_NOT_HELD = (
+    "wsimod.active_storage",
+    "wsimod.previous_pulled",
+    "wsimod.total_decayed",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
+)
 # keys of one value per row, not a VQIP
-_FLAT_KEYS = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
+_FLAT_KEYS = (
+    "wsimod.travel_queue_present",
+    "wsimod.arc_queue_since",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
+)
 _STATE_UNITS = {
     "wsimod.travel_queue_present": "-",
     "wsimod.arc_queue_since": "d",
+    "wsimod.river_temperature_lag": "degC",
+    "wsimod.river_phosphorus_lag": "kg",
+}
+# a River's store path -> its register's state key (D8)
+_RIVER_REGISTERS = {
+    "lagged_temperatures": "wsimod.river_temperature_lag",
+    "lagged_total_phosphorus": "wsimod.river_phosphorus_lag",
 }
 _STATE_TEXT = {
     "wsimod.storage": "every tank's and surface's storage (VQIP)",
@@ -129,6 +156,14 @@ _STATE_TEXT = {
     "wsimod.total_decayed": (
         "every DecayQueueTank internal arc's total_decayed and every Land surface's decayed "
         "mass of the last end of day (VQIP)"
+    ),
+    "wsimod.river_temperature_lag": (
+        "every biochemistry River's lagged_temperatures register, max_temp_lag + 1 slots, slot "
+        "0 the oldest, zero-padded at the front (X17)"
+    ),
+    "wsimod.river_phosphorus_lag": (
+        "every biochemistry River's lagged_total_phosphorus register, max_phosphorus_lag + 1 "
+        "slots, slot 0 the oldest, zero-padded at the front (X17)"
     ),
 }
 
@@ -186,6 +221,17 @@ _PARAMETER_UNITS = {
     "soil_temp_deep": "degC",
     "timearea": "-",
     "pipe_timearea": "-",
+    # a River's biochemistry (storage.py:539-558, WSIMOD's comments)
+    "uptake_PNratio": "-",
+    "denpar_w": "kg/m2/d",
+    "T_wdays": "d",
+    "halfsatINwater": "kg/m3",
+    "hsatTP": "kg/m3",
+    "limpppar": "kg/m3",
+    "prodNpar": "kg/m3/d",
+    "prodPpar": "kg/m3/d",
+    "muptNpar": "kg/m2/d",
+    "muptPpar": "kg/m2/d",
 }
 _FORCING_UNITS = {
     "precipitation": "m/d",
@@ -658,6 +704,11 @@ class WsimodDay:
                 elif path.endswith(".internal_arc.total_decayed"):
                     # X35: the attribute path of the internal arc (D7)
                     put("wsimod.total_decayed", node, path, [(spec.name, head)], (width,))
+                elif path in _RIVER_REGISTERS:
+                    # (river, i), slot 0 the oldest (X26)
+                    size = stores[path].shape[-1]
+                    rows = [(spec.name, i) for i in range(size)]
+                    put(_RIVER_REGISTERS[path], node, path, rows, (size,))
                 elif path.startswith("surfaces.") and last == "total_decayed":
                     # X35: the attribute path, not "surface:<name>" (D7)
                     surface = path.split(".")[1]

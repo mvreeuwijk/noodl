@@ -29,13 +29,14 @@ set up and run like every other model; see [Using noodl](../usage.md).
 ## What is ported
 
 The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueGroundwater`,
-`River` (without its nitrate biochemistry), `Reservoir`, `RiverReservoir`, `Demand`,
+`River` (with its nitrate biochemistry), `Reservoir`, `RiverReservoir`, `Demand`,
 `NonResidentialDemand`, `ResidentialDemand`, `Distribution` (with leakage),
 `UnlimitedDistribution`, `Sewer`, `WTW`, `WWTW`, `FWTW` and `Land` with `Surface`,
 `ImperviousSurface` and `PerviousSurface` (IHACRES); the arcs `Arc`, `QueueArc`, `AltQueueArc`,
 `PullArc`, `PushArc`, `SewerArc` and `WeirArc`. The soil temperature of a `PerviousSurface` is
 live (below), and so are the treatment works' pollutant treatment and the first-order decay of
-the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces (below); the
+the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces, and so is a
+`River`'s biochemistry (below); the
 other processes that change a pollutant (the decay of arcs, deposition) are later sub-projects
 and are refused unless they are neutral.
 
@@ -257,6 +258,69 @@ then `end_timestep` on every node and every arc. Where WSIMOD breaks a tie in th
 Python's set-hash order, which changes with `PYTHONHASHSEED`, noodl takes the configuration
 order.
 
+### River biochemistry
+
+A `River` runs WSIMOD's in-river biochemistry (`storage.py:738-898`) when `nitrate` is among the
+pollutants, in the orchestration slot of `calculate_discharge`, before the day's catchment
+inflow. It needs `temperature`, `phosphate`, `org-phosphorus`, `ammonia`, `nitrate` and
+`org-nitrogen` among the pollutants and a `temperature` forcing on every date; the River reads
+that forcing in a quantity-only run too, and a quantity-only run ignores the parameters below.
+The steps, in WSIMOD's order and operation order, each cited in the code:
+
+1. the depth `V / area`;
+2. the water temperature relaxes towards the air: `T = (1 - 1/T_wdays) T + (1/T_wdays) T_air`,
+   on dry and frozen days too;
+3. both registers shift in `T` and `phosphate + org-phosphorus`, before the guards, so every
+   call appends;
+4. the guards `V < FLOAT_ACCURACY` (dry) and `T <= 0` (frozen) end the call with nothing moved;
+5. denitrification, `min(denpar_w * area * 2^((T-20)/10) * confcn, 0.5 din)` (times `T/5` below
+   5 degC), taken from ammonia and nitrate in proportion;
+6. the 10-day and 20-day temperature means, the phosphorus "mean", `tempfcn` and `totalphosfcn`;
+7. production (`minprodN > 0`: dissolved nitrogen and phosphate into the organic pools) or
+   mineralisation (the reverse), each capped at half its pool;
+8. macrophyte uptake of dissolved nitrogen and phosphate, capped at half the pools.
+
+The ten parameters are drivers `"wsimod.River.<p>"`, set by overrides only: `uptake_PNratio` (-),
+`denpar_w` (kg/m2/d), `T_wdays` (d), `halfsatINwater`, `hsatTP`, `limpppar` (kg/m3), `prodNpar`,
+`prodPpar` (kg/m3/d), `muptNpar` and `muptPpar` (kg/m2/d); their defaults are WSIMOD's Python
+expressions (`1 / 7.2`, `0.0015`, `5`, `1.5 * 1e-3`, ...). `max_temp_lag` (20) and
+`max_phosphorus_lag` (365) are structural: the registers have `max_temp_lag + 1` and
+`max_phosphorus_lag + 1` slots. `bulk_density` is set by an override and never read
+(`model.unread`). `"River.bio_in"` and `"River.bio_out"` are mass-balance terms that add every
+call's gains and losses.
+
+**Quirks, reproduced (X14, X15).**
+
+- Each window sum divides by its full length from the first day (a cold start): the 10-day
+  mean of one temperature is that temperature over 10.
+- The "365-day" phosphorus mean adds 366 entries (the list is cut after the append) and divides
+  by 365.
+- `totalphosfcn` compares the phosphorus **mass** (kg) with the concentrations `limpppar` and
+  `hsatTP` (kg/m3), and is negative for `limpppar - hsatTP < TP < limpppar`.
+- Mineralisation with no dissolved nitrogen removes nitrogen from `org-nitrogen` and adds it
+  nowhere: the loss is in `bio_out` and the event `"river_nitrogen_lost"` says so.
+- `minprodN` of `-0.0` takes the mineralisation branch and moves nothing.
+
+**The registers and warm starts.** The state keys `"wsimod.river_temperature_lag"` (degC) and
+`"wsimod.river_phosphorus_lag"` (kg) hold the two registers, rows `(river, i)`, slot 0 the
+oldest, zero-padded at the front. All zeros is WSIMOD's empty lists: no sum notices the padding
+(`+0.0` leaves a sum unchanged), so the sums equal Python's over WSIMOD's lists, bitwise,
+including CPython 3.12's compensated `sum`. A run can start from another run's registers. They
+are not water held, so the mass balance skips them. A river with `max_temp_lag = 5` has 6 slots,
+and both temperature windows are the whole register.
+
+**Refused by name:** a missing pollutant of the six, a missing temperature on a date,
+`T_wdays = 0`, `length * width = 0`, `halfsatINwater <= 0` (WSIMOD divides by `din / V +
+halfsatINwater`, which is 0 where `din` is), `max_temp_lag` that is not a non-negative integer and
+`max_phosphorus_lag` that is not a positive integer. The three drivers are also refused at
+`bind`.
+
+**Kinks and the singularity.** The four 50 % caps, the `T < 5` factor, the production and
+mineralisation switch, and the `max(0, .)` of the macrophyte factors are kinks; the dry guard is
+a jump; `totalphosfcn` is a singularity as `TP - limpppar + hsatTP` tends to 0 from above (it
+tends to minus infinity and jumps to 0 at the guard). The two powers, `2 ** ((T-20)/10)` and
+`(T/20) ** 0.3`, are Python's, per instance.
+
 ## A worked example
 
 The `small` model is a catchment's inflow routed through a river to a sink, ten days, quantity
@@ -450,6 +514,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.travel_queue"`, `"wsimod.travel_queue_present"` | `(arc, i)` | the travel registers of the `QueueTank`s and `AltQueueArc`s, one row per travel time, and their key sets |
 | `"wsimod.arc_queue"`, `"wsimod.arc_queue_since"` | `(arc, direction, i, j)`, `(arc, direction)` | every `QueueArc`'s waiting requests and the days since its last delivery |
 | `"wsimod.liquor"`, `"wsimod.previous_pulled"`, `"wsimod.treated"` | node | the treatment works' liquor, an `FWTW`'s previous day's pull, a `WWTW`'s treated water |
+| `"wsimod.river_temperature_lag"`, `"wsimod.river_phosphorus_lag"` | `(river, i)` | the two registers of every River with biochemistry, `max_temp_lag + 1` and `max_phosphorus_lag + 1` slots (degC, kg) |
 | `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
@@ -482,7 +547,7 @@ Everything that cannot run is refused by name when the model is built, where WSI
 mid-run, hang or silently do something else:
 
 - out-of-scope classes and keys (by the reader);
-- River biochemistry (nitrate among the pollutants); `decays` that are not ported yet (an
+- River biochemistry that WSIMOD cannot run (above); `decays` that are not ported yet (an
   arc's); a decaying `Groundwater` or `QueueGroundwater` without a `filename` override's
   temperature; a `number_of_timesteps` override on a `QueueGroundwater` without `decays`; a
   `decays` key that is not
@@ -537,6 +602,7 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `Surface.run` converts `total_decayed` at every call | transcribed: a second `Land.run` on one day converts the same mass twice | case `land_run_twice` |
 | `QueueGroundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, refused by name without one (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; case `decay_queue_groundwater` |
 | `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; cases `decay_queue_groundwater` and `decay_queue_groundwater_n0` |
+| River biochemistry: the "365-day" phosphorus mean adds 366 entries; every window divides by its full length from day 1; `totalphosfcn` compares a mass with concentrations; mineralisation without dissolved nitrogen destroys nitrogen | reproduced (X14); the loss is in `bio_out` and the event `"river_nitrogen_lost"` (X15) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_mineralisation_without_din_destroys_nitrogen_and_says_so` |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
@@ -610,11 +676,11 @@ of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad)
 
 ## Limitations
 
-- **Sub-projects 3b and 3c.** The processes that change a pollutant (river biochemistry, the
+- **Sub-projects 3b and 3c.** The processes that change a pollutant (the
   decay of arcs, deposition, the land's nutrient pools, `GrowingSurface`, the garden and
   irrigation surfaces) are refused unless neutral. The soil temperature, the treatment works'
   pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
-  `DecayQueueTank` included) and of a land's surfaces are ported. Until the rest of 3b, a real configuration needs `pollutants=False`.
+  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until the rest of 3b, a real configuration needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:

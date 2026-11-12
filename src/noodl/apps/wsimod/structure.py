@@ -299,7 +299,9 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
     ``Land`` reads ``precipitation``, ``et0`` and ``temperature`` (``land.py:451-460``; the
     temperature also for the surfaces' end-of-day decay, ``core.py:485-487``), a decaying
     ``Storage``, ``Reservoir``, ``RiverReservoir`` or ``River`` (``temperature``, the same
-    end-of-day read) or ``Groundwater`` or ``QueueGroundwater`` (a ``filename`` override's, X11), a
+    end-of-day read) or ``Groundwater`` or ``QueueGroundwater`` (a ``filename`` override's, X11),
+    every ``River`` when ``"nitrate"`` is a configured pollutant (its biochemistry relaxes the
+    water temperature towards it, ``storage.py:748-750``; in quantity-only runs too, D9), a
     ``ResidentialDemand`` ``temperature`` (``demand.py:321``) and a ``Catchment`` ``flow`` and
     every pollutant of the configuration (``catchment.py:59-74``). The ``in_port`` of every user
     ``DecayArc`` or ``DecayArcAlt`` reads ``temperature`` too (``core.py:464-470``), each node
@@ -317,6 +319,8 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
             variables = ("flow", *network.pollutants.names)
         elif spec.cls in DECAYING_STORAGE and spec.parameters.get("decays") is not None:
             variables = ("temperature",)  # the DecayTank's end of day (core.py:484-487)
+        elif spec.cls == "River" and "nitrate" in network.pollutants.names:
+            variables = ("temperature",)  # the biochemistry, in either mode (storage.py:750, D9)
         else:
             variables = ()
         if spec.name in decay_ports and "temperature" not in variables:
