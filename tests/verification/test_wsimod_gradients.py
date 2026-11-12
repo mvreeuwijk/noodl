@@ -58,7 +58,9 @@ class Spec:
     # the unit of the decisions' margins: "flow" is the largest arc flow of the base run (m3),
     # "mass" its largest additive-pollutant arc mass (kg). The river's biochemistry compares
     # masses (kg of nitrogen and phosphorus, 1e-5 to 1), which a volume scale (tens of m3) would
-    # put above every margin.
+    # put above every margin. Every decision of a mass-scaled entry is held to the mass
+    # threshold, the volume and temperature sites too (their margins, in m3 and degrees, are
+    # far above it, so the bar is only stricter there).
     margin_scale: str = "flow"
     # other driver values held fixed in every run: ((key, label, value), ...)
     also: tuple = ()
@@ -249,6 +251,9 @@ _SMALL_DENITRIFICATION, _SMALL_UPTAKE, _SMALL_PRODUCTION = (
     ("muptNpar", 1e-6),
     ("prodNpar", 1e-2),
 )
+# production far above its cap (0.5 din binds every day): it carries no gradient, and the
+# production switch's margin (minprodN, 1e-6 at 0.05) grows with it, 10x clear of the threshold
+_CAPPED_PRODUCTION = ("prodNpar", 0.5)
 
 SPECS = {
     "Arc.capacity": Spec(
@@ -426,12 +431,22 @@ SPECS = {
         ("driver", "wsimod.RiverReservoir.decays.exponent", "rr", "phosphate"),
         ("final", "rr", "tank", "phosphate"),
     ),
+    # the receiver's (feed) final phosphate is 0 (the reservoir is drained by day 12): the
+    # phosphate the arc delivers into it, j_to_feed, is the scalar
     "DecayArc.decays.constant": Spec(
         "decay_arc",
         12,
         True,
         ("driver", "wsimod.DecayArc.decays.constant", "src2_to_j", "phosphate"),
         ("quality", "j_to_feed", "phosphate"),
+    ),
+    # DecayQueueTank (X40: the queue holds the water a day): the gw_to_res arc's phosphate
+    "QueueGroundwater.decays.constant": Spec(
+        "decay_queue_groundwater",
+        20,
+        True,
+        ("driver", "wsimod.QueueGroundwater.decays.constant", "gw", "phosphate"),
+        ("quality", "gw_to_res", "phosphate"),
     ),
     "WWTW.process_parameters.constant": Spec(
         "wtw_treatment",
@@ -499,29 +514,45 @@ SPECS = {
     # the nitrate scalar: production off its cap (0.01); the org-nitrogen scalar: production on
     # its cap, which takes 0.5 din, so that denitrification and uptake reach org-N through din
     "River.denpar_w [nitrate]": _river(
-        "denpar_w", "nitrate", 2e-7, _SMALL_PRODUCTION, _SMALL_UPTAKE
+        "denpar_w", "nitrate", _SMALL_DENITRIFICATION[1], _SMALL_PRODUCTION, _SMALL_UPTAKE
     ),
-    "River.denpar_w [org-nitrogen]": _river("denpar_w", "org-nitrogen", 2e-7, _SMALL_UPTAKE),
+    "River.denpar_w [org-nitrogen]": _river(
+        "denpar_w", "org-nitrogen", _SMALL_DENITRIFICATION[1], _SMALL_UPTAKE
+    ),
     "River.halfsatINwater [nitrate]": _river(
-        "halfsatINwater", "nitrate", 1e-2, _SMALL_DENITRIFICATION, _SMALL_PRODUCTION, _SMALL_UPTAKE
+        # 2e-3 (configured) gives finite-difference noise on a small slope (rel 5e-7)
+        "halfsatINwater",
+        "nitrate",
+        1e-2,
+        _SMALL_DENITRIFICATION,
+        _SMALL_PRODUCTION,
+        _SMALL_UPTAKE,
     ),
     "River.halfsatINwater [org-nitrogen]": _river(
         "halfsatINwater", "org-nitrogen", None, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
     ),
     "River.prodNpar [nitrate]": _river(
-        "prodNpar", "nitrate", 1e-2, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+        "prodNpar", "nitrate", _SMALL_PRODUCTION[1], _SMALL_DENITRIFICATION, _SMALL_UPTAKE
     ),
     "River.prodNpar [org-nitrogen]": _river(
-        "prodNpar", "org-nitrogen", 1e-2, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+        "prodNpar", "org-nitrogen", _SMALL_PRODUCTION[1], _SMALL_DENITRIFICATION, _SMALL_UPTAKE
     ),
     "River.muptNpar [nitrate]": _river(
-        "muptNpar", "nitrate", 1e-6, _SMALL_DENITRIFICATION, _SMALL_PRODUCTION
+        "muptNpar", "nitrate", _SMALL_UPTAKE[1], _SMALL_DENITRIFICATION, _SMALL_PRODUCTION
     ),
     "River.muptNpar [org-nitrogen]": _river(
-        "muptNpar", "org-nitrogen", 1e-6, _SMALL_DENITRIFICATION
+        "muptNpar", "org-nitrogen", _SMALL_UPTAKE[1], _SMALL_DENITRIFICATION
     ),
     "River.T_wdays [nitrate]": _river(
-        "T_wdays", "nitrate", None, _SMALL_DENITRIFICATION, _SMALL_UPTAKE
+        # default entry: the lagged temperatures and window_sum's gradient. Production is held
+        # at 0.5, far above its cap: the production switch (minprodN = 0, day 11) then has a margin
+        # of 2e-5, 18x the threshold (at the configured 0.05 it was 2e-6)
+        "T_wdays",
+        "nitrate",
+        None,
+        _SMALL_DENITRIFICATION,
+        _SMALL_UPTAKE,
+        _CAPPED_PRODUCTION,
     ),
     "River.T_wdays [org-nitrogen]": _river(
         # 3 puts a production switch (minprodN = 0, day 11) within 1e-6 of the margin scale
@@ -557,7 +588,7 @@ SLOW = {
     "Land.percolation_residence_time",
     "precipitation",
     # 3b: each family keeps its cheapest entry in the default selection (the decays of the pond, the
-    # reservoir and the arc, the works' treatment, one soil weight, River.denpar_w [nitrate]); the
+    # reservoir and the arc, the works' treatment, one soil weight, River.T_wdays [nitrate]); the
     # other river runs take 120 days of two rivers, 10 s and more each
     "soil_temp_w_air",
     "soil_temp_w_deep",
@@ -568,7 +599,7 @@ SLOW = {
     "River.prodNpar [org-nitrogen]",
     "River.muptNpar [nitrate]",
     "River.muptNpar [org-nitrogen]",
-    "River.T_wdays [nitrate]",
+    "River.denpar_w [nitrate]",
     "River.T_wdays [org-nitrogen]",
     "temperature (river) [nitrate]",
     "temperature (river) [org-nitrogen]",
