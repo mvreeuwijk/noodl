@@ -679,7 +679,10 @@ def test_decay_queue_tank_equals_wsimods_on_random_sequences(wsimod_tanks, n):
     """A WSIMOD ``DecayQueueTank`` (its default ``number_of_timesteps=1``, ``tanks.py:648``, and
     0) with a dummy parent, against noodl's over 60 days of pushes at times 0-2, pulls, exact
     pulls and ends of day: after every call ``storage``, ``active_storage``, the dense register,
-    ``present`` and ``total_decayed`` are bitwise WSIMOD's (X13, X30)."""
+    ``present`` and ``total_decayed`` are bitwise WSIMOD's (X13, X30). Pushes below
+    ``FLOAT_ACCURACY`` and forced pushes are among the calls, and one day in three pushes
+    nothing, so slot 0 still holds water at its end of day beside other queued slots: the
+    position of ``diff(slot 0)`` in ``total_decayed``'s sum is compared with WSIMOD's."""
     g = torch.Generator().manual_seed(90 + n)
     u = lambda: float(torch.rand((), generator=g, dtype=F64))  # noqa: E731
     parents = [Parent() for _ in range(B)]
@@ -700,8 +703,9 @@ def test_decay_queue_tank_equals_wsimods_on_random_sequences(wsimod_tanks, n):
     length = ours.internal_arc.length
     assert length == max(1, n + 2)
     w = Worst()
-    ops = ["push", "push", "push", "pull", "pull_exact"]
+    ops = ["push", "push", "push", "push_tiny", "push_force", "pull", "pull_exact"]
     capped = 0
+    full_ends = 0  # ends of day with water in slot 0 and in other slots
 
     def compare(label):
         arc = ours.internal_arc
@@ -735,14 +739,22 @@ def test_decay_queue_tank_equals_wsimods_on_random_sequences(wsimod_tanks, n):
             parent.data_input_dict[("temperature", d)] = temperature
         ctx = start_day(ours, decay, temperatures, shape=(B,), d=d)
         capped += int(ctx.decisions[0].outcome.sum())  # cap:phosphate, the first decision
+        quiet = d % 3 == 2  # no push: slot 0 keeps what the last end of day moved there
         for k in range(int(torch.randint(1, 6, (), generator=g))):
             op = ops[int(torch.randint(len(ops), (), generator=g))]
+            if quiet:
+                op = ("pull", "pull_exact")[k % 2]
             time = int(torch.randint(3, (), generator=g))
             active = torch.rand(B, generator=g) < 0.85
             requests = [random_vqip(g, 6.0) for _ in range(B)]
+            if op == "push_tiny":
+                for r in requests:
+                    r["volume"] = 1e-12
             req = stack(requests)
-            if op == "push":
+            if op in ("push", "push_tiny"):
                 got = ours.push_storage(req, active=active, time=time)
+            elif op == "push_force":
+                got = ours.push_storage(req, active=active, force=True)
             elif op == "pull":
                 got = ours.pull_storage(req, active=active)
             else:
@@ -752,19 +764,100 @@ def test_decay_queue_tank_equals_wsimods_on_random_sequences(wsimod_tanks, n):
                 if not active[b]:
                     continue
                 r = dict(requests[b])
-                if op == "push":
+                if op in ("push", "push_tiny"):
                     ref = tank.push_storage(r, time=time)
+                elif op == "push_force":
+                    ref = tank.push_storage(r, force=True)
                 elif op == "pull":
                     ref = tank.pull_storage(r)
                 else:
                     ref = tank.pull_storage_exact(r)
                 w.vqip(f"n={n} day {d} call {k} {op} [{b}] reply", got[b], ref)
             compare(f"n={n} day {d} after call {k} {op}")
+        held = torch.broadcast_to(ours.internal_arc.register[..., 0], (B, length + 1)) > 0
+        # n = 0 leaves nothing beyond slot 1 on a day without pushes; two terms add the same in
+        # either order, so the slot-0 position is discriminated by n = 1 (and the direct test)
+        full_ends += int((held[:, 0] & (held[:, 1:].sum(-1) >= (2 if n else 1))).sum())
         ours.end_timestep()
         for tank in theirs:
             tank.end_timestep()
         compare(f"n={n} end of day {d}")
     assert capped > 0  # the cap bound on some hot days
+    assert full_ends > 0
+    assert w.worst == 0.0
+
+
+def test_the_end_of_day_decay_order_puts_slot_zero_last():
+    """X30 (``arcs.py:798-805``): ``total_decayed`` is reset, then ``diff(slot 1) ... diff(slot
+    L)`` and ``diff(slot 0)`` last. With 2.8, 2.2 and 0.7 kg of phosphate in slots 0-2 and a
+    factor of exactly 0.1, ``(0 + 0.22 + 0.07) + 0.28`` is 0.5700000000000001 while the
+    slot-0-first order gives 0.57, so the test discriminates."""
+    tank, decay, _ = decay_queue_tank(
+        {"phosphate": {"constant": 0.1, "exponent": 1.0}}, n=0, times=(0, 2)
+    )
+    start_day(tank, decay, 15.0)
+    arc = tank.internal_arc
+    rows = [PQ.to_vqip({"volume": 1.0, "phosphate": x}) for x in (2.8, 2.2, 0.7)]
+    arc.register, arc.present = torch.stack(rows), torch.tensor([True, True, True])
+    tank.end_timestep()
+    got = arc.total_decayed[PHOSPHATE].item()
+    diffs = [x * 0.1 for x in (2.8, 2.2, 0.7)]
+    assert got == (0.0 + diffs[1] + diffs[2]) + diffs[0] == 0.5700000000000001
+    assert (0.0 + diffs[0] + diffs[1]) + diffs[2] == 0.57  # slot 0 first
+
+
+def test_two_empty_slots_with_different_temperatures_merge_as_wsimods(wsimod_tanks):
+    """X46 reached through WSIMOD's own calls: a push into a full ``DecayQueueTank`` enters,
+    under key 3, a zero-volume row that keeps the request's temperature (13); after slot 0 is
+    flushed (``update_queue``, as ``distribute`` does), each end of day merges two zero-volume
+    slots with different temperatures, where ``sum_vqip``'s argument order decides the result
+    (``arcs.py:805``). Every store is bitwise WSIMOD's."""
+    decays = {"phosphate": {"constant": 0.1, "exponent": 1.0}}
+    parent = Parent()
+    theirs = wsimod_tanks.DecayQueueTank(
+        decays=decays,
+        parent=parent,
+        number_of_timesteps=1,
+        capacity=1.0,
+        area=1.0,
+        datum=0.0,
+        initial_storage=0,
+    )
+    ours, decay, _ = decay_queue_tank(decays, n=1, times=(0, 1, 2), capacity=1.0)
+    arc, length = ours.internal_arc, ours.internal_arc.length
+    w = Worst()
+
+    def compare(label):
+        w.vqip(f"{label} storage", ours.storage, theirs.storage)
+        w.vqip(f"{label} total_decayed", arc.total_decayed, theirs.internal_arc.total_decayed)
+        rows, keys = wsimod_register(theirs.internal_arc.queue, length)
+        for i, row in enumerate(rows):
+            w.vqip(f"{label} register[{i}]", arc.register[i], row)
+        assert arc.present.tolist() == keys, label
+
+    for d in range(4):
+        parent.t = d
+        parent.data_input_dict[("temperature", d)] = 15.0
+        start_day(ours, decay, 15.0, d=d)
+        if d == 0:
+            for push, time in (
+                ({"volume": 1.0, "phosphate": 0.5, "temperature": 10.0}, 0),  # fills the tank
+                ({"volume": 1.0, "phosphate": 0.5, "temperature": 13.0}, 2),  # rejected: V 0
+            ):
+                w.vqip(
+                    f"day 0 push at {time}",
+                    ours.push_storage(PQ.to_vqip(push), active=TRUE, time=time),
+                    theirs.push_storage(dict(push), time=time),
+                )
+            assert arc.register[3].tolist() == [0.0, 0.0, 13.0]
+        arc.update_queue(active=TRUE)  # distribute's (storage.py:352)
+        theirs.internal_arc.update_queue(direction="push")
+        compare(f"day {d} flushed")
+        ours.end_timestep()
+        theirs.end_timestep()
+        compare(f"end of day {d}")
+        if d == 2:  # sum_vqip(decay(old[1]) = (0, 0, 13), decay(old[0]) = (0, 0, 0)) keeps 13
+            assert arc.register[0].tolist() == [0.0, 0.0, 13.0]
     assert w.worst == 0.0
 
 

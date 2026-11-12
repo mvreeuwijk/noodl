@@ -293,7 +293,7 @@ value that is extracted from `storage` at the end of day d + 1 (X30):
 5. extracted at the end of day d + 1 (`tanks.py:694`), immediately before the next reset.
 
 On day 0 the value is the empty initial `total_decayed` (`core.py:472`) plus day 0's entries.
-noodl adds in that order, starting from the carried `"wsimod.total_decayed"`. An absent key adds an empty `diff`, which is an exact zero. `L` is
+noodl adds in that order, starting from the carried `"wsimod.total_decayed"`. An absent key adds nothing (WSIMOD does not call `make_decay` for it). `L` is
 3a's register length; WSIMOD's growing `max_travel` covers only keys that exist, and the rest
 are absent.
 
