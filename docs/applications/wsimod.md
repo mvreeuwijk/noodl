@@ -650,7 +650,6 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `WWTW.make_discharge` rejection at or below `FLOAT_ACCURACY` | a tolerance, recorded as dropped | `test_a_tiny_discharge_rejection_vanishes_and_is_recorded_as_dropped` |
 | `decays: {}` on the `Storage` family builds a `DecayTank`, which reads the temperature and decays nothing | ported; the temperature forcing is required | `test_storage_with_decays_reads_its_temperature` |
 | WSIMOD's `record_all` skips a `DecayTank` | the tank drops out of `tank_*` (X40); its storage stays in the state | `test_a_decaying_storage_decays_at_the_end_of_the_day_and_closes_the_balance` |
-| `Surface.run` converts `total_decayed` at every call | transcribed: a second `Land.run` on one day converts the same mass twice | case `land_run_twice` |
 | `Groundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:154`, `:202-203`, `nodes.py:26`): a decaying one raises `TypeError` at its first end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, and a decaying `Groundwater` without one is refused by name (X11) | `test_case_runs_where_wsimod_crashes_decay_groundwater`; `test_case_matches_wsimod[decay_groundwater-quantity]` and `[decay_groundwater-pollutants]` |
 | the same in `QueueGroundwater` (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the same (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; `test_case_matches_wsimod[decay_queue_groundwater-quantity]` and `[decay_queue_groundwater-pollutants]` |
 | `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; `test_number_of_timesteps_override`; `test_case_matches_wsimod[decay_queue_groundwater_n0-quantity]` and `[decay_queue_groundwater_n0-pollutants]` |
@@ -658,10 +657,10 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | River mineralisation with `din = 0` (`storage.py:866-873`) destroys the mineralised nitrogen | reproduced (X14, X15); the loss is in `bio_out` and the event `"river_nitrogen_lost"` says so | `test_mineralisation_without_din_destroys_nitrogen_and_says_so`; `test_case_matches_wsimod[river_nutrients-pollutants]` (the DIN-free stretch) |
 | the River's "365-day" phosphorus mean adds 366 entries and divides by 365; every window divides by its full length from day 1 (cold start) | reproduced (X14) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_case_matches_wsimod[river_nutrients-pollutants]` |
 | `totalphosfcn` compares the River's phosphorus mass (kg) with the concentrations `limpppar` and `hsatTP` (kg/m3) | reproduced and documented: the evident fix has no single form (X14) | `test_river_nutrients_reaches_every_branch` (`-m slow`: both `totalphosfcn` outcomes of the low-P river, in the first 400 days and over 1100) |
-| no check of a decay's or a treatment's `exponent` (`core.py:513-515`, `wtw.py:191-193`): `0 ** negative` raises `ZeroDivisionError`, a negative base gives a complex number | an `exponent` of 0 or below is refused by name | `test_read_decays_refusals[decays2-exponent]` and the other nine refusals of that test; `test_wtw_treatment_refusals` (9 refusals) |
+| no check of a decay's or a treatment's `exponent` (`core.py:513-515`, `wtw.py:191-193`): `0 ** negative` raises `ZeroDivisionError`, a negative base gives a complex number | an `exponent` of 0 or below is refused by name | `test_read_decays_refusals[decays4-exponent]` and `[decays5-exponent]` (an `exponent` of 0 and of -1), among the ten refusals of that test; `test_wtw_treatment_refusals` (9 refusals) |
 | `decays` may name `volume` (`core.py:510-519`): the water itself would decay | refused by name | `test_read_decays_refusals[decays0-volume]` |
 | the default `decays={}` of a surface is one dict shared by every surface built without one, so an override reaches all of them | per surface | `test_a_decays_override_reaches_only_its_surface` |
-| `Surface.run` converts `total_decayed` at every call: a second `Land.run` on one day converts the same mass twice | transcribed (X16) | `test_case_matches_wsimod[land_run_twice-quantity]` and `[land_run_twice-pollutants]` |
+| `Surface.run` converts `total_decayed` at every call: a second `Land.run` on one day converts the same mass twice | transcribed (X16) | `test_case_matches_wsimod[land_run_twice-quantity]` and `[land_run_twice-pollutants]` (and the carry-over's own cases, `surface_decay_nitrification`) |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
@@ -702,7 +701,7 @@ relative (the tolerance is 1e-6), and the `"decisions"` outcomes of the two pert
 identical. The worst are the River's (`T_wdays [nitrate]` 1.5e-7, `halfsatINwater [nitrate]`
 1.0e-7 and `denpar_w [org-nitrogen]` 6.8e-8, small gradients through 120 days of two rivers),
 then `Sewer.pipe_timearea` 5.9e-8; the decay entries are within 9e-10, the treatment ones within
-1.3e-10 and the soil-temperature weights within 1.7e-8. The `window_sum` of the River's
+1.2e-10 and the soil-temperature weights within 1.7e-8. The `window_sum` of the River's
 registers carries the plain sum's gradient (X55). The tests move a point off a kink where the default one lies on it (the preference
 1.0 to 1.37, the surface residence time 1 to 3), and say so.
 
@@ -768,7 +767,7 @@ unloaded medians differ by 5 %).
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:
-  `oxford` takes about 0.07 s a day without gradients (unloaded; pollutants add a few per cent).
+  `oxford` takes about 0.07 s a day without gradients (unloaded; the pollutant run costs 2 to 18 % more, measured on a shared machine).
 - **The closure is not re-entrant.** One `WsimodDay` holds one engine that every step reuses, so
   two steps of one model must not run at once (threads, or a step that calls another).
 - **`Model.to`.** `model.to(dtype=torch.float64)` (or a CPU device) works and changes nothing
@@ -840,7 +839,7 @@ has to be debugged, not admitted.
 | 47 cases (the 3a ones and the decay, treatment, soil-temperature and surface cases of 3b) | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
 | `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s a mode |
 | `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | about 10 s a mode unloaded (22 s, 27 s and 31 s for the branch assertions measured on a shared machine) |
-| `river_double_discharge` | 40 | quantity-only, all pollutants | 0 (WSIMOD's own balance prints on every day; noodl's closes within 2e-16 of scale) | yes | |
+| `river_double_discharge` | 40 | quantity-only, all pollutants | 0 (WSIMOD's own balance prints on every day; noodl's closes within 2e-16 of scale) | yes | not timed separately |
 | 49 gradients | 1 to 200 | quantity-only values, pollutant runs | 1.5e-7 relative | 30 of 49 (19 `-m slow`) | 229 s in all |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
@@ -859,4 +858,4 @@ demo parity items 91 to 97 s each), the row took 675 s (11 min 14 s, 5,835 tests
 register over and holds every branch; its default items take about 3 s a mode (with the register
 sums as CPython's own `sum`, X55; 8 s before), and the 1100-day run with the branch assertions
 from the recorded decisions is `-m slow` (about 10 s a mode on an unloaded machine). `pytest -m slow` on the row also
-adds the full `oxford` run, the full per-node replays and the six slow gradients.
+adds the full `oxford` run, the full per-node replays and the 19 slow gradients.
