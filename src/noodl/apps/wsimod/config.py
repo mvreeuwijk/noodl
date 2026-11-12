@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import csv
 import gzip
+import numbers
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -253,6 +254,13 @@ def _checked_parameters(
     return parameters
 
 
+def _need_real(value: object, what: str) -> None:
+    """A WTW constant, exponent or liquor multiplier is multiplied (``wtw.py:191-201``): refuse
+    a string, ``None`` or a boolean by name, as ``read_decays`` does."""
+    if isinstance(value, (str, bool)) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{what} {value!r} is not a number (WSIMOD multiplies it, wtw.py:191-201)")
+
+
 def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) -> None:
     """A configured ``process_parameters`` or ``liquor_multiplier`` must name every additive
     pollutant, ``process_parameters`` with its ``constant`` and ``exponent``: WSIMOD reads them
@@ -272,6 +280,9 @@ def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) ->
                 raise ValueError(
                     f"{where}: process_parameters[{name!r}] has no {key!r} (wtw.py:191, :197)"
                 )
+            _need_real(entry[key], f"{where}: process_parameters[{name!r}] {key}")
+    for name, value in liquor.items():
+        _need_real(value, f"{where}: liquor_multiplier[{name!r}]")
     for name in pollutants.additive if liquor else ():
         if name not in liquor:
             raise ValueError(
@@ -359,7 +370,9 @@ def _apply_overrides(
             parameters[key] = copy.deepcopy(value)
 
 
-def _override_filename(node: NodeSpec, value: object, where: str, unread: list[str]) -> None:
+def _override_filename(
+    node: NodeSpec, value: object, where: str, unread: list[str], pollutants: Pollutants
+) -> None:
     """``Node.apply_overrides`` (``nodes.py:93-99``, D23): a string is read with ``read_csv`` as
     written, relative to the working directory (not the configuration's), and replaces the
     node's forcing; a falsy non-string (``None``, ``0``, ``[]``) is ignored; anything else is
@@ -372,9 +385,11 @@ def _override_filename(node: NodeSpec, value: object, where: str, unread: list[s
         node.data = _read_csv(path)
         # a class that reads no forcing still has its file read (D10); a Groundwater's file is
         # read by its decay only
-        reads = node.cls in _FORCING_CLASSES or (
-            node.cls in _TEMPERATURE_STORAGE and node.parameters.get("decays") is not None
-        )
+        reads = (
+            node.cls in _FORCING_CLASSES
+            or (node.cls in _TEMPERATURE_STORAGE and node.parameters.get("decays") is not None)
+            or (node.cls == "River" and "nitrate" in pollutants.names)
+        )  # storage.py:750
         if not reads and f"{node.name}.filename" not in unread:
             unread.append(f"{node.name}.filename")
     elif not value:
@@ -386,14 +401,16 @@ def _override_filename(node: NodeSpec, value: object, where: str, unread: list[s
         )
 
 
-def _override_node(node: NodeSpec, entry: dict, where: str, unread: list[str]) -> None:
+def _override_node(
+    node: NodeSpec, entry: dict, where: str, unread: list[str], pollutants: Pollutants
+) -> None:
     _apply_overrides(node.parameters, NODE_SCHEMAS[node.cls], entry, where)
     # storage.py:540, :620-644: a River's bulk_density is set and never read (D10)
     if node.cls == "River" and "bulk_density" in entry:
         if f"{node.name}.bulk_density" not in unread:
             unread.append(f"{node.name}.bulk_density")
     if "filename" in entry:
-        _override_filename(node, entry["filename"], where, unread)
+        _override_filename(node, entry["filename"], where, unread, pollutants)
     surfaces = entry.get("surfaces", {})
     if not isinstance(surfaces, Mapping):
         raise ValueError(f"{where}: surfaces must be a mapping of surface name to overrides")
@@ -637,7 +654,7 @@ def read_wsimod_config(
         node = next((n for n in nodes if n.slot_key == type_ and n.name == name), None)
         if node is None:  # model.py:822-823
             raise ValueError(f"override: node {name!r} not recognised")
-        _override_node(node, entry, f"override of node {name!r}", unread)
+        _override_node(node, entry, f"override of node {name!r}", unread, pollutants)
     for entry in _items(section.get("arcs"), "overrides arcs"):
         name = _need(entry, "name", "an arc override")
         entry.pop("type_", None)  # model.py:828-829
@@ -645,6 +662,12 @@ def read_wsimod_config(
         if arc is None:  # model.py:831-832
             raise ValueError(f"override: arc {name!r} not recognised")
         for key in entry:
+            if key == "decays":
+                raise ValueError(
+                    f"override of arc {name!r}: decays cannot be overridden (WSIMOD's "
+                    "Arc.apply_overrides consumes only capacity and preference, arcs.py:87-96, "
+                    "and would store it unread)"
+                )
             if key not in ARC_SCHEMAS[arc.cls].override_keys:
                 raise ValueError(
                     f"override of arc {name!r}: {key!r} is not an override of {arc.cls}"

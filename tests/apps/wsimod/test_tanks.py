@@ -1080,3 +1080,38 @@ def test_decay_arc_alt_matches_wsimod_on_irregular_pushes(wsimod_tanks):
             w.value(f"{label} term", term[b, PHOSPHATE], reference)
     assert blended > 0
     assert w.worst == 0.0
+
+
+def test_decay_arc_alt_decays_slot_zero_once_whatever_a_loaded_present_says():
+    """WSIMOD's key 1 always exists (``arcs.py:567-568``), so the swapped merge of
+    ``end_timestep`` (``:803-805``) is unconditional: a loaded ``present`` row with slot 1
+    absent (WSIMOD never produces one) must not leave slot 0 undecayed and then add its decay."""
+    from noodl.apps.wsimod.arcs import DecayArcAlt
+    from noodl.apps.wsimod.decay import read_decays
+
+    results = []
+    for slot_one in (True, False):
+        src = Node(NodeSpec("src", "Node", "Node", {}), PQ)
+        out = Waste(NodeSpec("out", "Waste", "Waste", {}), PQ)
+        spec = ArcSpec(
+            "q",
+            "DecayArcAlt",
+            "src",
+            "out",
+            number_of_timesteps=2,
+            decays=read_decays("arc 'q'", QUEUE_DECAYS, PQ),
+        )
+        arc = DecayArcAlt(spec, src, out, PQ, length=4)
+        day(src, out, arc, p=PQ)
+        src.bind({"temperature": torch.tensor(12.0, dtype=F64)})
+        arc.bind_decay(arc.defaults["decays.constant"], arc.defaults["decays.exponent"])
+        register = torch.zeros_like(arc.register)
+        register[0] = PQ.to_vqip({"volume": 2.0, "phosphate": 1.0, "temperature": 12.0})
+        present = torch.zeros_like(arc.present)
+        present[0] = True
+        present[1] = slot_one
+        arc.load_stores({"register": register, "present": present})
+        arc.end_timestep()
+        results.append(arc.register[0].clone())
+    assert torch.equal(results[0], results[1])
+    assert results[0][PHOSPHATE] < 1.0  # decayed once, not doubled

@@ -22,19 +22,13 @@ import torch
 from torch import Tensor
 
 from noodl.apps.wsimod.config import WsimodNetwork
-from noodl.apps.wsimod.day import STATE_KEYS, WsimodDay
+from noodl.apps.wsimod.day import _FLAT_KEYS, STATE_KEYS, WsimodDay
 from noodl.model import Drivers, Model, State
 from noodl.topology import Network
 
 __all__ = ["build_model", "initial_drivers", "initial_state"]
 
 F64 = torch.float64
-_FLAT = (
-    "wsimod.travel_queue_present",
-    "wsimod.arc_queue_since",
-    "wsimod.river_temperature_lag",
-    "wsimod.river_phosphorus_lag",
-)
 
 
 def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Model, State, Drivers]:
@@ -149,7 +143,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
         rows: dict[int, Tensor] = {}
         for label, v in value.items():
             i = _row(labels, label, key)
-            rows[i] = _tensor(v) if key in _FLAT else _vqip(day, v, key, label)
+            rows[i] = _tensor(v) if key in _FLAT_KEYS else _vqip(day, v, key, label)
         given[key] = rows
     active_labels = day.state_labels("wsimod.active_storage")
     storage_labels = day.state_labels("wsimod.storage")
@@ -159,7 +153,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
         if label in active_labels and active_labels.index(label) not in follow:
             follow[active_labels.index(label)] = row
     for key, rows in given.items():
-        state[key] = _assemble(state[key], rows, key in _FLAT)
+        state[key] = _assemble(state[key], rows, key in _FLAT_KEYS)
     return state
 
 

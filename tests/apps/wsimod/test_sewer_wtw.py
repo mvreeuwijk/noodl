@@ -631,6 +631,16 @@ def _with(name: str, entry: dict) -> dict:
         (_with("volume", {"exponent": 1.1}), "exponent", "validate"),
         (_with("phosphate", {"constant": 0.1, "exponent": 0}), "exponent", "validate"),
         (_with("ammonia", {"constant": 0.1, "exponent": -1}), "exponent", "validate"),
+        (_with("phosphate", {"constant": 0.1, "exponent": "1.05"}), "exponent '1.05'", "read"),
+        (_with("phosphate", {"constant": 0.1, "exponent": None}), "exponent None", "read"),
+        (_with("phosphate", {"constant": "0.1", "exponent": 1.05}), "constant '0.1'", "read"),
+        (_with("ammonia", {"constant": True, "exponent": 1.05}), "constant True", "read"),
+        (
+            {"liquor_multiplier": {**_LIQUOR, "phosphate": "0.5"}},
+            "liquor_multiplier.*'0.5'",
+            "read",
+        ),
+        ({"liquor_multiplier": {**_LIQUOR, "volume": None}}, "liquor_multiplier.*None", "read"),
     ],
     ids=[
         "process_lacks_pollutant",
@@ -642,6 +652,12 @@ def _with(name: str, entry: dict) -> dict:
         "volume_exponent",
         "exponent_zero",
         "exponent_negative",
+        "exponent_string",
+        "exponent_none",
+        "constant_string",
+        "constant_bool",
+        "liquor_string",
+        "liquor_none",
     ],
 )
 def test_wtw_treatment_refusals(node, match, stage):

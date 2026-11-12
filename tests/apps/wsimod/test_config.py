@@ -805,3 +805,35 @@ def test_a_demand_with_a_residential_override_runs_in_the_demand_slot():
         }
     )
     assert (network.nodes[0].slot_key, network.nodes[0].cls) == ("Demand", "ResidentialDemand")
+
+
+def test_a_rivers_filename_override_is_read_with_nitrate_among_the_pollutants(tmp_path):
+    """``storage.py:750``: a ``River`` with ``nitrate`` reads its temperature at every
+    ``calculate_discharge``, so its ``filename`` override is not listed unread; without
+    ``nitrate`` it is."""
+    path = tmp_path / "r.csv"
+    path.write_text("variable,time,value\ntemperature,2000-01-01,11.0\n", encoding="utf-8")
+
+    def mapping(pollutants):
+        return {
+            "dates": ["2000-01-01"],
+            "pollutants": pollutants,
+            "additive_pollutants": [x for x in pollutants if x != "temperature"],
+            "non_additive_pollutants": ["temperature"] if "temperature" in pollutants else [],
+            "nodes": [{"name": "r", "type_": "River"}],
+            "arcs": [],
+            "overrides": {"nodes": [{"type_": "River", "name": "r", "filename": str(path)}]},
+        }
+
+    assert read_wsimod_config(mapping(["phosphate", "temperature"])).unread == ["r.filename"]
+    assert read_wsimod_config(mapping(["nitrate", "phosphate", "temperature"])).unread == []
+
+
+def test_an_arc_override_of_decays_is_refused_with_the_reason():
+    """M3: WSIMOD's ``Arc.apply_overrides`` consumes only ``capacity`` and ``preference``
+    (``arcs.py:87-96``): the refusal says so instead of "must be a number"."""
+    decays = {"phosphate": {"constant": 0.1, "exponent": 1.05}}
+    mapping = _decay_arc_mapping("DecayArc", decays=decays)
+    mapping["overrides"]["arcs"] = [{"name": "x", "decays": decays}]
+    with pytest.raises(ValueError, match=r"arc 'x'.*decays cannot be overridden.*arcs\.py:87-96"):
+        read_wsimod_config(mapping)

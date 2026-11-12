@@ -246,7 +246,9 @@ The drivers, one row per node of the class (`WTW`, `WWTW` or `FWTW`):
 refused, naming the key and the new shape. An `exponent` of 0 or below is refused (also in a
 batched driver, when the day is bound): `0 ** negative` raises where `T > 20` and a negative base
 gives a complex number. A configured `process_parameters` or `liquor_multiplier` must name every
-additive pollutant (WSIMOD raises `KeyError` otherwise); an override may be partial and merges.
+additive pollutant (WSIMOD raises `KeyError` otherwise), and every `constant`, `exponent` and
+liquor multiplier must be a real number (a string, `None` or a boolean is refused by name);
+an override may be partial and merges.
 Entries for a pollutant that is not additive, for one the model does not list, and a `volume`
 `exponent` are refused: WSIMOD never reads them.
 
@@ -573,7 +575,7 @@ pollutant entries, every `decays` value (nodes, surfaces and user decay arcs; th
 `model.ignored_by_quantity_only`. What WSIMOD accepts and never reads is `model.unread`
 (`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
-and ignores it). With `pollutants=True` (the default) the same configuration is
+and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) the same configuration is
 refused if a process that is not ported yet would change the pollutants (deposition and the
 land's nutrient pools, 3c): until then, such configurations need `pollutants=False` or a
 neutralised copy, below. The soil temperature, the treatment, the decays and the River's

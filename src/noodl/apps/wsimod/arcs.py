@@ -597,6 +597,8 @@ class DecayArcAlt(AltQueueArc):
         rows = list(old.unbind(-2))
         for i in range(self.length):  # :798-803; WSIMOD's max_travel covers only existing keys
             key = here[..., i + 1]
+            if i == 0:  # arcs.py:567-568, :803: WSIMOD's key 1 always exists, as the merge below
+                key = key | True  # assumes (a loaded row with slot 1 absent cannot be WSIMOD's)
             decayed, diff = self.make_decay(old[..., i + 1, :])
             rows[i] = torch.where(key[..., None], decayed, rows[i])
             rows[i + 1] = torch.where(key[..., None], torch.zeros_like(rows[i + 1]), rows[i + 1])
