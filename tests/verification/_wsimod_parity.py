@@ -151,9 +151,9 @@ def assert_matches_wsimod(
     ``expected_mass_balance_prints`` (D17, X32) names the nodes whose ``mass balance error``
     lines WSIMOD is expected to print on **every** day while noodl's own balance closes: a
     ``River`` whose ``calculate_discharge`` runs twice a day (``river_double_discharge``), where
-    WSIMOD's assigned ``bio_in``/``bio_out`` drop the first call's terms. Those lines, for any
-    pollutant, are asserted present on every day (``print_days`` is required) and are left out
-    of the residual comparison; every other line is checked as before.
+    WSIMOD's assigned ``bio_in``/``bio_out`` drop the first call's terms. Those nodes' pollutant
+    lines are asserted present on every day (``print_days`` is required) and are left out of the
+    residual comparison; a volume line of theirs, and every other print, is checked as before.
 
     Returns ``{"worst": the largest absolute difference, "scale": the scale of its series,
     "admissions": the admissions used}``.
@@ -254,8 +254,9 @@ def _check_prints(
     balance: it is left out (``dropped - dropped_arcs``). With ``print_days`` each error line must
     also fall on its day. Any other line, or a missing one, fails. The lines of a node in
     ``expected_mass_balance_prints`` (D17) are the exception: WSIMOD's own balance of that node
-    is wrong by construction (X16, X32), so they are required on every day, for whatever
-    pollutant, and compared with nothing.
+    is wrong by construction (X16, X32), so its pollutant lines are required on every day and
+    compared with nothing; its volume lines, which the biochemistry cannot cause, go through
+    the residual comparison like any other.
 
     Limits of the comparison: WSIMOD's check is per node and relative (the values normalised by
     the largest power of ten, against ``1e-11``), noodl's expectation is the system sum against
@@ -342,8 +343,8 @@ def _check_prints(
     expected_days: dict[str, set[int]] = {n: set() for n in expected_mass_balance_prints}
     for k, line in enumerate(printed):
         if m := _MASS_BALANCE.fullmatch(line):
-            if m.group(3) in expected_days:  # D17: WSIMOD's own balance is wrong there
-                expected_days[m.group(3)].add(print_days[k])
+            if m.group(3) in expected_days and m.group(1) != "volume":
+                expected_days[m.group(3)].add(print_days[k])  # D17: a pollutant line
                 continue
             error_days.append(-1 if print_days is None else print_days[k])
             if m.group(1) != "volume" or m.group(3) not in names:

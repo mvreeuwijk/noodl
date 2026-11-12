@@ -473,16 +473,14 @@ def _store_paths(node) -> tuple[str, ...]:
     if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
         return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
     tank = type(getattr(node, "tank", None)).__name__
+    paths = cls.store_paths
     if tank == "DecayTank":  # D8: a per-day store
-        return (*cls.store_paths, "tank.total_decayed")
+        paths = (*paths, "tank.total_decayed")
     if tank == "DecayQueueTank":  # D8: carried, extracted at the next end of day
-        return (*cls.store_paths, "tank.internal_arc.total_decayed")
+        paths = (*paths, "tank.internal_arc.total_decayed")
     if _runs_biochemistry(node):  # the registers (carried) and the per-day bio_in/bio_out
-        paths = cls.store_paths
-        if tank == "DecayTank":
-            paths = (*paths, "tank.total_decayed")
-        return (*paths, *_RIVER_BIOCHEMISTRY_PATHS)
-    return cls.store_paths
+        paths = (*paths, *_RIVER_BIOCHEMISTRY_PATHS)
+    return paths
 
 
 def _wsimod_store(node, path: str):

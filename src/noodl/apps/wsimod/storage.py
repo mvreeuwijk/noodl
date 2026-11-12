@@ -861,41 +861,23 @@ def _shift(register: Tensor, value: Tensor) -> Tensor:
     return torch.cat([register[..., 1:], value[..., None]], dim=-1)
 
 
-# CPython 3.12 sums floats with Neumaier's compensation (bltinmodule.c, builtin_sum_impl;
-# gh-100425); 3.11 adds them one at a time. A probe decides which, not ``sys.version_info``.
-# WSIMOD's means are whichever the interpreter does.
-COMPENSATED_SUM = sum([1e16, 1.0, -1e16]) == 1.0  # probed: the interpreter's behaviour
-
-
 def window_sum(register: Tensor, length: int) -> Tensor:
-    """CPython's ``sum`` of the register's last ``length`` slots, oldest first, from ``+0.0``
-    (``storage.py:806-808``, X31), elementwise over the batch.
+    """CPython's ``sum`` of the register's last ``length`` slots, oldest first, from the integer
+    0 (``storage.py:806-808``, X31), elementwise over the batch, with the plain sum's gradient.
 
-    From Python 3.12 (:data:`COMPENSATED_SUM`) ``sum`` is Neumaier's compensated sum: for each
-    item ``t = s + x`` and ``c += (s - t) + x`` where ``|s| >= |x|``, else ``c += (x - t) + s``;
-    at the end ``s + c`` where ``c`` is non-zero and finite. Before 3.12 it adds one item at a
-    time. CPython starts from the integer 0, and ``0 + x`` is ``+0.0 + x`` for every ``x``,
-    ``-0.0`` included; a padded ``+0.0`` slot leaves ``s`` and ``c`` at ``+0.0``. The sum is
-    therefore Python's over WSIMOD's list, bitwise. The branch on ``|s| >= |x|`` is detached;
-    the compensation's gradient is 0, so the gradient is the plain sum's. Parity assumes WSIMOD's
-    lists hold Python floats, as ``read_csv`` produces; ``numpy.float64`` items get CPython's
-    plain sum."""
-    total = torch.zeros(register.shape[:-1], dtype=torch.float64)
-    size = register.shape[-1]
-    compensation = torch.zeros_like(total)
-    for i in range(size - length, size):
-        x = register[..., i]
-        if not COMPENSATED_SUM:
-            total = total + x
-            continue
-        t = total + x
-        larger = (total.abs() >= x.abs()).detach()
-        compensation = compensation + torch.where(larger, (total - t) + x, (x - t) + total)
-        total = t
-    if not COMPENSATED_SUM:
-        return total
-    keep = ((compensation != 0) & torch.isfinite(compensation)).detach()
-    return torch.where(keep, total + compensation, total)
+    The value is the interpreter's own ``sum`` over the slots as Python floats (``tolist``), one
+    instance at a time: bitwise Python's over WSIMOD's list, whatever the interpreter does
+    (Neumaier's compensated sum from CPython 3.12, the plain running sum before; X51). CPython
+    starts from the integer 0, and ``0 + x`` is ``+0.0 + x`` for every ``x``, ``-0.0`` included,
+    so a padded ``+0.0`` slot changes nothing (X17). The gradient is the plain sum's (1 for every
+    slot in the window): the value is detached and ``plain - plain.detach()``, which is exactly
+    0 for finite slots, carries the graph. Parity assumes WSIMOD's lists hold Python floats, as
+    ``read_csv`` produces; ``numpy.float64`` items get CPython's plain sum."""
+    window = register[..., register.shape[-1] - length :]
+    plain = window.sum(dim=-1)
+    rows = window.detach().reshape(-1, length).tolist()
+    exact = torch.tensor([sum(row) for row in rows], dtype=torch.float64).reshape(plain.shape)
+    return exact + (plain - plain.detach())
 
 
 class River(Storage):

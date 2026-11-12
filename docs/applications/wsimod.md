@@ -315,17 +315,20 @@ with `din = 0`: `"river_nitrogen_lost"`), a phosphate pulse that carries the low
 365-day mean across the `totalphosfcn` guard, warming and cooling seasons (production and
 mineralisation), and every 50 % cap binding on some days and not on others. The default suite
 runs its first 400 days at value parity, bitwise, without decisions (X39); `-m slow` runs all
-1100 days (three turns of the 366-slot register, the pulse leaving it so `totalphosfcn` returns
-to 0) and asserts each branch from the recorded decisions on the 400-day prefix and on the full
-run (D24). `river_double_discharge` calls `calculate_discharge` twice a day: the values are at
-parity, WSIMOD prints its River mass-balance error on every day and noodl's residual is 0; the
-parity harness takes those prints as the one named exception to its print check (D17, X32).
+1100 days (three turns of the 366-slot register; the pulse leaves it on days 426-455 and the
+`totalphosfcn` guard is False again from day 448) and asserts each river's branches from the
+recorded decisions on the 400-day prefix and on the full run (D24). `river_double_discharge`
+calls `calculate_discharge` twice a day: the values are at parity, WSIMOD prints its River
+mass-balance error on every day and noodl's balance closes within rounding (2e-16 of scale);
+the parity harness takes those pollutant prints as the one named exception to its print check
+(D17, X32).
 
 **The registers and warm starts.** The state keys `"wsimod.river_temperature_lag"` (degC) and
 `"wsimod.river_phosphorus_lag"` (kg) hold the two registers, rows `(river, i)`, slot 0 the
 oldest, zero-padded at the front. All zeros is WSIMOD's empty lists: no sum notices the padding
-(`+0.0` leaves a sum unchanged), so the sums equal Python's over WSIMOD's lists, bitwise,
-including CPython 3.12's compensated `sum`. A run can start from another run's registers. Parity assumes
+(`+0.0` leaves a sum unchanged), and each window sum is the interpreter's own `sum` over the
+slots as Python floats (compensated from CPython 3.12), so the sums equal Python's over WSIMOD's
+lists, bitwise, with the plain sum's gradient. A run can start from another run's registers. Parity assumes
 WSIMOD's lists hold Python floats, as `read_csv` produces; `numpy.float64` items get CPython's
 plain sum. They are not water held, so the mass balance skips them. A river with `max_temp_lag = 5` has 6 slots,
 and both temperature windows are the whole register.
@@ -624,7 +627,7 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `QueueGroundwater` stores its `data_input_dict` before `Node.__init__` resets it (`storage.py:252`, `:291-292`): a decaying one raises `TypeError` at its first push or end of day | the configured data is lost (`model.unread`); the temperature comes from a `filename` override, refused by name without one (X11) | `test_case_runs_where_wsimod_crashes_decay_queue_groundwater`; case `decay_queue_groundwater` |
 | `DecayQueueTank`'s default `number_of_timesteps=1` (`tanks.py:648`) contradicts its docstring and `QueueTank`'s 0 | reproduced: `decays` delays a `QueueGroundwater` by one day; the `number_of_timesteps` override sets it (X12, X28) | `test_decaying_delays_a_queue_groundwater_by_one_day`; cases `decay_queue_groundwater` and `decay_queue_groundwater_n0` |
 | River biochemistry: the "365-day" phosphorus mean adds 366 entries; every window divides by its full length from day 1; `totalphosfcn` compares a mass with concentrations; mineralisation without dissolved nitrogen destroys nitrogen | reproduced (X14); the loss is in `bio_out` and the event `"river_nitrogen_lost"` (X15) | `test_the_registers_reproduce_pythons_sums_from_a_cold_start`; `test_mineralisation_without_din_destroys_nitrogen_and_says_so`; case `river_nutrients` (the DIN-free stretch, the low-P river crossing the `totalphosfcn` guard, more than 366 days under `-m slow`) |
-| `River.calculate_discharge` assigns `bio_in`/`bio_out` (`storage.py:923-924`): a second call a day drops the first call's terms from WSIMOD's node check, which prints an error | the processes run twice as in WSIMOD; noodl's terms add both calls and its balance closes (X16, X32) | case `river_double_discharge`: WSIMOD prints on every day (the named exception to the print check, D17), noodl's residual is 0 |
+| `River.calculate_discharge` assigns `bio_in`/`bio_out` (`storage.py:923-924`): a second call a day drops the first call's terms from WSIMOD's node check, which prints an error | the processes run twice as in WSIMOD; noodl's terms add both calls and its balance closes (X16, X32) | case `river_double_discharge`: WSIMOD prints on every day (the named exception to the print check, D17), noodl's balance closes within rounding (2e-16 of scale) |
 | `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
 
 WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
@@ -735,18 +738,21 @@ has to be debugged, not admitted.
   Reservoir, ResidentialDemand, Catchment) has worst difference exactly 0, with both IHACRES
   outcomes sampled.
 - **Whole model** (`tests/verification/test_wsimod_parity.py`): WSIMOD's two demos, `quickstart`
-  and `oxford`, each in two modes, against WSIMOD's own `Model.run`, and 36 purpose-built cases
+  and `oxford`, each in two modes, against WSIMOD's own `Model.run`, and 49 purpose-built cases
   (every feature the demos skip: queue arcs, a leaky `Distribution` and the reservoir spill,
   sewers with time-areas and foul sewers, storm tanks, an `FWTW` deficit, an evaporation clamp,
-  a porous `QueueGroundwater`, rivers, a `float_accuracy` override and others) in two modes.
+  a porous `QueueGroundwater`, rivers and the River biochemistry, decays, treatment, a
+  `float_accuracy` override and others) in two modes.
   Every arc's flow and pollutants, every recorded tank and every surface field, on every day. The
-  worst difference is exactly 0 for every node of both demos and for all 36 cases in both modes,
-  and no admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
+  worst difference is exactly 0 for every node of both demos and for all 49 cases in both modes,
+  the River biochemistry cases (`river_nutrients`, `river_double_discharge`) included, and no
+  admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
   day (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
   equal noodl's residual plus the dropped water, with one named exception (W90/W91, X32):
   `river_double_discharge`, where WSIMOD's River balance misses the first of two daily
-  `calculate_discharge` calls and prints on every day while noodl's residual is 0; the harness
-  requires those prints on every day and compares them with nothing (D17). The system mass
+  `calculate_discharge` calls and prints on every day while noodl's balance closes within
+  rounding (2e-16 of scale); the harness requires those pollutant prints on every day and
+  compares them with nothing (D17). The system mass
   balance closes within `1e-12 * scale` every day, and every day the residual equals the
   evaporation clamp's gap (0 without a clamp). A quantity-only run's volumes equal the pollutant
   run's exactly (`torch.equal`). The River biochemistry cases: `river_nutrients` runs its first
@@ -766,9 +772,9 @@ has to be debugged, not admitted.
 | quickstart | 1456 | quantity-only, pollutant mode | 0 | yes | 41 s, 38 s |
 | oxford | 365 | quantity-only, pollutant mode | 0 | yes | 36 s, 37 s |
 | oxford | 1456 | quantity-only, pollutant mode | 0 | `-m slow` | 142 s, 146 s |
-| 36 cases | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
-| `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s, 8 s a mode (26 s on a loaded machine) |
-| `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | 8 s, 21 s a mode; 22 s for the branch assertions |
+| 47 cases | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
+| `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s a mode |
+| `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | about 10 s a mode unloaded (22 s, 27 s and 31 s for the branch assertions measured on a shared machine) |
 | 22 gradients | 3 to 200 | quantity-only | 5.9e-8 relative | 16 of 22 (six `-m slow`) | |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
@@ -780,9 +786,10 @@ cases cover those classes, with the ties kept independent. WSIMOD's source files
 modified; the committed forcing is WSIMOD's (BSD-3, `tests/data/wsimod/LICENSE-WSIMOD`).
 
 **Suite composition.** The wsimod row of the test table (the default selection) takes
-about 160 s with `-n 4` (816 tests), within the 10-minute budget, so no test is cut. `pytest -m slow` on the
-row adds the full `oxford` run, the full per-node replays and the six slow gradients. The one
-cut so far is `river_nutrients` (X39): its default items run 400 of its 1100 days (about 8 s a
-mode; its 366-slot phosphorus register is summed one slot at a time every day, which is the cost)
-and are still among the row's 30 slowest; the 1100-day run and the branch assertions from the
-recorded decisions are `-m slow` (8 s, 21 s and 22 s).
+about 315 s with `-n 4` on an unloaded machine (5,798 tests; 11 to 15 min were measured while
+the machine was shared), within the 10-minute budget. One case is cut
+(X39): `river_nutrients` runs 400 of its 1100 days by default, which already turns its 366-slot
+register over and holds every branch; its default items take about 3 s a mode (with the register
+sums as CPython's own `sum`, X55; 8 s before), and the 1100-day run with the branch assertions
+from the recorded decisions is `-m slow` (about 10 s a mode on an unloaded machine). `pytest -m slow` on the row also
+adds the full `oxford` run, the full per-node replays and the six slow gradients.

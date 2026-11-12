@@ -2150,7 +2150,8 @@ def _river_nutrients() -> dict:
     (``kt = 1.16``, routing coefficient 0.33, area 1000 m2) is the low-P river: its phosphorus
     is about 3e-5 kg, below ``limpppar - hsatTP = 5e-5``, so ``totalphosfcn`` is 0 until the
     phosphate pulse of days 60-89 lifts its 365-day mean above the guard, and the mean falls
-    back below it once the pulse leaves the 366-slot register (days 426-455, the slow run).
+    back below it once the pulse leaves the 366-slot register (days 426-455; the guard is False
+    again from day 448, measured, in the slow run).
     ``r_low`` (coefficient 0.52, area 4000 m2) is overridden to ``max_temp_lag = 5``,
     ``max_phosphorus_lag = 300`` and raised rates (``_R_LOW_OVERRIDES``). The reservoir
     ``res`` (capacity 6, emptied into the sea every day) abstracts 6 m3 a day from ``r_up``
@@ -2221,8 +2222,8 @@ def _river_double_discharge() -> dict:
     river is warm (12-20 degC), never dry and always holds dissolved nitrogen, so each call
     moves mass. WSIMOD assigns ``bio_in``/``bio_out`` (``storage.py:923-924``), so its node check
     sees only the second call's terms and prints a mass-balance error for the river on every
-    day; noodl's terms add both calls and its residual is 0 (D17, the named exception to
-    W90/W91)."""
+    day; noodl's terms add both calls and its balance closes within rounding, 2e-16 of scale
+    (D17, the named exception to W90/W91)."""
     days = _DOUBLE_DISCHARGE_DAYS
     dates = _dates(days)
     rng = random.Random(140)

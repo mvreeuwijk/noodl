@@ -20,7 +20,6 @@ from noodl.apps.wsimod.engine import Ctx, make_node
 from noodl.apps.wsimod.node import NODE_CLASSES, Waste
 from noodl.apps.wsimod.run import wsimod_run
 from noodl.apps.wsimod.storage import (
-    COMPENSATED_SUM,
     Groundwater,
     QueueGroundwater,
     Reservoir,
@@ -1360,8 +1359,27 @@ def test_the_registers_reproduce_pythons_sums_from_a_cold_start():
         assert len(temperatures) == max_temp_lag + 1 and len(phosphorus) == 366
 
 
-def test_compensated_sum_follows_the_interpreter():
-    assert COMPENSATED_SUM == (sum([1e16, 1.0, -1e16]) == 1.0)
+def test_window_sum_is_cpythons_sum_with_the_plain_sums_gradient():
+    """X51, X55: on 200 random registers of 366 slots spanning 40 decades (both signs), batched,
+    ``window_sum`` over the last 10, 20 and 366 slots is ``torch.equal`` to Python's ``sum`` of
+    the list, differs from torch's plain sum on some rows (the compensation matters), and its
+    gradient is the plain sum's: 1 on every slot in the window, 0 before it."""
+    rng = random.Random(20261113)
+    lists = [
+        [rng.choice((-1.0, 1.0)) * 10 ** rng.uniform(-20.0, 20.0) for _ in range(366)]
+        for _ in range(200)
+    ]
+    register = torch.tensor(lists, dtype=torch.float64, requires_grad=True)
+    for length in (10, 20, 366):
+        got = window_sum(register, length)
+        expected = torch.tensor([sum(row[-length:]) for row in lists], dtype=torch.float64)
+        assert torch.equal(got.detach(), expected), length
+        assert not torch.equal(got.detach(), register.detach()[:, -length:].sum(-1)), length
+        (grad,) = torch.autograd.grad(got.sum(), register)
+        plain = torch.zeros_like(register)
+        plain[:, 366 - length :] = 1.0
+        assert torch.equal(grad, plain), length
+    assert torch.equal(window_sum(torch.zeros(3, 366, dtype=torch.float64), 366), torch.zeros(3))
 
 
 def test_minus_zero_phosphorus_enters_the_register_as_python_sums_it():

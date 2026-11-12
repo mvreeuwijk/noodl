@@ -35,7 +35,7 @@ from tests.apps.wsimod._replay import (  # noqa: E402
     replay_arc,
     to_vqip,
 )
-from tests.verification._wsimod_cases import _NUTRIENT_POLLUTANTS, CASES  # noqa: E402
+from tests.verification._wsimod_cases import CASES  # noqa: E402
 from tests.verification._wsimod_reference import (  # noqa: E402
     ArcDay,
     capture_arc_calls,
@@ -44,8 +44,6 @@ from tests.verification._wsimod_reference import (  # noqa: E402
     wsimod_model,
     wsimod_reference,
 )
-
-_RIVER_POLLUTANTS = _NUTRIENT_POLLUTANTS["pollutants"]
 
 
 def _days(network, days: int):
@@ -176,6 +174,7 @@ def test_the_river_nutrients_capture_holds_wsimods_lag_lists_and_forcing():
     slot moved by one ulp, or a changed forcing, fails the replay naming the call."""
     calls = captured("river_nutrients")
     mapping = CASES["river_nutrients"].build()
+    pollutants = mapping["pollutants"]
     for river, sizes in (("r_up", (21, 366)), ("r_low", (6, 301))):
         configured = next(n for n in mapping["nodes"] if n["name"] == river)["data_input_dict"]
         discharges = [c for c in calls[river] if c.method == "calculate_discharge"]
@@ -188,7 +187,7 @@ def test_the_river_nutrients_capture_holds_wsimods_lag_lists_and_forcing():
             assert (
                 c.pre["forcing.temperature"] == configured[("temperature", mapping["dates"][c.day])]
             )
-            assert set(c.pre["bio_out"]) == {"volume", *_RIVER_POLLUTANTS}
+            assert set(c.pre["bio_out"]) == {"volume", *pollutants}
         assert any(c.post["bio_out"]["nitrate"] > 0 for c in discharges)
         ends = [c for c in calls[river] if c.method == "end_timestep"]
         assert all(c.post["bio_in"]["org-nitrogen"] == 0 for c in ends)

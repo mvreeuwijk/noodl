@@ -600,36 +600,58 @@ def test_the_evaporation_clamp_prints_are_accepted_only_where_they_match_noodl()
 
 # --- the River biochemistry cases (Task 13; X16, X32, X39) --------------------------------------
 BIO = "biochemical_processes"
-# The branches ``river_nutrients`` is built to reach (spec, Purpose-built cases), as the decision
-# outcome that shows each: ``dmin``/``dmax`` record ``b < a`` / ``b > a`` with ``b`` the second
-# operand, so a cap ``min(0.5 pool, x)`` is taken when its outcome is False, and the
-# denitrification cap ``min(denitri_water, 0.5 din)`` when its outcome is True (``storage.py:788``,
-# ``:840-843``, ``:860-863``, ``:882``, ``:891``).
-RIVER_BRANCHES = {
-    "dry": True,
-    "frozen": True,
-    "cold": True,
-    "denitrification_cap": True,
-    "production_cap:N": False,
-    "production_cap:P": False,
-    "mineralisation_cap:N": False,
-    "mineralisation_cap:P": False,
-    "macrophyte_cap:N": False,
-    "macrophyte_cap:P": False,
+# The outcomes each river of ``river_nutrients`` is built to show (spec, Purpose-built cases),
+# per river so that no branch passes on another river's hit (X55); the sets are exact.
+# ``dmin``/``dmax`` record ``b < a`` / ``b > a`` with ``b`` the second operand, so a cap
+# ``min(0.5 pool, x)`` is taken when its outcome is False and left when it is True, and the
+# denitrification cap ``min(denitri_water, 0.5 din)`` is taken when its outcome is True
+# (``storage.py:788``, ``:840-843``, ``:860-863``, ``:882``, ``:891``). Every cap listed binds on
+# some days and not on others. ``r_up`` is the low-P river: it alone is dry (the drought), crosses
+# the ``totalphosfcn`` guard both ways, mineralises with its caps binding (its ``production_cap:N``
+# is left out: it binds there only in the DIN-free stretch, at ``din = 0``, trivially) and takes
+# the phosphorus caps. ``r_low`` (``max_temp_lag = 5``: its 10-day mean exceeds its 20-day mean
+# whenever its register sum is positive) produces on almost every day, so its ``production_cap:N``
+# is the real one; it never empties and its phosphorus saturates ``totalphosfcn`` from day 1.
+BOTH = frozenset({True, False})
+RIVER_BRANCHES: dict[str, dict[str, frozenset[bool]]] = {
+    "r_up": {
+        "dry": BOTH,
+        "frozen": BOTH,
+        "cold": BOTH,
+        "totalphosfcn": BOTH,
+        "production": BOTH,
+        "denitrification_cap": BOTH,
+        "production_cap:P": BOTH,
+        "mineralisation_cap:N": BOTH,
+        "mineralisation_cap:P": BOTH,
+        "macrophyte_cap:N": BOTH,
+        "macrophyte_cap:P": BOTH,
+        "macrophyte_phosphorus": BOTH,
+    },
+    "r_low": {
+        "dry": frozenset({False}),
+        "frozen": BOTH,
+        "cold": BOTH,
+        "totalphosfcn": frozenset({True}),
+        "production": BOTH,
+        "denitrification_cap": BOTH,
+        "production_cap:N": BOTH,
+        "production_cap:P": BOTH,
+        "macrophyte_cap:N": BOTH,
+        "macrophyte_cap:P": BOTH,
+    },
 }
-BOTH_WAYS = ("totalphosfcn", "production")
 
 
-def _river_outcomes(decisions, days: int, river: str | None = None) -> dict[str, set[bool]]:
-    """``{branch: the outcomes active on some day < days}`` of the biochemistry decisions of
-    ``river`` (every river by default)."""
+def _river_outcomes(decisions, days: int, river: str) -> dict[str, set[bool]]:
+    """``{branch: the outcomes active on some day < days}`` of ``river``'s biochemistry
+    decisions."""
     out: dict[str, set[bool]] = {}
+    prefix = f"node:{river}/{BIO}/"
     for day in decisions[:days]:
         for d in day:
-            node, _, rest = d.site.partition("/")
-            if rest.startswith(f"{BIO}/") and bool(d.active):
-                if river is None or node == f"node:{river}":
-                    out.setdefault(rest[len(BIO) + 1 :], set()).add(bool(d.outcome))
+            if d.site.startswith(prefix) and bool(d.active):
+                out.setdefault(d.site[len(prefix) :], set()).add(bool(d.outcome))
     return out
 
 
@@ -640,31 +662,28 @@ def test_river_nutrients_reaches_every_branch():
     frost, cold, the dry day, both ``totalphosfcn`` outcomes, production both ways, every 50 %
     cap taken, and ``"river_nitrogen_lost"``. The low-P river ``r_up`` alone has the dry days,
     the DIN-free stretch and both ``totalphosfcn`` outcomes; the full run turns its 366-slot
-    register over three times, and the phosphate pulse has left it, so ``totalphosfcn``
-    returns to 0 (its guard False) after day 400."""
+    register over three times, and the phosphate pulse has left it (days 426-455), so
+    ``totalphosfcn`` returns to 0 (its guard False) from day 448, measured."""
     spec = CASES["river_nutrients"]
     assert spec.slow_days >= 3 * 366
     results, diagnostics = case_ours("river_nutrients", "pollutants", spec.slow_days, True)
     names = diagnostics["node_names"]
     lost = diagnostics["events"]["river_nitrogen_lost"]
     for days in (spec.days, spec.slow_days):
-        seen = _river_outcomes(diagnostics["decisions"], days)
-        for branch, outcome in RIVER_BRANCHES.items():
-            assert outcome in seen[branch], (days, branch, seen[branch])
-        for branch in BOTH_WAYS:
-            assert seen[branch] == {True, False}, (days, branch)
-        assert bool(lost[:days].any()), days
-        up = _river_outcomes(diagnostics["decisions"], days, "r_up")
-        assert up["dry"] == {True, False} and up["totalphosfcn"] == {True, False}, days
+        for river, branches in RIVER_BRANCHES.items():
+            seen = _river_outcomes(diagnostics["decisions"], days, river)
+            for branch, outcomes in branches.items():
+                assert seen[branch] == outcomes, (days, river, branch, seen[branch])
         assert bool(lost[:days, names.index("r_up")].any()), days
     assert not bool(lost[:, names.index("r_low")].any())  # r_low never empties, so din > 0
     late = {
-        bool(d.outcome)
-        for day in diagnostics["decisions"][spec.days :]
+        k: bool(d.outcome)
+        for k, day in enumerate(diagnostics["decisions"])
         for d in day
-        if d.site == f"node:r_up/{BIO}/totalphosfcn" and bool(d.active)
+        if k >= spec.days and d.site == f"node:r_up/{BIO}/totalphosfcn" and bool(d.active)
     }
-    assert late == {True, False}
+    assert set(late.values()) == {True, False}
+    assert min(k for k, outcome in late.items() if not outcome) == 448
     assert len(results.dates) == spec.slow_days
 
 
@@ -672,7 +691,8 @@ def test_river_double_discharge_runs_the_biochemistry_twice_a_day():
     """X16, X32: WSIMOD prints the river's mass-balance error on every day (for pollutants, never
     for the volume, which the biochemistry leaves alone) and nothing else, because its assigned
     ``bio_in``/``bio_out`` hold the second call's terms only; noodl runs the biochemistry as
-    call 0 and call 1 on every day, its terms add both calls, and its balance closes."""
+    call 0 and call 1 on every day, its terms add both calls, and its balance closes within
+    rounding (measured 2.1e-16 of scale)."""
     name = "river_double_discharge"
     spec = CASES[name]
     reference, print_days = case_theirs_by_day(name)
@@ -721,6 +741,13 @@ def test_an_expected_mass_balance_print_must_appear_every_day():
         )
     with pytest.raises(ValueError, match="needs print_days"):
         assert_matches_wsimod(results, reference, **expected, **kwargs)
+    # a volume line of the river is not excused: it goes through the residual comparison
+    extra = copy.deepcopy(reference)
+    extra.printed = [*reference.printed, "mass balance error for volume of 1.0 in riv"]
+    with pytest.raises(AssertionError, match="mass balance errors"):
+        assert_matches_wsimod(
+            results, extra, print_days=[*print_days, print_days[-1]], **expected, **kwargs
+        )
     with pytest.raises(AssertionError, match="unknown nodes"):
         assert_matches_wsimod(
             results,
