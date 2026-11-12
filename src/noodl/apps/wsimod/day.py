@@ -809,6 +809,8 @@ class WsimodDay:
             Arc.end_timestep(arc)
             if hasattr(arc, "_seen"):
                 arc._seen = dict.fromkeys(arc._seen, 0)
+            if hasattr(arc, "_merged"):  # a DecayArc's merged call count (D2)
+                arc._merged = 0
             arc.vqip_in = torch.broadcast_to(arc.vqip_in, (*shape, *arc.vqip_in.shape))
             arc.vqip_out = arc.vqip_in
             arc.flow_in = torch.broadcast_to(arc.flow_in, shape)

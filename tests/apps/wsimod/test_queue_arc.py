@@ -976,7 +976,7 @@ def _ordered_case():
     the day-1 pull (age 1) and day 2's pull and two pushes (age 0), none due."""
     slots = ["push", "pull", "push"]
     schedule = [
-        [[0.7, None, None], [None, 1.9, None], [2.3, 0.37, 3.1]],
+        [[0.7, None, None], [None, 1.9, None], [2.3, 0.37, 1.45]],
     ]
     return slots, schedule, [[13.0, 27.0, 31.0]]
 
@@ -985,8 +985,9 @@ def test_the_decay_arc_term_follows_wsimods_list_order():
     """Review Focus 2 (X24): the end-of-day term is the rows' ``diff``s summed in WSIMOD's list
     order, entry age descending, then the merged call order of the entry day, bitwise. The
     rows are inside the precondition (no due row waits in either direction), asserted from
-    ``since`` and the rows. Summing in ascending age gives another last bit, so the test
-    discriminates."""
+    ``since`` and the rows. Summing in ascending age gives another last bit, and so does
+    summing day 2's three entries direction by direction (push 0, push 1, pull) instead of in
+    their merged call order: the test discriminates both the age order and the tiebreak."""
     slots, schedule, temperatures = _ordered_case()
     well, res, q = _decay_pair(3, cap_res=1e4)
     for day in range(3):
@@ -1027,7 +1028,51 @@ def test_the_decay_arc_term_follows_wsimods_list_order():
     ascending = summed(sorted(listed, key=lambda k: (k[1] + int(since[k[0]]), listed.index(k))))
     assert not torch.equal(term[1], ascending[1])
     assert float((term - ascending).abs().max()) < 1e-15
+    by_direction = summed([(0, 2, 0), (1, 1, 0), (0, 0, 0), (0, 0, 1), (1, 0, 0)])
+    assert not torch.equal(term[1], by_direction[1])
+    assert float((term - by_direction).abs().max()) < 1e-15
     assert EVENT not in end.events or not bool(end.events[EVENT]["q"])
+
+
+def _traced_push_pull():
+    """A ``DecayArc`` (``n = 1``) whose first day records the calls push then pull."""
+    well, res, q = _decay_pair(1, cap_res=1e4)
+    _start(well, res, q, 15.0)
+    q.send_push_request(PQ.to_vqip({"volume": 1.0, "phosphate": 0.01}), active=TRUE)
+    q.send_pull_request(PQ.to_vqip({"volume": 1.0}), active=TRUE)
+    q.end_timestep()
+    assert q.entry_rank == {("push", 0): 0, ("pull", 0): 1}
+    return well, res, q
+
+
+def test_the_decay_arc_refuses_another_interleaving_of_its_calls():
+    """D2: the term's tiebreak is the traced day's merged call order, so a later day that
+    makes the same calls per direction in another interleaving is an internal error; the same
+    interleaving is accepted, and a raised day's count does not leak into the next."""
+    well, res, q = _traced_push_pull()
+    _start(well, res, q, 16.0, d=1)
+    with pytest.raises(RuntimeError, match=r"pull request call 0 is call 0.*made it call 1.*D2"):
+        q.send_pull_request(PQ.to_vqip({"volume": 1.0}), active=TRUE)
+    q._seen = dict.fromkeys(q._seen, 0)  # as WsimodDay._reset_day does after a raised day
+    q._merged = 0
+    _start(well, res, q, 16.0, d=1)
+    q.send_push_request(PQ.to_vqip({"volume": 1.0, "phosphate": 0.01}), active=TRUE)
+    q.send_pull_request(PQ.to_vqip({"volume": 1.0}), active=TRUE)
+    q.end_timestep()
+
+
+def test_the_decay_arc_refuses_a_present_row_outside_its_traced_calls():
+    """A loaded or hand-built row at a call index no traced call has would decay without
+    reaching the term: ``end_timestep`` refuses it, naming the direction and the call, and
+    leaves the rows as they were."""
+    well, res, q = _traced_push_pull()
+    rows = torch.zeros(2, 1, 2, 1 + PQ.K, dtype=torch.float64)
+    rows[1, 0, 1] = PQ.to_vqip({"volume": 2.0, "phosphate": 0.02})  # pull call 1: never traced
+    q.load_stores({"rows": rows})
+    _start(well, res, q, 16.0, d=1)
+    with pytest.raises(RuntimeError, match="pull row at call 1 holds water"):
+        q.end_timestep()
+    assert torch.equal(q.rows, rows)
 
 
 def test_the_order_unknown_event_marks_the_precondition(simple_wsimod):

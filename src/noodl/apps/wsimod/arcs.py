@@ -989,6 +989,7 @@ class DecayArc(QueueArc):
         self.decay = _arc_decay(self, spec, pollutants)
         # (direction, j) -> position in the day's merged static call sequence (D2)
         self.entry_rank: dict[tuple[str, int], int] = {}
+        self._merged = 0  # today's request calls so far, both directions
 
     @classmethod
     def validate(cls, spec: ArcSpec, network: WsimodNetwork) -> None:
@@ -999,14 +1000,24 @@ class DecayArc(QueueArc):
     def begin_tracing(self) -> None:
         super().begin_tracing()
         self.entry_rank = {}
+        self._merged = 0
 
     def _enter(self, direction: str, tag: Tag) -> int:
         """:meth:`QueueArc._enter`; while the labels are recorded, the call's place in the
-        merged sequence of both directions is recorded too."""
+        merged sequence of both directions is recorded too. Once they are fixed, every later
+        day must interleave the two directions as the traced day did, or the call raises (D2:
+        the term's order of addition relies on ``entry_rank``)."""
         recording = not self._frozen
         j = super()._enter(direction, tag)
+        position, self._merged = self._merged, self._merged + 1
         if recording:
             self.entry_rank[(direction, j)] = len(self.entry_rank)
+        elif (traced := self.entry_rank.get((direction, j))) != position:
+            raise RuntimeError(
+                f"{self.site}: {direction} request call {j} is call {position} of the day in "
+                f"both directions; the traced day made it call {traced}"
+                " (D2: the call structure must not change)"
+            )
         return j
 
     def make_decay(self, vqip: Tensor) -> tuple[Tensor, Tensor]:
@@ -1028,6 +1039,16 @@ class DecayArc(QueueArc):
         if n and width:
             ctx, since = self.ctx, self.since
             present = (rows[..., 0] != 0).detach()  # (..., 2, n, J): a zero row is absent
+            # a present row outside the traced calls (a hand-built or loaded state) would be
+            # decayed but left out of the term: refused before anything changes
+            for d, direction in enumerate(_DIRECTIONS):
+                for j in range(width):
+                    if (direction, j) not in self.entry_rank and bool(present[..., d, :, j].any()):
+                        raise RuntimeError(
+                            f"{self.site}: a {direction} row at call {j} holds water, but no "
+                            "traced request call has that index (D2); its decay would be left "
+                            "out of the term"
+                        )
             decayed, diffs = {}, {}
             for d in range(2):
                 for i in range(n):
@@ -1066,6 +1087,7 @@ class DecayArc(QueueArc):
                 dim=-4,
             )
             self.rows = torch.where(present[..., None], new, rows)
+        self._merged = 0
         super().end_timestep()
 
 
