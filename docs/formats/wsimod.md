@@ -200,4 +200,4 @@ WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own 
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
 and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
-(deposition, the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config_no_deposition.yml` neutralises the surfaces' `pollutant_load` and runs every ported process. See the [WSIMOD application](../applications/wsimod.md).
+(the surfaces' data deposition, the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config.yml` runs unmodified with every ported process, the surfaces' `pollutant_load` included. See the [WSIMOD application](../applications/wsimod.md).

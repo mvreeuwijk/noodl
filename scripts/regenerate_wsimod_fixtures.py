@@ -342,48 +342,11 @@ def _corrected_config(model, config_path: Path) -> dict:
     return config
 
 
-def _no_deposition_overrides(model) -> dict:
-    """The `overrides` section that switches off the surfaces' deposition.
-
-
-    Every surface of every `Land`: `pollutant_load` zero for every key it has. Nothing else
-    is overridden: the WTW processes and the soil temperature stay WSIMOD's defaults. The
-    deposition is what sub-project 3c ports."""
-    nodes = {}
-    for name, node in model.nodes.items():
-        if type(node).__name__ == "Land":
-            surfaces = {
-                surface.surface: {"pollutant_load": {k: 0.0 for k in surface.pollutant_load}}
-                for surface in node.surfaces
-            }
-            nodes[name] = {"type_": "Land", "name": name, "surfaces": surfaces}
-    return {"nodes": nodes}
-
-
-def write_no_deposition_configs(folder) -> None:
-    """Writes `config_no_deposition.yml` into `folder` from its `config.yml`: the same mapping
-    plus `_no_deposition_overrides` of the model that `config.yml` loads."""
-    import yaml
-
-    from tests.verification._wsimod_reference import reset_wsimod_globals, wsimod_model
-
-    folder = Path(folder)
-    config = yaml.safe_load((folder / "config.yml").read_text(encoding="utf-8"))
-    reset_wsimod_globals()
-    overrides = _no_deposition_overrides(wsimod_model(folder))
-    (folder / "config_no_deposition.yml").write_text(
-        yaml.safe_dump(dict(config, overrides=overrides), sort_keys=False),
-        encoding="utf-8",
-        newline="\n",
-    )
-
-
 def write_demo_configs(data_folder) -> None:
     """Writes `tests/data/wsimod/{quickstart,oxford}/` from the demo forcing in `data_folder`.
 
     Per demo: build the model; `Model.save(dir, "config.yml", compress=True)`; correct the
-    saved config (`_corrected_config`); write `config_no_deposition.yml`
-    (`write_no_deposition_configs`); reload `config.yml` with `wsimod_model`, run both it
+    saved config (`_corrected_config`); reload `config.yml` with `wsimod_model`, run both it
     and the original model, and exit non-zero naming the first difference if they disagree."""
     from wsimod.demo.create_oxford import create_oxford_model
 
@@ -406,7 +369,6 @@ def write_demo_configs(data_folder) -> None:
         for path in folder.glob("*.csv.gz"):  # reproducible bytes: no mtime in the header
             path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=0))
         _corrected_config(model, folder / "config.yml")
-        write_no_deposition_configs(folder)
         original = record_wsimod_run(model)
         reloaded = record_wsimod_run(wsimod_model(folder))
         difference = _first_difference(original, reloaded)
@@ -418,10 +380,6 @@ def write_demo_configs(data_folder) -> None:
 
 
 if __name__ == "__main__":
-    if "--no-deposition-only" in sys.argv[1:]:
-        for case in ("quickstart", "oxford"):
-            write_no_deposition_configs(WSIMOD_DIR / case)
-        sys.exit(0)
     data_folder = _download_data_folder()
     print(f"Downloaded WSIMOD demo data to {data_folder}")
     _build_and_capture_quickstart(data_folder)

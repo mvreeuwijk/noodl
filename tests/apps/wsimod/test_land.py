@@ -383,15 +383,15 @@ def test_a_zero_total_soil_weight_is_refused():
         )
 
 
-def test_deposition_refusals_name_only_3c():
+def test_a_non_zero_pollutant_load_builds_with_pollutants_on():
+    """Y30: ``land.py:510-532`` is ported, so a non-zero load, a non-additive one included, is
+    accepted with pollutants on; only the deposition data (``nhx-dry``) is still 3c."""
     mapping = _mapping(
-        [_pervious(pollutant_load={"phosphate": 1e-6})],
+        [_pervious(pollutant_load={"phosphate": 1e-6, "temperature": 7.0})],
         overrides={"rural": _NEUTRAL},
         lists=_LISTS,
     )
-    with pytest.raises(ValueError, match="3c") as error:
-        _validate(mapping, pollutants=True)
-    assert "3b" not in str(error.value)
+    assert _validate(mapping, pollutants=True) == []
     data = _mapping(
         [
             {
@@ -405,6 +405,83 @@ def test_deposition_refusals_name_only_3c():
     with pytest.raises(ValueError, match="3c") as error:
         _validate(data, pollutants=True)
     assert "3b" not in str(error.value)
+
+
+@pytest.mark.parametrize("storage", [0.0, 2.5])
+def test_simple_deposition_equals_wsimods(storage):
+    """``land.py:510-532`` against live WSIMOD: the stored VQIP and the returned ``in_`` are
+    equal. ``nitrite`` is not a run pollutant, so its load is dropped (D15); the additive
+    phosphate is ``0.3 * area`` and the temperature blends ``(7 * 0 + t * V) / V``."""
+    pytest.importorskip("wsimod")
+    from types import SimpleNamespace
+
+    from wsimod.core import constants
+    from wsimod.nodes.land import Surface as WsimodSurface
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    load = {"phosphate": 0.3, "temperature": 7.0, "nitrite": 1.0}
+    reset_wsimod_globals()
+    constants.POLLUTANTS = list(PP.names)
+    constants.ADDITIVE_POLLUTANTS = list(PP.additive)
+    constants.NON_ADDITIVE_POLLUTANTS = list(PP.non_additive)
+    theirs = WsimodSurface(
+        parent=SimpleNamespace(),
+        surface="s",
+        area=3.0,
+        pollutant_load=dict(load),
+        initial_storage={"volume": storage, "phosphate": 0.1, "temperature": 11.0},
+    )
+    their_in, their_out = theirs.simple_deposition()
+    keys = ["volume", *PP.names]
+    expected_in = torch.tensor([their_in[k] for k in keys], dtype=torch.float64)
+    expected_storage = torch.tensor([theirs.storage[k] for k in keys], dtype=torch.float64)
+
+    land = make_land([surface("Surface", "s", area=3.0, pollutant_load=dict(load))], pollutants=PP)
+    ours = land.surfaces[0]
+    day(land, pollutants=PP)
+    land.bind(forcing(0.0, 0.0))
+    ours.storage = PP.to_vqip({"volume": storage, "phosphate": 0.1, "temperature": 11.0})
+    in_, out_ = ours.simple_deposition(active=TRUE)
+    assert torch.equal(in_, expected_in)
+    assert torch.equal(ours.storage, expected_storage)
+    assert float(out_.abs().sum()) == 0 and their_out["volume"] == 0
+    assert float(in_[1]) == 0.3 * 3.0 and float(in_[0]) == 0.0
+    blended = (7.0 * 0 + 11.0 * storage) / storage if storage else 11.0
+    assert float(ours.storage[2]) == blended
+
+
+def test_a_load_key_that_is_not_a_pollutant_is_unread():
+    """D15: WSIMOD stores ``nitrite`` and ``volume`` in the deposition dict and never reads
+    them back (``sum_vqip`` walks the run pollutants; ``volume`` is set to 0)."""
+    bare = [_pervious(pollutant_load={"phosphate": 0.3, "temperature": 7.0})]
+    extra = [
+        _pervious(
+            pollutant_load={"phosphate": 0.3, "nitrite": 1.0, "temperature": 7.0, "volume": 5.0}
+        )
+    ]
+    network = read_wsimod_config(_mapping(extra, overrides={"rural": _NEUTRAL}, lists=_LISTS))
+    assert [u for u in network.unread if "pollutant_load" in u] == [
+        "land.surfaces.rural.pollutant_load.nitrite",
+        "land.surfaces.rural.pollutant_load.volume",
+    ]
+    results = []
+    for surfaces in (bare, extra):
+        land = make_land(
+            [
+                surface(
+                    "Surface", "s", area=3.0, **{"pollutant_load": surfaces[0]["pollutant_load"]}
+                )
+            ],
+            pollutants=PP,
+        )
+        day(land, pollutants=PP)
+        land.bind(forcing(0.0, 0.0))
+        land.surfaces[0].storage = PP.to_vqip({"volume": 2.5, "temperature": 11.0})
+        in_, _ = land.surfaces[0].simple_deposition(active=TRUE)
+        results.append((in_, land.surfaces[0].storage))
+    assert torch.equal(results[0][0], results[1][0])
+    assert torch.equal(results[0][1], results[1][1])
 
 
 def test_any_soil_weights_with_a_non_zero_total_are_accepted():
@@ -605,8 +682,8 @@ def test_the_mass_balance_terms_are_the_running_balance():
 
 
 def test_a_simple_deposition_of_zero_loads_is_pushed_at_volume_zero():
-    """``land.py:381-382``, ``:510-532``: a configured ``pollutant_load`` (zero, the only form
-    accepted with pollutants on) adds a volume-0 push of zero loads to the surface first."""
+    """``land.py:381-382``, ``:510-532``: a configured ``pollutant_load`` (here zero) adds a
+    volume-0 push of the loads to the surface first."""
     spec = surface("ImperviousSurface", "roads", area=10.0, pollutant_load={"phosphate": 0.0})
     land = make_land([spec], pollutants=PP)
     roads = land.surfaces[0]
@@ -783,30 +860,6 @@ def test_porosity_not_above_field_capacity_is_refused():
 @pytest.mark.parametrize(
     ("mapping", "pollutants", "match"),
     [
-        (
-            _mapping(
-                [
-                    _pervious(pollutant_load={"phosphate": 1e-6}),
-                ],
-                lists=_LISTS,
-            ),
-            True,
-            "3c",
-        ),
-        (
-            _mapping(
-                [
-                    {
-                        "type_": "ImperviousSurface",
-                        "surface": "r",
-                        "pollutant_load": {"temperature": 0},
-                    }
-                ],
-                lists=_LISTS,
-            ),
-            True,
-            "3c",
-        ),
         (
             _mapping(
                 [

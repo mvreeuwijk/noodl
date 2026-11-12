@@ -37,8 +37,8 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 live (below), and so are the treatment works' pollutant treatment and the first-order decay of
 the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces, and so is a
 `River`'s biochemistry (below), and the user decay arcs `DecayArc` and `DecayArcAlt`. What
-still changes a pollutant and is not ported (deposition and the land's nutrient pools,
-sub-project 3c) is refused unless it is neutral.
+still changes a pollutant and is not ported (the surfaces' data deposition and the land's nutrient pools,
+sub-project 3c) is refused unless it is neutral. A surface's `pollutant_load` is live.
 
 | Class | Process ported (sub-project 3b) |
 |---|---|
@@ -576,23 +576,21 @@ pollutant entries, every `decays` value (nodes, surfaces and user decay arcs; th
 (`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
 and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) the same configuration is
-refused if a process that is not ported yet would change the pollutants (deposition and the
-land's nutrient pools, 3c): until then, such configurations need `pollutants=False` or a
-neutralised copy, below. The soil temperature, the treatment, the decays and the River's
+refused if a process that is not ported yet would change the pollutants (the surfaces' data deposition and the
+land's nutrient pools, 3c): until then, such configurations need `pollutants=False`. A surface's
+`pollutant_load` is live (`Surface.simple_deposition`); a key that is not a run pollutant is listed in
+`model.unread`, as `<land>.surfaces.<surface>.pollutant_load.<key>`. The soil temperature, the treatment, the decays and the River's
 biochemistry are ported; their parameters are only listed as ignored in a quantity-only run.
 
 ### The demo configurations
 
-Each demo (`tests/data/wsimod/quickstart`, `oxford`) has two configurations: `config.yml`, as
-WSIMOD saved it, and `config_no_deposition.yml`, the same configuration plus an `overrides`
-section that sets every surface's `pollutant_load` to 0 (written by
-`scripts/regenerate_wsimod_fixtures.py`). `config.yml` runs with `pollutants=False`; the second
-runs with every pollutant, every 3b process the demo contains live: on `oxford` the `FWTW`'s and
+Each demo (`tests/data/wsimod/quickstart`, `oxford`) has one configuration, `config.yml`, as
+WSIMOD saved it. It runs with `pollutants=False` on the volumes, and with every pollutant and
+every process the demo contains live, the surfaces' `pollutant_load` included: on `oxford` the `FWTW`'s and
 `WWTW`'s treatment on 11 additive pollutants and the rural surface's soil temperature; on
 `quickstart` the soil temperature and the nitrite carry-over, which adds zero with empty
 `decays`. Neither demo has a non-empty `decays`, a `DecayQueueTank`, a user decay arc or a
-`River`: the purpose-built cases cover them. What still needs neutralising for 3c is each
-surface's `pollutant_load`, in both demos.
+`River`: the purpose-built cases cover them. Both demos run unmodified, bitwise WSIMOD's.
 
 ## Refusals
 
@@ -732,7 +730,7 @@ and counts the autograd nodes behind the last day's storage:
 | oxford (quantity only) | 1 | 0.2776 | 0.3720 | 936,765 |
 | oxford | 10 | 0.2751 | 0.3759 | 936,765 |
 | oxford | 100 | 0.2810 | 0.3948 | 936,765 |
-| oxford, `config_no_deposition.yml`, pollutants | 1 | 0.2843 | 0.3892 | 942,436 |
+| oxford, `config.yml`, pollutants | 1 | 0.2843 | 0.3892 | 942,436 |
 | oxford, pollutants | 10 | 0.3012 | 0.4161 | 942,436 |
 | oxford, pollutants | 100 | 0.3317 | 0.4400 | 942,436 |
 
@@ -762,10 +760,10 @@ unloaded medians differ by 5 %).
 
 ## Limitations
 
-- **Sub-project 3c.** The processes that change a pollutant (deposition, the land's nutrient pools, `GrowingSurface`, the garden and
-  irrigation surfaces) are refused unless neutral. The soil temperature, the treatment works'
+- **Sub-project 3c.** The processes that change a pollutant (the surfaces' data deposition, the land's nutrient pools, `GrowingSurface`, the garden and
+  irrigation surfaces) are refused unless neutral; a surface's `pollutant_load` is live. The soil temperature, the treatment works'
   pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
-  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with surface deposition or nutrient pools needs `pollutants=False` or neutralised loads.
+  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with surface deposition data or nutrient pools needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:
@@ -845,8 +843,7 @@ has to be debugged, not admitted.
 | 49 gradients | 1 to 200 | quantity-only values, pollutant runs | 1.5e-7 relative | 30 of 49 (19 `-m slow`) | 229 s in all |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
-pollutant mode runs `config_no_deposition.yml` (an `overrides` section that sets the surfaces'
-`pollutant_load` to zero) with every pollutant and compares all of them. Neither demo has a `River` node, so
+pollutant mode runs the same `config.yml` with every pollutant and compares all of them. Neither demo has a `River` node, so
 WSIMOD's river-order ties (set-hash order of the names, which varies with `PYTHONHASHSEED`)
 cannot arise in the demos, and neither has a `QueueGroundwater`; the river and groundwater
 cases cover those classes, with the ties kept independent. WSIMOD's source files are not

@@ -676,6 +676,16 @@ def read_wsimod_config(
                 )
         for key, value in entry.items():
             _set_arc_value(arc, key, value, f"override of arc {name!r}")
+    # land.py:510-532: a surface load key that is not a run pollutant (or is ``volume``) is
+    # stored by WSIMOD and never read back (D15)
+    for node in nodes:
+        for surface in node.surfaces:
+            load = surface.parameters.get("pollutant_load") or {}
+            unread.extend(
+                f"{node.name}.surfaces.{surface.name}.pollutant_load.{key}"
+                for key in load
+                if key not in pollutants.names
+            )
     # a Decay* arc reads its in_port's forcing (core.py:464-470), so that file is read
     ports = {f"{a.in_port}.filename" for a in arcs if a.cls in _DECAY_ARCS}
     unread[:] = [item for item in unread if item not in ports]

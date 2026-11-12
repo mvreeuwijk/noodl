@@ -360,9 +360,20 @@ def test_quantity_only_lists_the_ignored_parameters():
     assert "my_land.surfaces.urban.pollutant_load" in ignored
     assert "my_land.surfaces.rural.pollutant_load" in ignored
     model.step(state, drivers, dt=DAY, t=0.0)
-    with pytest.raises(ValueError, match="3c") as refused:
-        build_model(read_wsimod_config(DATA / "quickstart"), pollutants=True)
-    assert "pollutants=False" in str(refused.value)
+
+
+def test_the_pollutant_load_is_live_with_pollutants_on():
+    """Y30: the quickstart's surface loads build with pollutants on, as drivers holding the
+    configured phosphate; nothing about them is unread."""
+    network = read_wsimod_config(DATA / "quickstart")
+    model, _, drivers = build_model(network, pollutants=True)
+    assert not any("pollutant_load" in item for item in model.ignored_by_quantity_only)
+    assert not any("pollutant_load" in item for item in network.unread)
+    k = network.pollutants.names.index("phosphate")
+    for cls in ("ImperviousSurface", "PerviousSurface"):
+        load = drivers[f"wsimod.{cls}.pollutant_load"]
+        assert load.shape == (1, len(network.pollutants.names))
+        assert float(load[0, k]) == 1.0e-07
 
 
 LISTED_3B = {
@@ -567,7 +578,7 @@ def test_quantity_only_driver_shapes():
     alt = read_wsimod_config(CASES["decay_arc_alt"].build())
     assert build_model(alt)[2]["wsimod.DecayArcAlt.decays.constant"].shape == (1, 3)
     # the pollutant run: volume then the additive pollutants, and the constants and exponents
-    network = read_wsimod_config(DATA / "oxford", config_name="config_no_deposition.yml")
+    network = read_wsimod_config(DATA / "oxford")
     model, _, drivers = build_model(network, pollutants=True)
     k = len(network.pollutants.additive)
     for cls, count in n.items():

@@ -4,10 +4,10 @@ purpose-built case (spec, Verification 2 and 3; Task 17).
 ``quickstart`` runs in full (1456 days), ``oxford`` for its first 365 days by default and in full
 under ``-m slow``. Each demo runs twice: quantity-only on ``config.yml`` (WSIMOD runs its own
 pollutants, noodl the volumes alone, the volumes compared) and in pollutant mode on
-``config_no_deposition.yml`` (every pollutant compared). Every class replays WSIMOD bitwise
-(replay bound 0), so the whole model does: the worst difference of every run is exactly 0, and
-no admission is needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is only the
-ceiling.
+``config.yml`` with every process live (every pollutant compared). Every class replays WSIMOD
+bitwise (replay bound 0), so the whole model does: the worst difference of every run is exactly
+0, and no admission is needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is
+only the ceiling.
 
 The purpose-built cases (``_wsimod_cases.CASES``) run in full, in both modes, the same way,
 except ``river_nutrients``: its default run is its first 400 days (X39) and its 1100-day run,
@@ -56,7 +56,7 @@ from tests.verification._wsimod_parity import (  # noqa: E402
 from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
-CONFIG = {"quantity": "config.yml", "pollutants": "config_no_deposition.yml"}
+CONFIG = {"quantity": "config.yml", "pollutants": "config.yml"}
 FULL = 1456  # both demos' dates
 
 DEMOS = [

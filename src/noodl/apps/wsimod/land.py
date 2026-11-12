@@ -11,10 +11,9 @@ returns to the land's ``running_inflow_mb`` and ``running_outflow_mb`` (the mass
 ``"Land.running_inflow_mb"`` and ``"Land.running_outflow_mb"``, ``:158-162``; D11). In 3a these
 lists hold the water functions (``precipitation_evaporation``/``push_to_sewers`` of an
 impervious surface, ``ihacres``/``calculate_soil_temperature``/``route`` of a pervious one) and
-``simple_deposition`` when a ``pollutant_load`` is configured, which :meth:`Land.validate`
-admits only with zero loads (3c). The surface deposition of ``nhx-dry``-style data is 3c and
-refused with pollutants on (D21); a quantity-only run ignores it, as its volumes do not depend
-on it.
+``simple_deposition`` when a ``pollutant_load`` is configured. The surface deposition of
+``nhx-dry``-style data is 3c and refused with pollutants on (D21); a quantity-only run ignores
+it, as its volumes do not depend on it.
 
 The arithmetic is WSIMOD's ``+ - * /``, ``min``/``max`` in WSIMOD's order, and IHACRES's
 ``exp`` and ``**`` evaluated per instance by Python's own ``math.exp`` and ``float.__pow__``
@@ -221,7 +220,7 @@ class Surface(DecayTank):
             path=f"surfaces.{spec.name}",
         )
         self._set_derived(derived)
-        # land.py:375-384: the deposition inflows are 3c (refused, or ignored when quantity-only)
+        # land.py:381-382: simple_deposition; the data deposition (:375-380) is 3c
         self.inflows = [self.simple_deposition] if self.has_load else []
         self.processes: list = []
         self.outflows: list = []
@@ -329,7 +328,8 @@ class Surface(DecayTank):
 
     def simple_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:510-532``: the loads (additive ones times the area) at volume 0, forced in.
-        :meth:`Land.validate` admits only zero loads with pollutants on (3c)."""
+        A load key that is not a run pollutant is dropped (WSIMOD stores it and never reads it
+        back, D15), and ``volume`` is set to 0."""
         p = self.p
         load = self._param("pollutant_load")
         amounts = torch.where(p.additive_mask[1:], load * self.area[..., None], load)
@@ -923,7 +923,8 @@ def _validate_surface(
 
     - Surface data (D21): only the deposition keys (``land.py:375-380``) are accepted, and with
       pollutants on they are refused (3c).
-    - ``pollutant_load``: with pollutants on, every entry must be 0 and additive (3c).
+    - ``pollutant_load``: any value is accepted (``simple_deposition``); a quantity-only run
+      ignores it.
     - ``PerviousSurface``: ``total_porosity`` above ``field_capacity`` and ``wilting_point``
       (``:942``, ``:950`` divide by the difference), a positive simulated depth less either, a
       non-zero ``area`` (``get_cmd`` divides, ``:893``) and ``ihacres_p >= 0`` (``0 ** p`` with
@@ -952,18 +953,10 @@ def _validate_surface(
                 "run build_model(network, pollutants=False) until sub-project 3c"
             )
         ignored.append(f"{prefix}.data_input_dict")
-    load = surface.parameters.get("pollutant_load") or {}
-    if load:
-        if pollutants:
-            for key, value in load.items():
-                if float(value) != 0 or key in network.pollutants.non_additive:
-                    raise ValueError(
-                        f"{where}: pollutant_load {key!r}: {value!r} is deposition, sub-project "
-                        "3c (only zero loads of additive pollutants are accepted); "
-                        "run build_model(network, pollutants=False) until sub-project 3c"
-                    )
-        else:
-            ignored.append(f"{prefix}.pollutant_load")
+    # pollutant_load (land.py:381-382, :510-532) is live with pollutants on; a key that is not a
+    # run pollutant is unread (D15, listed by the reader)
+    if surface.parameters.get("pollutant_load") and not pollutants:
+        ignored.append(f"{prefix}.pollutant_load")
     if surface.cls != "PerviousSurface":
         return ignored
     values = {**PerviousSurface.parameter_defaults, **surface.parameters}

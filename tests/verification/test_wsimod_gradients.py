@@ -46,7 +46,7 @@ NOISE = 1e-12  # a margin change this small (relative to the scale) is rounding
 
 @dataclass(frozen=True)
 class Spec:
-    case: str  # a CASES name, or "quickstart" (its no-deposition configuration)
+    case: str  # a CASES name, or "quickstart" (its configuration)
     days: int
     pollutants: bool
     set: (
@@ -68,7 +68,7 @@ class Spec:
 
 def _model(case: str, pollutants: bool):
     if case == "quickstart":
-        network = read_wsimod_config(DATA / "quickstart", config_name="config_no_deposition.yml")
+        network = read_wsimod_config(DATA / "quickstart")
     else:
         network = read_wsimod_config(CASES[case].build())
     return build_model(network, pollutants=pollutants)[0]

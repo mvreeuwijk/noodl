@@ -654,13 +654,13 @@ DEMO_CLASSES = {
         "Waste",
     ),
 }
-# (id, demo, config, mode): quantity-only on the demo as saved; every pollutant on the no-deposition
-# configuration, which neutralises only the surfaces' deposition, 3c (README there)
+# (id, demo, config, mode): the demo as saved, quantity-only and with every pollutant and process
+# live (the surface loads included, Y30)
 RUNS = (
     ("", "quickstart", "config.yml", "quantity"),
     ("", "oxford", "config.yml", "quantity"),
-    ("pollutants-", "quickstart", "config_no_deposition.yml", "pollutants"),
-    ("pollutants-", "oxford", "config_no_deposition.yml", "pollutants"),
+    ("pollutants-", "quickstart", "config.yml", "pollutants"),
+    ("pollutants-", "oxford", "config.yml", "pollutants"),
 )
 DEMO_PAIRS = [
     pytest.param(demo, config, mode, cls)
@@ -811,13 +811,9 @@ def test_a_demo_replay_notices_a_difference():
 
 def test_a_pollutant_mode_demo_replay_notices_a_difference():
     """A pollutant column of a captured WWTW reply, moved by 1e-11 x scale, fails the replay."""
-    network = demo_network("oxford", "config_no_deposition.yml")
+    network = demo_network("oxford", "config.yml")
     calls = copy.deepcopy(
-        [
-            c
-            for c in demo_capture("oxford", "config_no_deposition.yml", 365)["oxford_wwtw"]
-            if c.day < 20
-        ]
+        [c for c in demo_capture("oxford", "config.yml", 365)["oxford_wwtw"] if c.day < 20]
     )
     scale = node_scale(calls, volume_only=False)
     reply, key = next(

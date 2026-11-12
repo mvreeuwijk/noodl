@@ -2,7 +2,7 @@
 
 Runs WSIMOD's two demos, `quickstart` and `oxford` (`tests/data/wsimod/`, quantity-only,
 `pollutants=False`), for 60 days at batch sizes 1, 10 and 100, and then `oxford` once more on
-`config_no_deposition.yml` with `pollutants=True`, where every sub-project 3b process is live
+`config.yml` with `pollutants=True`, where every ported process is live (the surface loads included)
 (decay, treatment, the soil temperature; oxford has no `River`). The batch is the leading
 dimension of `wsimod.Arc.capacity` (every instance has the same value, so every instance takes
 the same branches: the cost measured is the batch's tensor width, not divergence). Two rows per
@@ -80,7 +80,7 @@ def main() -> None:
     print(f"{DAYS}-day runs; seconds per day, autograd nodes (grad rows)")
     print(f"{'demo':<22}{'batch':>6}{'no grad s/day':>15}{'grad s/day':>13}{'graph nodes':>13}")
     rows = [(name, name, False, "config.yml") for name in DEMOS]
-    rows.append(("oxford", "oxford+pollutants", True, "config_no_deposition.yml"))
+    rows.append(("oxford", "oxford+pollutants", True, "config.yml"))
     for name, label, pollutants, config in rows:
         for batch in BATCHES:
             plain, _ = run(name, batch, grad=False, pollutants=pollutants, config=config)
