@@ -39,9 +39,11 @@ def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Mod
     the parameters or on ``pollutants`` (neutral processes, ``decays``, porosity, leakage,
     preferences, travel times, check-recursion cycles, the river order, the orchestration,
     missing forcing). ``pollutants=False`` runs on the volumes alone; what that run ignores is
-    listed in ``model.ignored_by_quantity_only``. The closure runs one tracing day (D2) that
-    fixes the call structure. ``model.wsimod_day`` is the closure and ``model.driver_template``
-    the configured drivers; ``state`` and ``drivers`` are :func:`initial_state` and
+    listed in ``model.ignored_by_quantity_only``; what WSIMOD accepts and never reads (a
+    ``Groundwater``'s forcing, a ``filename`` on a class that reads none) is ``model.unread``.
+    The closure runs one tracing day (D2) that fixes the call structure. ``model.wsimod_day`` is
+    the closure and ``model.driver_template`` the configured drivers; ``state`` and ``drivers``
+    are :func:`initial_state` and
     :func:`initial_drivers` without values.
     """
     day = WsimodDay(network, pollutants=pollutants)
@@ -53,6 +55,7 @@ def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Mod
     model = Model(net, [], closures=[day])
     model.wsimod_day = day
     model.ignored_by_quantity_only = list(day.ignored_by_quantity_only)
+    model.unread = list(network.unread)  # accepted and never read, D10
     model.driver_template = day.driver_template()
     return model, initial_state(model), initial_drivers(model)
 

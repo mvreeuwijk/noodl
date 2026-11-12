@@ -224,7 +224,7 @@ _CONSTRUCTORS: dict[str, tuple[dict[str, object], str | None]] = {
 # --- override chains -------------------------------------------------------------------------
 # class -> the keys its own ``apply_overrides`` pops (the parent chain is the one above)
 _OVERRIDES: dict[str, frozenset[str]] = {
-    "Node": frozenset(),  # nodes.py:80-102; a ``filename`` is refused by the reader (3a)
+    "Node": frozenset({"filename"}),  # nodes.py:93-99 (X27)
     "Catchment": frozenset(),
     "Waste": frozenset(),
     "Demand": frozenset({"constant_demand", "pollutant_load"}),  # demand.py:66-77
@@ -315,6 +315,30 @@ _DERIVED = {
 }
 
 
+# every node class reaches ``Node.apply_overrides`` (nodes.py:93-99), whatever its constructor chain
+_NODE_CLASSES = (
+    "Node",
+    "Catchment",
+    "Demand",
+    "NonResidentialDemand",
+    "ResidentialDemand",
+    "Distribution",
+    "UnlimitedDistribution",
+    "Land",
+    "Sewer",
+    "Storage",
+    "Groundwater",
+    "QueueGroundwater",
+    "River",
+    "Reservoir",
+    "RiverReservoir",
+    "Waste",
+    "WTW",
+    "WWTW",
+    "FWTW",
+)
+
+
 def _chain(name: str) -> list[str]:
     classes = [name]
     while _CONSTRUCTORS[classes[-1]][1] is not None:
@@ -329,6 +353,8 @@ def _schema(name: str) -> ClassSchema:
         for key, value in _CONSTRUCTORS[cls][0].items():
             parameters.setdefault(key, copy.deepcopy(value))
         override_keys |= _OVERRIDES.get(cls, frozenset())
+    if name in _NODE_CLASSES:
+        override_keys |= _OVERRIDES["Node"]
     override_keys -= _NOT_OVERRIDES.get(name, frozenset())
     return ClassSchema(
         name=name,
@@ -339,30 +365,7 @@ def _schema(name: str) -> ClassSchema:
     )
 
 
-NODE_SCHEMAS: dict[str, ClassSchema] = {
-    name: _schema(name)
-    for name in (
-        "Node",
-        "Catchment",
-        "Demand",
-        "NonResidentialDemand",
-        "ResidentialDemand",
-        "Distribution",
-        "UnlimitedDistribution",
-        "Land",
-        "Sewer",
-        "Storage",
-        "Groundwater",
-        "QueueGroundwater",
-        "River",
-        "Reservoir",
-        "RiverReservoir",
-        "Waste",
-        "WTW",
-        "WWTW",
-        "FWTW",
-    )
-}
+NODE_SCHEMAS: dict[str, ClassSchema] = {name: _schema(name) for name in _NODE_CLASSES}
 SURFACE_SCHEMAS: dict[str, ClassSchema] = {
     name: _schema(name) for name in ("Surface", "ImperviousSurface", "PerviousSurface")
 }

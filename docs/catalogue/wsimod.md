@@ -23,7 +23,7 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `WsimodNetwork` | A WSIMOD model description: pollutants, orchestration, dates, nodes and arcs, in the configuration's order (a node's in- and out-arc order is the arcs' order). | `WsimodNetwork(pollutants, float_accuracy, orchestration, dates, date_labels, nodes, arcs)` |
+| `WsimodNetwork` | A WSIMOD model description: pollutants, orchestration, dates, nodes and arcs, in the configuration's order (a node's in- and out-arc order is the arcs' order). | `WsimodNetwork(pollutants, float_accuracy, orchestration, dates, date_labels, nodes, arcs, unread=<factory>)` |
 
 ## Closures
 

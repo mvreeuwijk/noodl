@@ -11,10 +11,14 @@ in the first task where every class it needs exists.
 
 from __future__ import annotations
 
+import csv
+import functools
 import random
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 __all__ = ["CASES", "Case"]
 
@@ -38,6 +42,26 @@ _POLLUTANTS = {
     "non_additive_pollutants": ["temperature"],
 }
 _FLOW_MAX = 50.0
+
+
+@functools.cache
+def _forcing_dir() -> Path:
+    """One temporary directory per process (each xdist worker writes its own, D11)."""
+    return Path(tempfile.mkdtemp(prefix="noodl-wsimod-forcing-"))
+
+
+def _forcing_file(case: str, rows: Mapping[tuple[str, str], float]) -> str:
+    """The CSV of a ``filename`` override (D11): columns ``variable``, ``time``, ``value``, as
+    ``read_csv`` reads them (``model.py:1252-1269``). Returns its **absolute** path: both
+    engines open an override's file relative to the working directory, so a relative path would
+    depend on where pytest runs (X27)."""
+    path = _forcing_dir() / f"{case}.csv"
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["variable", "time", "value"])
+        for (variable, date), value in rows.items():
+            writer.writerow([variable, date, repr(float(value))])
+    return str(path.resolve())
 
 
 def _dates(n: int) -> list[str]:
@@ -1696,6 +1720,49 @@ def _decay_storage() -> dict:
     }
 
 
+def _decay_groundwater(*, override: bool = True) -> dict:
+    """A ``Groundwater`` with ``decays`` between a catchment and a waste. WSIMOD loses the
+    groundwater's configured ``data_input_dict`` (``storage.py:202-203``: a decoy here, with
+    temperatures that would decay it differently), so its temperature comes from a ``filename``
+    override (``nodes.py:93-99``, X11). ``override=False`` leaves the override out: WSIMOD then
+    raises ``TypeError`` at the first decay (``core.py:485``) and noodl refuses by name."""
+    days = _DECAY_DAYS
+    mapping = {
+        **_DECAY_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _decay_catchment("src", days, 61),
+            _store(
+                "gw",
+                "Groundwater",
+                capacity=80.0,
+                initial_storage=_stocked_do(30.0),
+                residence_time=15.0,
+                decays={
+                    "phosphate": {"constant": 0.05, "exponent": 1.07},
+                    "do": {"constant": 0.04, "exponent": 1.05},
+                },
+                data_input_dict=_decay_temperatures(days, 62),
+            ),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("src_to_gw", "src", "gw"), _arc("gw_to_sea", "gw", "sea")],
+        "orchestration": [{"Catchment": "route"}, {"Groundwater": "distribute"}],
+    }
+    if override:
+        temperatures = _decay_temperatures(days, 63, exactly_20=4)
+        mapping["overrides"] = {
+            "nodes": {
+                "gw": {
+                    "type_": "Groundwater",
+                    "name": "gw",
+                    "filename": _forcing_file("decay_groundwater", temperatures),
+                }
+            }
+        }
+    return mapping
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -1934,6 +2001,12 @@ CASES: dict[str, Case] = {
         days=_DECAY_DAYS,
         scale=_largest_volume(_decay_storage()),
         replay=("pond", "res", "rr", "riv"),
+    ),
+    "decay_groundwater": Case(
+        build=_decay_groundwater,
+        days=_DECAY_DAYS,
+        scale=_largest_volume(_decay_groundwater()),
+        replay=("gw",),
     ),
     "node_type_override": Case(
         build=_node_type_override,

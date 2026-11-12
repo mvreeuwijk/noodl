@@ -31,8 +31,8 @@ __all__ = [
 ]
 
 # the storage-family classes whose ``decays`` dict builds a DecayTank that reads the node's
-# temperature at the end of the day (the groundwaters' temperature is a filename override's)
-DECAYING_STORAGE = ("Storage", "Reservoir", "RiverReservoir", "River")
+# temperature at the end of the day (a Groundwater's is a filename override's, X11)
+DECAYING_STORAGE = ("Storage", "Groundwater", "Reservoir", "RiverReservoir", "River")
 # model.py:697-735: the WSIMOD types (after the renames) whose arcs give the river order
 _RIVER_TYPES = ("River", "Node", "Waste", "Reservoir")
 # The tags a check can be asked under in 3a: the default, a Sewer's and a WWTW's "Sewer",
@@ -289,7 +289,7 @@ def forcing_readers(network: WsimodNetwork) -> dict[str, list[str]]:
     ``Land`` reads ``precipitation``, ``et0`` and ``temperature`` (``land.py:451-460``; the
     temperature also for the surfaces' end-of-day decay, ``core.py:485-487``), a decaying
     ``Storage``, ``Reservoir``, ``RiverReservoir`` or ``River`` (``temperature``, the same
-    end-of-day read; the groundwaters' temperature is a ``filename`` override's, later), a
+    end-of-day read) or ``Groundwater`` (its temperature is a ``filename`` override's, X11), a
     ``ResidentialDemand`` ``temperature`` (``demand.py:321``) and a ``Catchment`` ``flow`` and
     every pollutant of the configuration (``catchment.py:59-74``). A variable no node reads is
     absent.

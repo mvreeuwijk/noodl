@@ -130,6 +130,8 @@ class WsimodNetwork:
     date_labels: list[str]
     nodes: list[NodeSpec]
     arcs: list[ArcSpec]
+    # what WSIMOD accepts and never reads (D10), as "<node>.<key>"
+    unread: list[str] = field(default_factory=list)
 
 
 def parse_date(text: str) -> datetime:
@@ -290,18 +292,38 @@ def _fill_wtw_defaults(parameters: dict, pollutants: Pollutants) -> None:
         parameters["liquor_multiplier"] = liquor
 
 
+# the classes whose forcing WSIMOD reads (land.py:451-460, demand.py:321, catchment.py:59-74)
+_FORCING_CLASSES = ("Land", "ResidentialDemand", "Catchment")
+# the storage classes whose DecayTank reads a temperature (core.py:484-487)
+_TEMPERATURE_STORAGE = (
+    "Storage",
+    "Groundwater",
+    "QueueGroundwater",
+    "Reservoir",
+    "RiverReservoir",
+    "River",
+)
+
+
 # --- overrides -------------------------------------------------------------------------------
 def _apply_overrides(
-    parameters: dict[str, object], schema: ClassSchema, overrides: dict, where: str
+    parameters: dict[str, object],
+    schema: ClassSchema,
+    overrides: dict,
+    where: str,
+    *,
+    surface: bool = False,
 ) -> None:
     """Merge one override entry into ``parameters`` (D5): dict-valued ``pollutant_load``,
     ``liquor_multiplier`` and ``process_parameters`` update the node's own copy, everything
     else is replaced. A key outside the class's chain is refused (WSIMOD only prints)."""
     for key in overrides:
-        if key in ("filename", "data_input_dict"):
+        # a node's ``filename`` is read by _override_node (X27); a surface's forcing is deposition
+        # data (3c), and no override of ``data_input_dict`` is ported
+        if key == "data_input_dict" or (key == "filename" and surface):
             raise ValueError(
-                f"{where}: an override of {key!r} is not supported in 3a (WSIMOD opens the "
-                "file relative to the working directory, nodes.py:93-99, land.py:413-421)"
+                f"{where}: an override of {key!r} is not supported (surface and "
+                "data_input_dict forcing overrides are sub-project 3c, land.py:413-421)"
             )
         if key not in schema.override_keys:
             raise ValueError(f"{where}: {key!r} is not an override of {schema.name}")
@@ -309,7 +331,7 @@ def _apply_overrides(
         # The PerviousSurface soil-temperature keys (soil_temp_w_prev, _w_air, _w_deep, _deep) are
         # state attributes in WSIMOD, not constructor keywords (land.py:753-756); they are
         # stored in the surface's parameters here for the Land task to read from there.
-        if key in ("surfaces", "surface"):  # the node's surfaces; a surface's own name
+        if key in ("surfaces", "surface", "filename"):  # filename: _override_node
             continue
         if key in ("pollutant_load", "liquor_multiplier"):
             if not isinstance(value, Mapping):
@@ -336,8 +358,37 @@ def _apply_overrides(
             parameters[key] = copy.deepcopy(value)
 
 
-def _override_node(node: NodeSpec, entry: dict, where: str) -> None:
+def _override_filename(node: NodeSpec, value: object, where: str, unread: list[str]) -> None:
+    """``Node.apply_overrides`` (``nodes.py:93-99``, D23): a string is read with ``read_csv`` as
+    written, relative to the working directory (not the configuration's), and replaces the
+    node's forcing; a falsy non-string (``None``, ``0``, ``[]``) is ignored; anything else is
+    refused. The empty string is a string, so WSIMOD opens ``""`` and raises
+    ``FileNotFoundError`` (``nodes.py:95-96`` test ``isinstance`` first): refused here too."""
+    if isinstance(value, str):
+        path = Path(value)
+        if not path.is_file():
+            raise ValueError(f"{where}: forcing file {value!r} does not exist")
+        node.data = _read_csv(path)
+        # a class that reads no forcing still has its file read (D10); a Groundwater's file is
+        # read by its decay only
+        reads = node.cls in _FORCING_CLASSES or (
+            node.cls in _TEMPERATURE_STORAGE and node.parameters.get("decays") is not None
+        )
+        if not reads and f"{node.name}.filename" not in unread:
+            unread.append(f"{node.name}.filename")
+    elif not value:
+        pass  # nodes.py:97-98: falsy non-string content is ignored
+    else:
+        raise ValueError(
+            f"{where}: filename {value!r} is not a string (WSIMOD raises RuntimeError: "
+            "Not recognised format for data_input_dict)"
+        )
+
+
+def _override_node(node: NodeSpec, entry: dict, where: str, unread: list[str]) -> None:
     _apply_overrides(node.parameters, NODE_SCHEMAS[node.cls], entry, where)
+    if "filename" in entry:
+        _override_filename(node, entry["filename"], where, unread)
     surfaces = entry.get("surfaces", {})
     if not isinstance(surfaces, Mapping):
         raise ValueError(f"{where}: surfaces must be a mapping of surface name to overrides")
@@ -351,6 +402,7 @@ def _override_node(node: NodeSpec, entry: dict, where: str) -> None:
             SURFACE_SCHEMAS[match.cls],
             override,
             f"{where}, surface {surface_name!r}",
+            surface=True,
         )
         if match.parameters["decays"]:  # a surface's decay is Task 8
             _refuse_decays(f"{where}, surface {surface_name!r}", match.parameters["decays"])
@@ -388,7 +440,9 @@ def _lists(data: dict) -> tuple[Pollutants, float]:
     )
 
 
-def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSpec:
+def _read_node(
+    entry: dict, base: Path | None, pollutants: Pollutants, unread: list[str]
+) -> NodeSpec:
     name = _need(entry, "name", "a node")
     where = f"node {name!r}"
     if not isinstance(name, str):
@@ -403,7 +457,13 @@ def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSp
         "data_input_dict" not in schema.parameters
     ):
         raise ValueError(f"{where}: {cls} does not take forcing data (data_input_dict)")
+    lost = [k for k in ("data_input_dict", "filename") if k in entry]
     data = _forcing(entry, base, where)
+    if cls in ("Groundwater", "QueueGroundwater"):
+        # storage.py:202-203, :291-292: the configured forcing is stored before Node.__init__
+        # resets it (nodes.py:26, :58), so it is lost (X11, D10)
+        data = {}
+        unread.extend(f"{name}.{k}" for k in lost)
     surfaces: list[SurfaceSpec] = []
     if "surfaces" in entry:
         if "surfaces" not in schema.parameters:
@@ -415,13 +475,6 @@ def _read_node(entry: dict, base: Path | None, pollutants: Pollutants) -> NodeSp
     parameters = _checked_parameters(entry, schema, where)
     decays = parameters.get("decays")
     if decays is not None:  # storage.py:53, :300 build a DecayTank
-        if cls == "Groundwater":
-            _refuse_decays(
-                where,
-                decays,
-                "a Groundwater's decay reads temperature from a 'filename' override only "
-                "(storage.py:202-203), which Task 7 adds",
-            )
         if cls == "QueueGroundwater":
             _refuse_decays(
                 where,
@@ -536,7 +589,8 @@ def read_wsimod_config(
         raise ValueError("dates must be a list of date strings")
     dates = [parse_date(x) for x in labels]
 
-    nodes = [_read_node(e, base, pollutants) for e in _items(data["nodes"], "nodes")]
+    unread: list[str] = []
+    nodes = [_read_node(e, base, pollutants, unread) for e in _items(data["nodes"], "nodes")]
     seen: set[str] = set()
     for node in nodes:
         if node.name in seen:
@@ -567,7 +621,7 @@ def read_wsimod_config(
         node = next((n for n in nodes if n.slot_key == type_ and n.name == name), None)
         if node is None:  # model.py:822-823
             raise ValueError(f"override: node {name!r} not recognised")
-        _override_node(node, entry, f"override of node {name!r}")
+        _override_node(node, entry, f"override of node {name!r}", unread)
     for entry in _items(section.get("arcs"), "overrides arcs"):
         name = _need(entry, "name", "an arc override")
         entry.pop("type_", None)  # model.py:828-829
@@ -590,4 +644,5 @@ def read_wsimod_config(
         date_labels=[str(x) for x in labels],
         nodes=nodes,
         arcs=arcs,
+        unread=unread,
     )

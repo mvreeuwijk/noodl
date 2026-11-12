@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from noodl.apps.wsimod import build_model
 from noodl.apps.wsimod.classes import (
     ARC_SCHEMAS,
     NODE_SCHEMAS,
@@ -416,7 +417,7 @@ REFUSALS = [
     (_node(type_="Land", surfaces=[{"type_": "ImperviousSurface", "depth": 1}]), "depth"),
     (_node(type_="Widget"), "Widget"),
     (_node(type_="Waste", capacityy=1), "capacityy"),
-    (_node(type_="Waste", filename="x.csv"), "data_input_dict"),
+    (_node(type_="Waste", filename="x.csv"), "data_input_dict"),  # a constructor key
     (_node(type_="Catchment", filename="missing.csv"), "missing.csv"),
     (_node(type_="Waste", name="a"), "'a'"),
     (_arc(type_="DecayArc"), "3b"),
@@ -430,7 +431,13 @@ REFUSALS = [
     (_override(node={"type_": "Reservoir", "name": "a"}), "Reservoir"),
     (_override(node={"type_": "Land", "name": "a"}), "'a'"),  # a is filed under Catchment
     (_override(node={"type_": "Catchment", "name": "a", "capacity": 1}), "capacity"),
-    (_override(node={"type_": "Catchment", "name": "a", "filename": "x.csv"}), "filename"),
+    (_override(node={"type_": "Catchment", "name": "a", "filename": "x.csv"}), "x.csv"),
+    (_override(node={"type_": "Catchment", "name": "a", "filename": 3}), "filename"),
+    (
+        _override(node={"type_": "Land", "name": "land", "surfaces": {"g": {"filename": "x.csv"}}}),
+        "filename",
+    ),
+    (_override(node={"type_": "Catchment", "name": "a", "data_input_dict": {}}), "data_input_dict"),
     (
         _override(
             node={"type_": "Land", "name": "land", "surfaces": {"g": {"data_input_dict": "x.csv"}}}
@@ -460,7 +467,7 @@ REFUSALS = [
         ),
         "depth",
     ),
-    (_node(type_="Groundwater", decays={"phosphate": {"constant": 1}}), "filename"),
+    (_node(type_="Groundwater", decays={"phosphate": {"constant": 1}}), "exponent"),
     (_node(type_="QueueGroundwater", decays={}), "filename"),
     # read_decays at node level (Task 5's refusals)
     (_node(type_="Storage", decays=[1]), "decays must be a mapping"),
@@ -476,6 +483,110 @@ REFUSALS = [
     (_override(arc={"name": "nowhere", "type_": "Arc"}), "nowhere"),
     (_override(arc={"name": "ab", "type_": "Arc", "diameter": 1}), "diameter"),
 ]
+
+
+def _forcing_csv(path: Path, rows: dict[str, float]) -> str:
+    path.write_text(
+        "variable,time,value\n" + "".join(f"flow,{d},{v!r}\n" for d, v in rows.items()),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _as_dates(data) -> dict:
+    """A forcing dict with its dates as ``datetime`` (WSIMOD's ``to_datetime`` keys compare by
+    ``__eq__``, not by hash)."""
+    return {(k[0], datetime.fromisoformat(str(k[1]))): v for k, v in data.items()}
+
+
+def _filename_override(value) -> dict:
+    """``_base()`` with a ``filename`` override of the catchment ``a`` (and its inline data), in
+    the dict form WSIMOD's ``add_overrides`` takes."""
+    mapping = _base()
+    mapping["nodes"][0]["data_input_dict"] = {("flow", "2000-01-01"): 1.0}
+    mapping["overrides"] = {
+        "nodes": {"a": {"type_": "Catchment", "name": "a", "filename": value}},
+        "arcs": {},
+    }
+    return mapping
+
+
+def test_a_filename_override_replaces_the_forcing(tmp_path):
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    path = _forcing_csv(tmp_path / "flow.csv", {"2000-01-01": 7.5, "2000-01-02": 8.5})
+    mapping = _filename_override(path)
+    ours = read_wsimod_config(mapping).nodes[0].data
+    theirs = wsimod_model(mapping).nodes["a"].data_input_dict
+    assert ours == {
+        ("flow", datetime(2000, 1, 1)): 7.5,
+        ("flow", datetime(2000, 1, 2)): 8.5,
+    }
+    assert _as_dates(theirs) == ours
+
+
+def test_a_relative_filename_override_opens_from_the_working_directory(tmp_path, monkeypatch):
+    """Not from the configuration's directory (nodes.py:93-99, X27)."""
+    _forcing_csv(tmp_path / "flow.csv", {"2000-01-01": 3.0})
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path)
+    network = read_wsimod_config(_filename_override("flow.csv"))
+    assert network.nodes[0].data == {("flow", datetime(2000, 1, 1)): 3.0}
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    with pytest.raises(ValueError, match="flow.csv"):
+        read_wsimod_config(_filename_override("flow.csv"))
+
+
+def test_filename_override_edge_cases(tmp_path):
+    """D23 as the source reads (nodes.py:93-99): a falsy non-string is ignored, the empty string
+    is a string that WSIMOD opens (``FileNotFoundError``), another non-string is refused (WSIMOD
+    raises ``RuntimeError``), and a class that reads no forcing accepts the file and lists it."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    inline = {("flow", datetime(2000, 1, 1)): 1.0}
+    for ignored in (None, 0, []):
+        mapping = _filename_override(ignored)
+        assert read_wsimod_config(mapping).nodes[0].data == inline
+        assert _as_dates(wsimod_model(mapping).nodes["a"].data_input_dict) == inline
+    with pytest.raises(ValueError, match="does not exist"):
+        read_wsimod_config(_filename_override(""))
+    with pytest.raises(FileNotFoundError):
+        wsimod_model(_filename_override(""))
+
+    with pytest.raises(ValueError, match="filename"):
+        read_wsimod_config(_filename_override(3))
+    with pytest.raises(RuntimeError, match="Not recognised format"):
+        wsimod_model(_filename_override(3))
+
+    path = _forcing_csv(tmp_path / "waste.csv", {"2000-01-01": 2.0})
+    mapping = _filename_override(path)
+    mapping["overrides"]["nodes"] = {"b": {"type_": "Waste", "name": "b", "filename": path}}
+    assert read_wsimod_config(mapping).unread == ["b.filename"]
+    wsimod_model(mapping)  # WSIMOD reads the file and accepts it
+    assert read_wsimod_config(_filename_override(path)).unread == []
+
+
+def test_groundwater_forcing_is_lost_and_listed_unread():
+    """storage.py:202-203: the configured forcing is reset by ``Node.__init__`` (X11, D10)."""
+    mapping = {
+        "nodes": [
+            {
+                "name": "g",
+                "type_": "Groundwater",
+                "data_input_dict": {("temperature", "2000-01-01"): 10.0},
+            },
+            {"name": "b", "type_": "Waste"},
+        ],
+        "arcs": [],
+    }
+    network = read_wsimod_config(mapping)
+    assert network.unread == ["g.data_input_dict"]
+    assert network.nodes[0].data == {}
+    mapping["dates"] = ["2000-01-01"]
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    assert model.unread == ["g.data_input_dict"]
 
 
 @pytest.mark.parametrize(("mapping", "named"), REFUSALS)

@@ -61,8 +61,9 @@ Where `T` comes from:
 
 | Node | Temperature |
 |---|---|
-| `Storage`, `Reservoir`, `RiverReservoir`, `River` | the node's own `data_input_dict` (or `filename` file); a missing date is refused by name when the model is built, whatever `decays` lists (an empty dict reads it too, `core.py:484-487`) |
-| `Groundwater`, `QueueGroundwater` | a `filename` override only (`storage.py:202-203`, `:291-292`): a `decays` dict on them is refused until that override is accepted |
+| `Storage`, `Reservoir`, `RiverReservoir`, `River` | the node's own forcing, given as the constructor's `data_input_dict` or `filename` key (a constructor key, read relative to the configuration's directory), or replaced by a `filename` override (an override key, read relative to the working directory); a missing date is refused by name when the model is built, whatever `decays` lists (an empty dict reads it too, `core.py:484-487`) |
+| `Groundwater` | a `filename` **override** only: WSIMOD loses the constructor's `data_input_dict` and `filename` (`storage.py:202-203`), so a configured forcing is listed in `model.unread` and a `decays` dict without the override's `("temperature", date)` on every date is refused by name (X11). Use an absolute path: the override is opened relative to the working directory, as in WSIMOD |
+| `QueueGroundwater` | the same, but a `decays` dict on it is refused until a later task of this sub-project |
 | a node with `decays: None` | none |
 
 The kinks. The cap `min(factor, 1)` is a decision, `node:<name>/tank/make_decay/cap:<pollutant>`,
@@ -349,7 +350,10 @@ configured value.
 `build_model(network, pollutants=False)` runs on the volumes alone (`K = 0`). The parameters such
 a run does not read — surface deposition loads, a demand's `pollutant_load`, the treatment works'
 pollutant entries, a catchment's pollutant series — are listed by name in
-`model.ignored_by_quantity_only`. With `pollutants=True` (the default) the same configuration is
+`model.ignored_by_quantity_only`. What WSIMOD accepts and never reads is `model.unread`
+(`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
+or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
+and ignores it). With `pollutants=True` (the default) the same configuration is
 refused if a process that is not ported yet would change the pollutants: until the rest of 3b and
 3c, such configurations need `pollutants=False`. The
 soil temperature is not among them (it is ported); its weights are only listed as ignored.

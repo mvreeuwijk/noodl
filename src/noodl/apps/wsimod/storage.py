@@ -17,9 +17,10 @@ events (D13).
 :class:`~noodl.apps.wsimod.decay.Decay` from its bound ``decays.constant`` and
 ``decays.exponent`` and the day's ``temperature`` (D15), and refuses a changed inert entry on a
 node whose ``decays`` does not list the pollutant (X9). A ``Groundwater`` and a
-``QueueGroundwater`` read their temperature only from a ``filename`` override
-(``storage.py:202-203``, ``:291-292``), which a later task of sub-project 3b adds; a ``decays``
-dict on them is refused until then.
+``QueueGroundwater`` lose their configured forcing and read their temperature only from a
+``filename`` override (``storage.py:202-203``, ``:291-292``, X11). A ``Groundwater``'s ``decays``
+needs such an override (:meth:`Groundwater.validate`); a ``QueueGroundwater``'s is refused until
+a later task of sub-project 3b.
 """
 
 from __future__ import annotations
@@ -164,8 +165,8 @@ class Storage(Node):
     # storage.py:76: the storage change is the engine's, from the stores (D11); a DecayTank's
     # decayed mass leaves the system (tanks.py:449-457)
     mass_balance: ClassVar[dict[str, str]] = {"DecayTank.decayed": "out"}
-    # whether a ``decays`` dict is accepted (a Groundwater's and a QueueGroundwater's temperature
-    # comes from a ``filename`` override only, X11: later tasks)
+    # whether a ``decays`` dict is accepted (a QueueGroundwater's temperature comes from a
+    # ``filename`` override only, X11: a later task)
     supports_decays: ClassVar[bool] = True
     # parameter name -> WSIMOD default, the node's own numeric parameters (bind replaces them)
     parameter_defaults: ClassVar[dict[str, float]] = {}
@@ -209,6 +210,8 @@ class Storage(Node):
         run's pollutants: a quantity-only run decays nothing, as it carries no pollutant."""
         if decays is None:
             return None
+        # in a quantity-only run the keys outside ``p.names`` are dropped only here, after the
+        # reader (and ``validate``) checked them against the full pollutant list
         known = {k: v for k, v in decays.items() if k in self.p.names}
         return read_decays(f"node {self.name!r}", known, self.p)
 
@@ -262,9 +265,7 @@ class Storage(Node):
             )
         residence = self.params.get("residence_time")
         if residence is not None and bool((residence == 0).any()):
-            raise ValueError(
-                f"node {self.name!r}: residence_time is 0 (storage.py:224 divides)"
-            )
+            raise ValueError(f"node {self.name!r}: residence_time is 0 (storage.py:224 divides)")
         for tank in self._tanks():
             for name in ("capacity", "area", "datum"):
                 if name in self.params:
@@ -384,7 +385,6 @@ class Groundwater(Storage):
     to sewers above a threshold."""
 
     wsimod_type: ClassVar[str] = "Groundwater"
-    supports_decays: ClassVar[bool] = False  # its temperature needs a filename override (X11)
     step_methods: ClassVar[tuple[str, ...]] = ("infiltrate", "distribute")
     parameter_defaults: ClassVar[dict[str, float]] = {
         "residence_time": 200,
@@ -427,6 +427,16 @@ class Groundwater(Storage):
     def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
         """``residence_time`` divides the volume (``storage.py:224``) and the root's argument
         must not be negative (``:236``: a negative base to ``0.5`` is a complex number)."""
+        if spec.parameters.get("decays") is not None:
+            # storage.py:202-203: the configured forcing is lost, so the temperature the
+            # DecayTank reads (core.py:484-487) is the ``filename`` override's (X11)
+            for date, label in zip(network.dates, network.date_labels, strict=True):
+                if ("temperature", date) not in spec.data:
+                    raise ValueError(
+                        f"node {spec.name!r}: a Groundwater with 'decays' needs a ('temperature', "
+                        f"t) forcing on {label} from a 'filename' override: WSIMOD loses its "
+                        "configured data_input_dict (storage.py:202-203)"
+                    )
         ignored = super().validate(spec, network, pollutants=pollutants)
         if float(spec.parameters.get("residence_time", 200)) == 0:
             raise ValueError(f"node {spec.name!r}: residence_time is 0 (storage.py:224 divides)")

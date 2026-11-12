@@ -100,8 +100,10 @@ refused by name.
 - `decays` is `None` (a plain tank) or a dict (a `DecayTank`, `{}` included) on `Storage`,
   `Reservoir`, `RiverReservoir` and `River`: a key per decaying pollutant, each with exactly
   `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
-  forcing on every date. On a `Groundwater` or `QueueGroundwater` a dict is refused until their
-  `filename` override is accepted, and a surface's must be empty (sub-project 3b).
+  forcing on every date. A `Groundwater` loses its configured forcing (`storage.py:202-203`), so
+  its dict needs a `filename` override that gives `temperature` on every date. On a
+  `QueueGroundwater` a dict is refused until a later task of sub-project 3b, and a surface's must
+  be empty.
 - Classes WSIMOD has that are not read are refused by name with where they go:
   `DecayArc` and `DecayArcAlt` (sub-project 3b), `GrowingSurface`, `IrrigationSurface`,
   `GardenSurface` and `VariableAreaSurface` (3c), and `EnfieldFoulSewer`, whose
@@ -150,9 +152,16 @@ compute derived quantities.
 - An override of `decays` on the Storage family merges per pollutant, as `dict.update` does
   (an entry replaces the pollutant's whole dict, so it needs both keys); it is refused on a node
   built with `decays: None` (`storage.py:96-100`) and on a surface (sub-project 3b).
-- `filename` (a node) and `data_input_dict` (a surface) are refused: WSIMOD opens an override's
-  file relative to the current working directory, not the configuration directory
-  (`nodes.py:93-99`, `land.py:413-421`).
+- A node's `filename` override is read as WSIMOD reads it (`nodes.py:93-99`, `model.py:1252-1269`):
+  the path as written, opened relative to the process's **working directory**, not the
+  configuration's directory (use absolute paths); the file's data replaces the node's forcing.
+  It is not the constructor's `filename` key, which is relative to the configuration. A falsy
+  non-string (`None`, `0`, `[]`) is ignored. The empty string is refused as a missing file
+  (WSIMOD opens `""` and raises `FileNotFoundError`), and any other non-string value is refused
+  by name (WSIMOD raises `RuntimeError`). On a class that reads no forcing (a `Waste`, say) the file is
+  still read and the override is listed in `WsimodNetwork.unread`. A `Groundwater`'s override is
+  its only forcing (X11). A surface's `filename` and any `data_input_dict` override are still
+  refused (deposition data, sub-project 3c; `land.py:413-421`).
 
 ## Units, order and what runs
 

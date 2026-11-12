@@ -184,16 +184,42 @@ def _decaying(type_="Storage", *, decays=DECAYS, days=3, missing=(), overrides=N
     return mapping
 
 
-@pytest.mark.parametrize("cls", ["Groundwater", "QueueGroundwater"])
-def test_a_decays_dict_on_a_groundwater_is_refused_until_its_filename_override(cls):
-    network = read_wsimod_config(_decaying(cls, decays=None))
+def _override(path) -> dict:
+    return {"type_": "Groundwater", "name": "r", "filename": str(path)}
+
+
+def test_a_decaying_groundwater_needs_a_filename_override(tmp_path):
+    """The configured forcing is lost (storage.py:202-203), so the temperature comes from an
+    override's file (X11); a file that misses a date is refused by name too."""
+    network = read_wsimod_config(_decaying("Groundwater", decays=None))
     spec = network.nodes[0]
-    assert NODE_CLASSES[cls].validate(spec, network, pollutants=True) == []  # None is valid
+    assert NODE_CLASSES["Groundwater"].validate(spec, network, pollutants=True) == []
+    with pytest.raises(ValueError, match=r"Groundwater.*filename"):
+        build_model(read_wsimod_config(_decaying("Groundwater")))
+    with pytest.raises(ValueError, match=r"Groundwater.*filename"):
+        build_model(read_wsimod_config(_decaying("Groundwater", decays={})))
+    rows = "".join(f"temperature,2000-01-0{k},15.0\n" for k in (1, 2))
+    short = tmp_path / "short.csv"
+    short.write_text("variable,time,value\n" + rows, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"2000-01-03.*filename"):
+        build_model(read_wsimod_config(_decaying("Groundwater", overrides=_override(short))))
+    full = tmp_path / "full.csv"
+    full.write_text(short.read_text() + "temperature,2000-01-03,15.0\n", encoding="utf-8")
+    network = read_wsimod_config(_decaying("Groundwater", overrides=_override(full)))
+    model, _, drivers = build_model(network)
+    assert model.unread == ["r.data_input_dict"]  # the decoy
+    assert drivers["wsimod.temperature"].shape == (3, 1)
+
+
+def test_a_decays_dict_on_a_queue_groundwater_is_refused_until_its_filename_override():
+    network = read_wsimod_config(_decaying("QueueGroundwater", decays=None))
+    spec = network.nodes[0]
+    assert NODE_CLASSES["QueueGroundwater"].validate(spec, network, pollutants=True) == []
     spec.parameters["decays"] = DECAYS
     with pytest.raises(ValueError, match=r"decays.*filename"):
-        NODE_CLASSES[cls].validate(spec, network, pollutants=True)
+        NODE_CLASSES["QueueGroundwater"].validate(spec, network, pollutants=True)
     with pytest.raises(ValueError, match=r"decays.*filename"):
-        read_wsimod_config(_decaying(cls, decays={}))
+        read_wsimod_config(_decaying("QueueGroundwater", decays={}))
 
 
 @pytest.mark.parametrize("cls", ["Storage", "Reservoir", "RiverReservoir", "River"])

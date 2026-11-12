@@ -649,6 +649,8 @@ def _replay_class(demo, config, mode, cls, days, *, every_day, decisions=None):
         if spec.cls != cls:
             continue
         calls = captured_calls[spec.name]
+        # all() over an empty call list is True: no calls at all still means "WSIMOD called
+        # nothing"
         if all(c.method == "end_timestep" for c in calls):  # WSIMOD called nothing but the end
             uncalled.add(spec.name)
             continue
