@@ -20,6 +20,7 @@ from noodl.apps.wsimod.engine import Ctx, make_node
 from noodl.apps.wsimod.node import NODE_CLASSES, Waste
 from noodl.apps.wsimod.run import wsimod_run
 from noodl.apps.wsimod.storage import (
+    COMPENSATED_SUM,
     Groundwater,
     QueueGroundwater,
     Reservoir,
@@ -1160,6 +1161,7 @@ def test_one_biochemistry_call_by_hand():
     confcn = din_concentration / (din_concentration + halfsatINwater)
     denitri_water = denpar_w * area * tempfcn * confcn
     assert denitri_water < 0.5 * din
+    din_before = din
     din_ = din - denitri_water
     gain = {n: 0.0 for n in BIO_POLLUTANTS}
     loss = {n: 0.0 for n in BIO_POLLUTANTS}
@@ -1179,6 +1181,7 @@ def test_one_biochemistry_call_by_hand():
     minprodN = prodNpar * totalphosfcn * tempfcn * area * current_depth
     minprodP = prodPpar * totalphosfcn * tempfcn * area * current_depth * uptake_PNratio
     assert minprodN > 0 and minprodN < 0.5 * din and minprodP < 0.5 * s["phosphate"]
+    s_phosphate, din_production = s["phosphate"], din
     loss["phosphate"] = minprodP
     s["phosphate"] -= minprodP
     gain["org-phosphorus"] = minprodP
@@ -1201,6 +1204,7 @@ def test_one_biochemistry_call_by_hand():
         loss[pol] += lost
         s[pol] -= lost
     macrouptP = muptPpar * tempfcn * max(0, totalphosfcn) * area
+    phosphate_before_macro = s["phosphate"]
     assert 0 < macrouptP < 0.5 * s["phosphate"]
     loss["phosphate"] += macrouptP
     s["phosphate"] -= macrouptP
@@ -1210,6 +1214,13 @@ def test_one_biochemistry_call_by_hand():
     assert torch.equal(node.lagged_temperatures, torch.tensor(temperatures, dtype=torch.float64))
     assert torch.equal(node.lagged_total_phosphorus, torch.tensor(phosphorus, dtype=torch.float64))
     sites = [d.site.rsplit("/", 1)[-1] for d in ctx.decisions]
+    margins = {d.site.rsplit("/", 1)[-1]: float(d.margin) for d in ctx.decisions}
+    # the caps' operand orders (Python's min(a, b) is b when b < a): margin = b - a
+    assert margins["denitrification_cap"] == 0.5 * din_before - denitri_water
+    assert margins["production_cap:N"] == minprodN - 0.5 * din_production
+    assert margins["production_cap:P"] == minprodP - 0.5 * s_phosphate
+    assert margins["macrophyte_cap:N"] == macrouptN - 0.5 * din
+    assert margins["macrophyte_cap:P"] == macrouptP - 0.5 * phosphate_before_macro
     assert sites == [
         "dry",
         "frozen",
@@ -1357,6 +1368,10 @@ def test_the_registers_reproduce_pythons_sums_from_a_cold_start():
         assert len(temperatures) == max_temp_lag + 1 and len(phosphorus) == 366
 
 
+def test_compensated_sum_follows_the_interpreter():
+    assert COMPENSATED_SUM == (sum([1e16, 1.0, -1e16]) == 1.0)
+
+
 def test_minus_zero_phosphorus_enters_the_register_as_python_sums_it():
     """X31: a slot holding ``-0.0`` (``phosphate + org-phosphorus`` of two ``-0.0``) sums as
     CPython's ``sum``, which starts from the integer 0: ``+0.0``, whatever the padding."""
@@ -1386,8 +1401,23 @@ def test_mineralisation_without_din_destroys_nitrogen_and_says_so():
         "org-phosphorus": 0.2,
         "org-nitrogen": 1.0,
     }
-    node, ctx = bio_river(state, 10.0, FALLING_TEMPERATURES, [0.002] * 366)
+    node, ctx = bio_river(state, 10.0, FALLING_TEMPERATURES, [0.002] * 366, record=True)
     node.calculate_discharge(active=TRUE)
+    margins = {d.site.rsplit("/", 1)[-1]: float(d.margin) for d in ctx.decisions}
+    # min(0.5 pool, -minprodX): margin = -minprodX - 0.5 pool
+    T = (1 - 1 / 5) * 10.0 + (1 / 5) * 10.0
+    temperatures = FALLING_TEMPERATURES[1:] + [T]
+    phosphorus = [0.002] * 365 + [0.5 + 0.2]
+    t10, t20 = sum(temperatures[-10:]) / 10, sum(temperatures[-20:]) / 20
+    tp = sum(phosphorus) / 365
+    tempfcn = T / 20 * (t10 - t20) / 5
+    totalphosfcn = (tp - 0.1 * 1e-3) / (tp - 0.1 * 1e-3 + 0.05 * 1e-3)
+    area, depth = 200 * 20, 1000.0 / (200 * 20)
+    minprodN = 0.001 * totalphosfcn * tempfcn * area * depth
+    minprodP = 0.0001 * totalphosfcn * tempfcn * area * depth * (1 / 7.2)
+    assert minprodN < 0
+    assert margins["mineralisation_cap:N"] == -minprodN - 0.5 * 1.0
+    assert margins["mineralisation_cap:P"] == -minprodP - 0.5 * 0.2
     lost = float(node.bio_out[BIO.column("org-nitrogen")])
     assert 0 < lost <= 0.5 * 1.0
     assert float(node.tank.storage[BIO.column("org-nitrogen")]) == 1.0 - lost

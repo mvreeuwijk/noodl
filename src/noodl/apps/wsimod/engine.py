@@ -42,7 +42,8 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``node:N/satisfy_environmental/owed``; a ``River`` with biochemistry (``"nitrate"`` a
   pollutant) adds ``node:N/biochemical_processes/<branch>`` (``storage.py:766-893``, ``call``
   the index of the day's ``calculate_discharge`` call) for the branches ``dry``, ``frozen``
-  (under ``active``), then, under the mask the guards leave, ``cold``,
+  (``dry`` under ``active``, ``frozen`` under ``active & ~dry``), then, under the mask the
+  guards leave, ``cold``,
   ``denitrification_cap``, ``din:denitrification``, ``totalphosfcn``, ``production``,
   ``production_cap:{N,P}`` and ``din:production`` (where it produces),
   ``mineralisation_cap:{N,P}`` and ``din:mineralisation`` (where it mineralises),

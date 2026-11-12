@@ -27,7 +27,6 @@ an override (:meth:`Groundwater.validate`, :meth:`QueueGroundwater.validate`). A
 from __future__ import annotations
 
 import math
-import sys
 import warnings
 from collections.abc import Mapping
 from datetime import datetime
@@ -846,7 +845,9 @@ DIN_COMPONENTS = ("ammonia", "nitrate")
 
 def _din(columns: Mapping[str, Tensor]) -> Tensor:
     """``sum([S[x] for x in din_components])`` (``storage.py:733-735``): Python's ``sum`` from 0,
-    ammonia then nitrate. ``0 + x`` and ``+0.0 + x`` agree for every ``x``, ``-0.0`` included."""
+    ammonia then nitrate. ``0 + x`` and ``+0.0 + x`` agree for every ``x``, ``-0.0`` included.
+    On 3.12 the two-term compensated sum equals ``(0.0 + a) + b`` bitwise (Fast2Sum is exact), so
+    it needs no :func:`window_sum`."""
     total = 0.0 + columns["ammonia"]
     return total + columns["nitrate"]
 
@@ -861,8 +862,9 @@ def _shift(register: Tensor, value: Tensor) -> Tensor:
 
 
 # CPython 3.12 sums floats with Neumaier's compensation (bltinmodule.c, builtin_sum_impl;
-# gh-100425); 3.11 adds them one at a time. WSIMOD's means are whichever the interpreter does.
-COMPENSATED_SUM = sys.version_info >= (3, 12)
+# gh-100425); 3.11 adds them one at a time. A probe decides which, not ``sys.version_info``.
+# WSIMOD's means are whichever the interpreter does.
+COMPENSATED_SUM = sum([1e16, 1.0, -1e16]) == 1.0  # probed: the interpreter's behaviour
 
 
 def window_sum(register: Tensor, length: int) -> Tensor:
@@ -875,7 +877,9 @@ def window_sum(register: Tensor, length: int) -> Tensor:
     time. CPython starts from the integer 0, and ``0 + x`` is ``+0.0 + x`` for every ``x``,
     ``-0.0`` included; a padded ``+0.0`` slot leaves ``s`` and ``c`` at ``+0.0``. The sum is
     therefore Python's over WSIMOD's list, bitwise. The branch on ``|s| >= |x|`` is detached;
-    the compensation's gradient is 0, so the gradient is the plain sum's."""
+    the compensation's gradient is 0, so the gradient is the plain sum's. Parity assumes WSIMOD's
+    lists hold Python floats, as ``read_csv`` produces; ``numpy.float64`` items get CPython's
+    plain sum."""
     total = torch.zeros(register.shape[:-1], dtype=torch.float64)
     size = register.shape[-1]
     compensation = torch.zeros_like(total)

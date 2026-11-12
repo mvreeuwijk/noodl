@@ -305,8 +305,9 @@ call's gains and losses.
 `"wsimod.river_phosphorus_lag"` (kg) hold the two registers, rows `(river, i)`, slot 0 the
 oldest, zero-padded at the front. All zeros is WSIMOD's empty lists: no sum notices the padding
 (`+0.0` leaves a sum unchanged), so the sums equal Python's over WSIMOD's lists, bitwise,
-including CPython 3.12's compensated `sum`. A run can start from another run's registers. They
-are not water held, so the mass balance skips them. A river with `max_temp_lag = 5` has 6 slots,
+including CPython 3.12's compensated `sum`. A run can start from another run's registers. Parity assumes
+WSIMOD's lists hold Python floats, as `read_csv` produces; `numpy.float64` items get CPython's
+plain sum. They are not water held, so the mass balance skips them. A river with `max_temp_lag = 5` has 6 slots,
 and both temperature windows are the whole register.
 
 **Refused by name:** a missing pollutant of the six, a missing temperature on a date,
