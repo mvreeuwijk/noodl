@@ -80,6 +80,9 @@ def check_network(network: WsimodNetwork, *, pollutants: bool) -> list[str]:
     for arc in network.arcs:
         ARC_CLASSES[arc.cls].validate(arc, network)
     ignored: list[str] = []
+    for arc in network.arcs:  # X49: a user Decay arc's values are not read quantity-only
+        if not pollutants and arc.decays is not None and arc.decays.keys:
+            ignored.append(f"{arc.name}.decays")
     for spec in network.nodes:
         if spec.cls not in classes:
             raise ValueError(f"node {spec.name!r}: class {spec.cls!r} is not ported yet")

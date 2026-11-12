@@ -556,7 +556,8 @@ configured value.
 
 `build_model(network, pollutants=False)` runs on the volumes alone (`K = 0`). The parameters such
 a run does not read — surface deposition loads, a demand's `pollutant_load`, the treatment works'
-pollutant entries, a catchment's pollutant series — are listed by name in
+pollutant entries, every `decays` value (nodes, surfaces and user decay arcs; the
+`DecayQueueTank` structure stays), the River's biochemistry parameters, a catchment's pollutant series — are listed by name in
 `model.ignored_by_quantity_only`. What WSIMOD accepts and never reads is `model.unread`
 (`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file

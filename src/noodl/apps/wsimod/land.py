@@ -917,7 +917,10 @@ def _validate_surface(
     """
     ignored: list[str] = []
     prefix = f"surfaces.{surface.name}"
-    read_decays(where, surface.parameters.get("decays"), network.pollutants)
+    decays = surface.parameters.get("decays")
+    read_decays(where, decays, network.pollutants)
+    if decays and not pollutants:  # X49: a quantity-only run reads no decay value
+        ignored.append(f"{prefix}.decays")
     variables = {variable for variable, _ in surface.data}
     other = sorted(variables - DEPOSITION_KEYS)
     if other:

@@ -352,7 +352,7 @@ class Storage(Node):
         """``decays`` (the merged dict, D6) is read again: an override entry without
         ``exponent`` crashes WSIMOD too. A node with a ``decays`` dict reads ``temperature`` on
         every date (``core.py:484-487``). A quantity-only run ignores a VQIP
-        ``initial_storage``'s pollutants."""
+        ``initial_storage``'s pollutants and every ``decays`` value (X49)."""
         super().validate(spec, network, pollutants=pollutants)
         decays = spec.parameters.get("decays")
         where = f"node {spec.name!r}"
@@ -364,11 +364,14 @@ class Storage(Node):
                         f"{where} has no 'temperature' forcing on {label} (its DecayTank reads "
                         "it at the end of every day, core.py:484-487)"
                     )
+        ignored: list[str] = []
         initial = spec.parameters.get("initial_storage", 0)
         if not pollutants and isinstance(initial, Mapping):
             if any(k != "volume" for k in initial):
-                return ["initial_storage"]
-        return []
+                ignored.append("initial_storage")
+        if not pollutants and decays:  # X49: the values are not read, the structure stays (X25)
+            ignored.append("decays")
+        return ignored
 
     @classmethod
     def check_recurses(cls, spec: NodeSpec, direction: str, tag: Tag) -> bool:

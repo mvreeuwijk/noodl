@@ -117,16 +117,28 @@ def test_the_prints_that_carry_the_node_and_the_date_match_the_records(case, eve
 
 
 # --- running ----------------------------------------------------------------------------------
-@pytest.mark.parametrize("case", ["small", "queue_arc"])
-def test_step_by_step_equals_wsimod_run(case):
+@pytest.mark.parametrize(
+    ("case", "days"),
+    [
+        ("small", 10),
+        ("queue_arc", 10),
+        ("decay_queue_groundwater", 40),
+        ("decay_arc", 30),
+        ("river_nutrients", 60),
+    ],
+)
+def test_step_by_step_equals_wsimod_run(case, days):
+    """The 3b state (``total_decayed``, the River's lag registers, the user arcs' queues) is
+    carried through ``model.step`` as through ``wsimod_run`` (``decay_arc`` has 30 dates,
+    ``decay_queue_groundwater`` 40)."""
     if case == "small":
         model, state, drivers = _small()
     else:
-        model, state, drivers = _case("queue_arc")
-    ran = wsimod_run(model, state, drivers, days=10)
+        model, state, drivers = _case(case)
+    ran = wsimod_run(model, state, drivers, days=days)
     final = dict(model.wsimod_day.last_state)
     stepped, flows = state, []
-    for k in range(10):
+    for k in range(days):
         stepped = model.step(stepped, drivers, dt=DAY, t=k * DAY)
         flows.append(model.wsimod_day.last_record.arc_flow)
     assert torch.equal(torch.stack(flows), ran.arc_flow)
@@ -177,6 +189,212 @@ def test_a_batch_equals_its_single_runs():
         for name, value in single.surface.items():
             assert torch.equal(torch.nan_to_num(value), torch.nan_to_num(batch.surface[name][i]))
         assert torch.equal(single.mass_balance.residual, batch.mass_balance.residual[i])
+
+
+# --- 3b: batches of decay, treatment and biochemistry parameters ---------------------------------
+# Per case: ``driver -> factors of the four instances`` (the configured values times a factor;
+# a ``decays`` entry is scaled only where the key is listed, the rest stays inert, X9). Each
+# plan makes at least two instances take different decisions on one day (asserted).
+BATCH_3B = {
+    "decay_storage": (
+        40,
+        {
+            "wsimod.Reservoir.decays.constant": [1.0, 0.3, 1.6, 0.05],
+            "wsimod.Reservoir.decays.exponent": [1.0, 0.97, 1.04, 1.0],
+        },
+        "node:res/tank/make_decay/cap:phosphate",
+    ),
+    "wtw_treatment": (
+        40,
+        {
+            "wsimod.WWTW.process_parameters.constant": [1.0, 0.5, 1.4, 0.1],
+            "wsimod.WWTW.process_parameters.exponent": [1.0, 0.95, 1.05, 1.0],
+            "wsimod.WWTW.liquor_multiplier": [1.0, 0.5, 1.5, 0.2],
+            "wsimod.Reservoir.decays.constant": [1.0, 0.2, 20.0, 50.0],
+        },
+        # the treatment processes clamp without a branch of their own (wtw.py:163-214): the
+        # instances differ in where the works spares water and clips its storm tank
+        "node:works/calculate_discharge/spare",
+    ),
+    "surface_decay_nitrification": (
+        40,
+        {
+            "wsimod.PerviousSurface.decays.constant": [1.0, 0.2, 10.0, 60.0],
+            "wsimod.PerviousSurface.soil_temp_w_air": [1.0, 0.5, 2.0, 0.1],
+        },
+        "node:plot/surfaces.turf/make_decay/cap:nitrite",
+    ),
+    "decay_queue_groundwater": (
+        40,
+        {"wsimod.QueueGroundwater.decays.constant": [1.0, 0.2, 5.0, 0.01]},
+        "node:gw/tank/internal_arc/make_decay/cap:ammonia",
+    ),
+    "decay_arc": (
+        30,
+        {"wsimod.DecayArc.decays.constant": [1.0, 0.2, 15.0, 40.0]},
+        "arc:q/make_decay/cap:phosphate",
+    ),
+    "river_nutrients": (
+        100,
+        {
+            "wsimod.River.denpar_w": [1.0, 0.2, 3.0, 0.0],
+            "wsimod.River.prodNpar": [1.0, 0.5, 2.0, 0.1],
+            "wsimod.River.decays.constant": [1.0, 0.2, 3.0, 0.5],
+        },
+        "node:r_up/biochemical_processes/macrophyte_cap:N",
+    ),
+}
+
+
+def _scaled(drivers: dict, plan: dict) -> dict:
+    out = dict(drivers)
+    for key, factors in plan.items():
+        base = drivers[key]
+        factor = _tensors(*factors).reshape(-1, *([1] * base.dim()))
+        scaled = base * factor
+        if ".decays." in key:  # only the listed keys, whose constant is not 0 (X9)
+            listed = drivers[key.replace("exponent", "constant")] != 0
+            scaled = torch.where(listed, scaled, base.expand_as(scaled))
+        out[key] = scaled
+    return out
+
+
+def _comparable(results: WsimodResults, final: dict) -> dict:
+    fields = {
+        "arc_flow": results.arc_flow,
+        "arc_quality": results.arc_quality,
+        "tank_storage": results.tank_storage,
+        "tank_quality": results.tank_quality,
+        "residual": results.mass_balance.residual,
+    }
+    fields.update({f"surface.{k}": torch.nan_to_num(v) for k, v in results.surface.items()})
+    fields.update({f"state.{k}": v for k, v in final.items()})
+    return fields
+
+
+@pytest.mark.parametrize("case", list(BATCH_3B))
+def test_a_batch_of_four_3b_parameter_sets_equals_its_single_runs(case):
+    days, plan, site = BATCH_3B[case]
+    model, state, drivers = _case(case)
+    batched = _scaled(drivers, plan)
+    diagnostics = {"decisions": True}
+    ran = wsimod_run(model, state, batched, days=days, diagnostics=diagnostics)
+    together = _comparable(ran, dict(model.wsimod_day.last_state))
+    assert ran.arc_flow.shape[0] == 4
+    # at least two instances take different decisions at the site on one day, among the
+    # instances that reach it
+    differing = [
+        d
+        for d, records in enumerate(diagnostics["decisions"])
+        for r in records
+        if r.site == site and len(set(r.outcome[r.active].tolist())) > 1
+    ]
+    assert differing, site
+    for i in range(4):
+        single_drivers = {k: (v[i] if k in plan else v) for k, v in batched.items()}
+        single = wsimod_run(model, state, single_drivers, days=days)
+        alone = _comparable(single, dict(model.wsimod_day.last_state))
+        assert alone.keys() == together.keys()
+        for name, value in alone.items():
+            assert torch.equal(value, together[name][i]), (name, i)
+
+
+ROUND_TRIP = {
+    "river_nutrients": {
+        "wsimod.river_temperature_lag": {("r_up", 3): 9.5, ("r_low", 1): 4.0},
+        "wsimod.river_phosphorus_lag": {("r_up", 10): 2e-5, ("r_low", 200): 4e-4},
+    },
+    "decay_queue_groundwater": {
+        "wsimod.total_decayed": {("gw", "tank.internal_arc"): {"volume": 0.0, "phosphate": 0.25}},
+    },
+}
+
+
+@pytest.mark.parametrize("case", list(ROUND_TRIP))
+def test_the_new_state_round_trips(case):
+    """The 3b state keys are set by label, change the run, and a run warm-started from another
+    run's last state equals the continuation of that run (``torch.equal``)."""
+    model, default, drivers = _case(case)
+    state = initial_state(model, values=ROUND_TRIP[case])
+    day = model.wsimod_day
+    for key, rows in ROUND_TRIP[case].items():
+        labels = day.state_labels(key)
+        for label in rows:
+            assert not torch.equal(
+                state[key][labels.index(label)], default[key][labels.index(label)]
+            )
+    total, first = 10, 4
+
+    def stepped(start, k0, k1):
+        out, flows = start, []
+        for k in range(k0, k1):
+            out = model.step(out, drivers, dt=DAY, t=k * DAY)
+            flows.append(model.wsimod_day.last_record.arc_flow)
+        return out, flows
+
+    whole, whole_flows = stepped(state, 0, total)
+    middle, early = stepped(state, 0, first)
+    resumed, late = stepped(middle, first, total)
+    for key in whole:
+        assert torch.equal(whole[key], resumed[key]), key
+    assert all(torch.equal(a, b) for a, b in zip(whole_flows, early + late, strict=True))
+    # the registers persist, so their set values reach the run; a day's ``total_decayed`` is
+    # reset at its start (W75), so its set value only round trips
+    if case == "river_nutrients":
+        other, _ = stepped(default, 0, total)
+        assert any(not torch.equal(whole[k], other[k]) for k in ROUND_TRIP[case])
+
+
+def _without_3b_values(mapping: dict) -> dict:
+    """The same configuration with every value a quantity-only run lists as ignored changed:
+    ``decays`` constants and exponents, the WTW pollutant entries, the River biochemistry."""
+    mapping = copy.deepcopy(mapping)
+    for node in mapping["nodes"]:
+        for entry in (node.get("decays") or {}).values():
+            entry["constant"] *= 2.5
+            entry["exponent"] *= 1.1
+        for entry in (node.get("process_parameters") or {}).values():
+            if "constant" in entry:
+                entry["constant"] *= 0.5
+                entry["exponent"] = 1.2
+        liquor = node.get("liquor_multiplier") or {}
+        for name in liquor:
+            if name != "volume":
+                liquor[name] *= 0.5
+        if node["type_"] == "River":  # the biochemistry parameters are overrides' (storage.py:538)
+            entry = mapping.setdefault("overrides", {}).setdefault("nodes", {})
+            entry = entry.setdefault(node["name"], {"type_": "River", "name": node["name"]})
+            entry.update(
+                {"denpar_w": 7e-4, "prodNpar": 0.2, "muptNpar": 0.05, "hsatTP": 3e-4}
+                | {"limpppar": 5e-4, "T_wdays": 7}
+            )
+    for surface in mapping.get("surfaces") or []:
+        for entry in (surface.get("decays") or {}).values():
+            entry["constant"] *= 2.5
+    for arc in mapping["arcs"]:
+        for entry in (arc.get("decays") or {}).values():
+            entry["constant"] *= 2.5
+    return mapping
+
+
+@pytest.mark.parametrize(
+    ("case", "days"),
+    [("decay_queue_groundwater", 40), ("wtw_treatment", 40), ("river_nutrients", 60)],
+)
+def test_quantity_only_volumes_never_depend_on_3b_values(case, days):
+    mapping = CASES[case].build()
+    changed = _without_3b_values(mapping)
+    assert changed != mapping
+    runs = []
+    for configuration in (mapping, changed):
+        model, state, drivers = build_model(read_wsimod_config(configuration), pollutants=False)
+        runs.append((model, wsimod_run(model, state, drivers, days=days)))
+    (base_model, base), (other_model, other) = runs
+    assert base_model.ignored_by_quantity_only
+    assert set(base_model.ignored_by_quantity_only) <= set(other_model.ignored_by_quantity_only)
+    assert float(base.arc_flow.abs().max()) > 0.0
+    assert torch.equal(base.arc_flow, other.arc_flow)
+    assert torch.equal(base.tank_storage, other.tank_storage)
 
 
 def test_the_results_follow_wsimods_record_layout():

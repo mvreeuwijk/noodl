@@ -364,6 +364,72 @@ def test_quantity_only_lists_the_ignored_parameters():
     assert "pollutants=False" in str(refused.value)
 
 
+LISTED_3B = {
+    # one case per element kind: Storage, Reservoir, RiverReservoir, River (decays)
+    "decay_storage": ["pond.decays", "res.decays", "rr.decays", "riv.decays"],
+    # Pervious and Impervious surfaces
+    "surface_decay_nitrification": ["plot.surfaces.roads.decays", "plot.surfaces.turf.decays"],
+    "decay_queue_groundwater": ["gw.decays"],  # a QueueGroundwater's DecayQueueTank
+    "decay_arc": ["q.decays", "q_pull.decays"],  # user DecayArcs
+    "wtw_treatment": [  # WWTW and FWTW pollutant entries
+        "works.process_parameters",
+        "works.liquor_multiplier",
+        "plant.process_parameters",
+        "plant.liquor_multiplier",
+    ],
+    "river_nutrients": ["r_low.denpar_w", "r_low.prodNpar", "r_low.max_temp_lag"],
+}
+
+
+@pytest.mark.parametrize("case", list(LISTED_3B))
+def test_quantity_only_lists_the_3b_parameters(case):
+    """X49: a quantity-only run lists the decay values, the WTW pollutant entries and the River
+    biochemistry parameters as ignored; a pollutant run lists none."""
+    mapping = CASES[case].build()
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    ignored = model.ignored_by_quantity_only
+    for name in LISTED_3B[case]:
+        assert name in ignored, name
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=True)
+    assert not any(name in model.ignored_by_quantity_only for name in LISTED_3B[case])
+
+
+def test_quantity_only_lists_no_decays_of_an_element_without_any():
+    mapping = CASES["decay_storage"].build()
+    for node in mapping["nodes"]:
+        node.pop("decays", None)
+    mapping.pop("overrides", None)
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    assert not any(name.endswith(".decays") for name in model.ignored_by_quantity_only)
+
+
+def test_a_decaying_queue_groundwater_keeps_its_structure_quantity_only():
+    """X25: the ``DecayQueueTank``'s delay and end of day stay without a decay value, so the
+    volumes differ from the same case without ``decays`` (X12, X13) and equal the pollutant
+    run's."""
+    mapping = CASES["decay_queue_groundwater"].build()
+    plain = copy.deepcopy(mapping)
+    for node in plain["nodes"]:
+        node.pop("decays", None)
+    plain.pop("overrides")
+    volumes = {}
+    for label, configuration, pollutants in (
+        ("quantity", mapping, False),
+        ("pollutants", mapping, True),
+        ("plain", plain, False),
+    ):
+        model, state, drivers = build_model(
+            read_wsimod_config(configuration), pollutants=pollutants
+        )
+        flows = []
+        for k in range(20):
+            state = model.step(state, drivers, dt=DAY, t=k * DAY)
+            flows.append(model.wsimod_day.last_record.arc_flow)
+        volumes[label] = torch.stack(flows)
+    assert not torch.equal(volumes["quantity"], volumes["plain"])
+    assert torch.equal(volumes["quantity"], volumes["pollutants"])
+
+
 def _residential(type_: str, override: str | None = None) -> dict:
     data = {("temperature", d): 12.0 for d in _dates(3)}
     demand = _node("homes", type_, data_input_dict=data, population=10)

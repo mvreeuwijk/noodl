@@ -29,7 +29,12 @@ from noodl.topology import Network
 __all__ = ["build_model", "initial_drivers", "initial_state"]
 
 F64 = torch.float64
-_FLAT = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
+_FLAT = (
+    "wsimod.travel_queue_present",
+    "wsimod.arc_queue_since",
+    "wsimod.river_temperature_lag",
+    "wsimod.river_phosphorus_lag",
+)
 
 
 def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Model, State, Drivers]:
