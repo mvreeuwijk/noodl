@@ -815,6 +815,26 @@ def test_a_partial_wtw_override_merges():
         reset_wsimod_globals()
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"process_parameters": {"phosphate": {"exponent": "1.05"}}},
+        {"process_parameters": {"phosphate": {"constant": None}}},
+        {"liquor_multiplier": {"phosphate": "0.5"}},
+    ],
+)
+def test_a_non_numeric_wtw_override_is_refused_by_name(override):
+    """An override merges after the node is read (X36), so its merged entries are checked as a
+    configured one is: by name, not a ``TypeError`` at build."""
+    config = {
+        **_LISTS,
+        "nodes": [{"name": "w", "type_": "WWTW"}],
+        "overrides": {"nodes": {"w": {"type_": "WWTW", "name": "w", **override}}},
+    }
+    with pytest.raises(ValueError, match="is not a number"):
+        read_wsimod_config(config)
+
+
 def test_a_3a_shaped_liquor_multiplier_driver_is_refused():
     """D19: 3a's ``(n,)`` ``liquor_multiplier`` has no column axis; the step names the key and
     the shape ``(..., n, 1 + K_additive)``."""

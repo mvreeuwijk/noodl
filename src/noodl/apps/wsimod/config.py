@@ -405,6 +405,8 @@ def _override_node(
     node: NodeSpec, entry: dict, where: str, unread: list[str], pollutants: Pollutants
 ) -> None:
     _apply_overrides(node.parameters, NODE_SCHEMAS[node.cls], entry, where)
+    if "process_parameters" in node.parameters:  # the merged entries, checked as at reading
+        _refuse_partial_wtw(where, node.parameters, pollutants)
     # storage.py:540, :620-644: a River's bulk_density is set and never read (D10)
     if node.cls == "River" and "bulk_density" in entry:
         if f"{node.name}.bulk_density" not in unread:
