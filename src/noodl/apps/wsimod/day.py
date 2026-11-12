@@ -713,6 +713,8 @@ class WsimodDay:
             trailing = d.template.shape
             rank = len(trailing)
             if value.ndim < rank or tuple(value.shape[-rank:]) != tuple(trailing):
+                # D19 is a trailing-shape check: a 3a (B, n) batch with B == n == 1 + K_add
+                # cannot be told apart from the new layout
                 hint = ""
                 if key.endswith(".liquor_multiplier"):  # D19, X10
                     hint = (

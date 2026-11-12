@@ -213,6 +213,8 @@ def test_a_zero_denominator_keeps_the_liquor_value_of_the_day_before():
 def test_without_non_additive_pollutants_there_is_no_liquor_blend_to_divide():
     """``wtw.py:174`` loops over the non-additive pollutants only: a quantity-only run (or one
     with additive pollutants only) never divides, so no decision or event is recorded."""
+    # temperature is declared additive only to satisfy the WTW temperature requirement; the
+    # non-additive set stays empty, which is the point of this test
     only_additive = Pollutants(("phosphate", "temperature"), ("phosphate", "temperature"), ())
     for pollutants in (P, only_additive):
         works = make("WWTW", pollutants=pollutants)
