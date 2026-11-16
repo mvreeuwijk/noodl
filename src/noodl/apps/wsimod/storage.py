@@ -47,6 +47,7 @@ from noodl.apps.wsimod.vqip import (
     empty,
     extract_vqip,
     pow_python,
+    python_per_instance,
     safe_den,
     sum_vqip,
     v_change_vqip,
@@ -83,6 +84,11 @@ def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
 
 
+def _half_power(v: float) -> float:
+    """Python's ``v ** 0.5`` (``float.__pow__``)."""
+    return v**0.5
+
+
 class _PowHalf(torch.autograd.Function):
     """``x ** 0.5`` as Python evaluates it (the C library's ``pow``), elementwise.
 
@@ -96,8 +102,7 @@ class _PowHalf(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor) -> Tensor:
         ctx.save_for_backward(x)
-        flat = x.detach().reshape(-1).tolist()
-        return torch.tensor([v**0.5 for v in flat], dtype=torch.float64).reshape(x.shape)
+        return python_per_instance(_half_power, x.detach().reshape(-1).tolist(), shape=x.shape)
 
     @staticmethod
     @once_differentiable
@@ -124,8 +129,7 @@ class _ExpPython(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor) -> Tensor:
-        flat = x.detach().reshape(-1).tolist()
-        out = torch.tensor([math.exp(v) for v in flat], dtype=torch.float64).reshape(x.shape)
+        out = python_per_instance(math.exp, x.detach().reshape(-1).tolist(), shape=x.shape)
         ctx.save_for_backward(out)
         return out
 

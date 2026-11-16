@@ -161,6 +161,32 @@ def ds_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     return torch.where(p.volume_or_additive_mask, t1 - t2, torch.zeros_like(t1))
 
 
+class PythonMathError(ArithmeticError):
+    """Python's math, evaluated per instance (:func:`python_per_instance`), failed on some
+    instance: ``math.log`` of a non-positive number (``ValueError``), ``0 ** negative``
+    (``ZeroDivisionError``), an overflow, or a complex power that becomes a ``TypeError`` in
+    ``torch.tensor``. The original error is its ``__cause__``. Every caller replaces an inactive
+    instance's argument by a safe one, so the failing instance is an active one, on which WSIMOD
+    evaluates the same expression and raises too (N2)."""
+
+
+def python_per_instance(function, *columns: list, shape: torch.Size) -> Tensor:
+    """``function`` of each instance's Python floats (``columns``, flat lists of one length),
+    as a float64 tensor of ``shape``: the per-instance Python math of Approach rule 1. A
+    failure of the math, or of turning its results into a tensor, is a :class:`PythonMathError`
+    from the original error, so a caller can tell it from an error of noodl's own code."""
+    try:
+        values = [function(*args) for args in zip(*columns, strict=True)]
+        return torch.tensor(values, dtype=torch.float64).reshape(shape)
+    except (ArithmeticError, ValueError, TypeError) as error:
+        raise PythonMathError(f"{type(error).__name__}: {error}") from error
+
+
+def _pow(a: float, b: float) -> float:
+    """Python's ``a ** b`` (``float.__pow__``, the C library's ``pow``)."""
+    return a**b
+
+
 class _PowPython(torch.autograd.Function):
     """``x ** y`` as Python evaluates it for floats (the C library's ``pow``), elementwise.
 
@@ -181,8 +207,12 @@ class _PowPython(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor, y: Tensor) -> Tensor:
         xb, yb = torch.broadcast_tensors(x.detach(), y.detach())
-        pairs = zip(xb.reshape(-1).tolist(), yb.reshape(-1).tolist(), strict=True)
-        out = torch.tensor([a**b for a, b in pairs], dtype=torch.float64).reshape(xb.shape)
+        out = python_per_instance(
+            _pow,
+            xb.reshape(-1).tolist(),
+            yb.reshape(-1).tolist(),
+            shape=xb.shape,
+        )
         ctx.save_for_backward(x, y, out)
         return out
 
@@ -213,8 +243,7 @@ def _unary_python(name: str, function, slope):
         @staticmethod
         def forward(ctx, x: Tensor) -> Tensor:
             ctx.save_for_backward(x)
-            values = [function(v) for v in x.detach().reshape(-1).tolist()]
-            return torch.tensor(values, dtype=torch.float64).reshape(x.shape)
+            return python_per_instance(function, x.detach().reshape(-1).tolist(), shape=x.shape)
 
         @staticmethod
         @once_differentiable

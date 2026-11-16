@@ -100,6 +100,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -115,7 +116,13 @@ from noodl.apps.wsimod.constants import (
     SURFACE_INPUTS,
 )
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
-from noodl.apps.wsimod.land import SURFACE_CLASSES, PerviousSurface, month_start, runs_nutrients
+from noodl.apps.wsimod.land import (
+    SURFACE_CLASSES,
+    PerviousSurface,
+    is_number,
+    month_start,
+    runs_nutrients,
+)
 from noodl.apps.wsimod.nutrient_pool import (
     ADS,
     DI,
@@ -275,7 +282,7 @@ def quick_interp(x: int, xp: Sequence[float], yp: Tensor, i: int) -> Tensor:
 
 def _integral(values: Mapping, name: str, where: str) -> int:
     value = values[name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_number(value):
         raise ValueError(f"{where}: {name} {value!r} is not a number")
     if not float(value).is_integer():
         raise ValueError(
@@ -290,13 +297,17 @@ def _check_structure(values: Mapping, where: str) -> None:
     harvest days, a non-negative integer ``adsorption_nr_maxiter`` (a loop length, ``:2205``) and
     ``wilting_point < field_capacity`` (``TAW > 0``: ``TAW = 0`` divides by zero on day 0, and
     ``TAW < 0`` only prints in WSIMOD, ``:1360-1366``; L4, Y44). Both stage values must be
-    lists of numbers (M3: WSIMOD takes their ``len`` and indexes them, ``:1547``)."""
+    lists of numbers (M3: WSIMOD takes their ``len`` and indexes them, ``:1547``): a sequence
+    or a one-dimensional ``np.ndarray`` of real numbers, numpy's scalars included (N1)."""
     stages, dates = values["crop_factor_stages"], values["crop_factor_stage_dates"]
     for name, value in (("crop_factor_stages", stages), ("crop_factor_stage_dates", dates)):
-        if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        array = isinstance(value, np.ndarray) and value.ndim == 1
+        if not array and (
+            isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence)
+        ):
             raise ValueError(f"{where}: {name} {value!r} is not a list of numbers")
         for entry in value:
-            if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            if not is_number(entry) or isinstance(entry, (np.ndarray, Tensor)):
                 raise ValueError(f"{where}: {name} {list(value)!r} holds {entry!r}, not a number")
     if len(stages) != len(dates):
         raise ValueError(
@@ -308,7 +319,7 @@ def _check_structure(values: Mapping, where: str) -> None:
     _integral(values, "sowing_day", where)
     _integral(values, "harvest_day", where)
     maxiter = values["adsorption_nr_maxiter"]
-    if isinstance(maxiter, bool) or not isinstance(maxiter, (int, float)):
+    if not is_number(maxiter):
         raise ValueError(f"{where}: adsorption_nr_maxiter {maxiter!r} is not a number")
     if not float(maxiter).is_integer() or maxiter < 0:
         raise ValueError(
@@ -393,7 +404,7 @@ def _soil_storage(value: object, where: str) -> Mapping | None:
                 f"{', '.join(_SOIL_STORAGE_KEYS)}: KeyError)"
             )
         entry = value[key]
-        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+        if not is_number(entry):
             raise ValueError(f"{where}: initial_soil_storage[{key!r}] {entry!r} is not a number")
     return value
 

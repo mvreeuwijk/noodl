@@ -33,11 +33,13 @@ through_soil}``, and the tank sites of :class:`~noodl.apps.wsimod.tanks.Tank`. `
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from operator import attrgetter
 from typing import TYPE_CHECKING, ClassVar
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -54,6 +56,7 @@ from noodl.apps.wsimod.storage import exp_python
 from noodl.apps.wsimod.tanks import DecayTank, ResidenceTank, Tank
 from noodl.apps.wsimod.vqip import (
     Pollutants,
+    PythonMathError,
     empty,
     pow_python,
     safe_den,
@@ -141,6 +144,19 @@ def month_start(date: datetime) -> datetime:
 
 
 # --- derived quantities (D5) -------------------------------------------------------------------
+def is_number(value: object) -> bool:
+    """A real number as a configuration gives one (M3, N1): a ``numbers.Real`` (Python's or
+    numpy's scalars), a numeric ``np.ndarray`` or a ``torch.Tensor``; not a boolean, ``None``, a
+    string or a list."""
+    if isinstance(value, (bool, np.bool_)):
+        return False
+    if isinstance(value, np.ndarray):
+        return bool(np.issubdtype(value.dtype, np.number))
+    if isinstance(value, Tensor):
+        return not value.dtype.is_complex and value.dtype != torch.bool
+    return isinstance(value, numbers.Real)
+
+
 def _derive(cls: str, values: Mapping):
     """What a surface's constructor computes from its parameters, in WSIMOD's order; the values
     are floats or tensors.
@@ -158,7 +174,8 @@ def _derive(cls: str, values: Mapping):
         return {"capacity": values["area"] * depth, "depth": depth}
     if "total_porosity" in values:
         # a growing surface passes its rooting_depth as the physical depth (``:1192``, ``:1251``)
-        physical = values["rooting_depth"] if "rooting_depth" in values else values["depth"]
+        growing = SURFACE_CLASSES[cls].is_growing
+        physical = values["rooting_depth"] if growing else values["depth"]
         depth = physical * values["total_porosity"]
         return {
             "capacity": values["area"] * depth,
@@ -427,7 +444,7 @@ class Surface(DecayTank):
         for f in self.inflows + self.processes + self.outflows:
             try:
                 in_, out_ = f(active=active)
-            except (ArithmeticError, TypeError, ValueError) as error:
+            except PythonMathError as error:  # only Python's per-instance math (N2)
                 raise self._failure(f.__name__, error) from error
             if f.__name__ not in NO_PART:
                 part = PART_NAMES[f.__name__]  # KeyError names a function without a part
@@ -440,19 +457,22 @@ class Surface(DecayTank):
                 active, sum_vqip(p, parent.running_outflow_mb, out_), parent.running_outflow_mb
             )
 
-    def _failure(self, function: str, error: Exception) -> ValueError:
+    def _failure(self, function: str, error: PythonMathError) -> ValueError:
         """The error of :meth:`run` when ``function`` raises in Python's math on an active
         instance (I1): a parameter or a state outside the domain WSIMOD computes in, such as a
         negative eroding flow raised to ``1.3`` or an adsorption first guess that underflows to 0
         and is raised to ``nfr - 1``. WSIMOD raises at the same step on the same input, and
         Python's math has no per-instance error, so one instance stops the whole batch; the
-        message names the surface, the function, the day and the cause."""
+        message names the surface, the function, the day and the cause (the
+        :class:`~noodl.apps.wsimod.vqip.PythonMathError`'s own cause). Any other error of a
+        surface function, noodl's own, propagates untouched."""
         day = self.ctx.day
         on = f"day {day}"
         if 0 <= day < len(self.date_labels):
             on += f" ({self.date_labels[day]})"
+        cause = error.__cause__ if error.__cause__ is not None else error
         return ValueError(
-            f"{self.site}: {function} raised {type(error).__name__} ({error}) on {on}, for at "
+            f"{self.site}: {function} raised {type(cause).__name__} ({cause}) on {on}, for at "
             "least one instance of the batch: a parameter or state outside the domain of "
             "Python's math, where WSIMOD raises at the same step"
         )
@@ -1236,12 +1256,12 @@ def _validate_surface(
     # derivations below (and in WSIMOD's constructor arithmetic)
     for name in cls.parameter_defaults:
         value = surface.parameters.get(name, 0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_number(value):
             raise ValueError(f"{where}: {name} {value!r} is not a number")
     if not issubclass(cls, PerviousSurface):
         return ignored
     values = {**cls.parameter_defaults, **surface.parameters}
-    if "rooting_depth" in values:  # a growing surface's physical depth (D18)
+    if cls.is_growing:  # a growing surface's physical depth (D18)
         values["depth"] = values["rooting_depth"]
     porosity = values["total_porosity"]
     for name in ("field_capacity", "wilting_point"):
@@ -1251,7 +1271,7 @@ def _validate_surface(
                 "(land.py:942, :950 divide by depth * (total_porosity - it))"
             )
     derived = surface_derived(surface)
-    depth = "rooting_depth" if "rooting_depth" in values else "depth"
+    depth = "rooting_depth" if cls.is_growing else "depth"
     for name in ("field_capacity_m", "wilting_point_m"):
         if not derived["depth"] - derived[name] > 0:
             raise ValueError(

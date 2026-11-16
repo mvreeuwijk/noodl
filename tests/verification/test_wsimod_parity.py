@@ -36,6 +36,7 @@ import traceback
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("wsimod")
@@ -53,6 +54,7 @@ from noodl.apps.wsimod.day import WsimodDay  # noqa: E402
 from noodl.apps.wsimod.engine import Decision  # noqa: E402
 from noodl.apps.wsimod.nutrient_pool import DI, DO  # noqa: E402
 from noodl.apps.wsimod.structure import river_order  # noqa: E402
+from noodl.apps.wsimod.vqip import PythonMathError  # noqa: E402
 from tests.apps.wsimod._replay import replay  # noqa: E402
 from tests.verification._wsimod_cases import (  # noqa: E402
     CASES,
@@ -1156,7 +1158,9 @@ def test_a_small_nfr_stops_both_engines_on_the_same_step():
     with pytest.raises(ValueError, match=named) as raised:
         model, state, drivers = build_model(read_wsimod_config(mapping), pollutants=True)
         wsimod_run(model, state, drivers, days=1)
-    assert isinstance(raised.value.__cause__, ZeroDivisionError)
+    # N2: the Python-math helper's PythonMathError, from the original error
+    assert isinstance(raised.value.__cause__, PythonMathError)
+    assert isinstance(raised.value.__cause__.__cause__, ZeroDivisionError)
     model, state, drivers = build_model(
         read_wsimod_config(CASES["growing_spring"].build()), pollutants=True
     )
@@ -1188,6 +1192,57 @@ def test_a_negative_current_surface_area_with_nitrate_is_refused_by_name():
     batched = {**drivers, key: torch.stack([drivers[key], -drivers[key]])}
     with pytest.raises(ValueError, match=r"surfaces\.half: current_surface_area .* is < 0"):
         wsimod_run(model, state, batched, days=1)
+
+
+def _with_numpy_values(mapping: dict) -> dict:
+    """``mapping`` with ``growing_spring``'s surface parameters as numpy values (N1): the area as
+    ``np.int64``, the rooting depth as ``np.float64``, the sowing and harvest days as
+    ``np.int64``, and both crop stage lists as ``np.ndarray``s; equal values, so the run is the
+    same."""
+    (surface,) = mapping["nodes"][0]["surfaces"]
+    surface["area"] = np.int64(surface["area"])  # 1e4; np.int64 is not a Python int
+    # float64: a float32 scalar makes WSIMOD's own arithmetic float32 (numpy's NEP 50), where
+    # noodl computes in float64; that is no parity a float64 port can give
+    surface["rooting_depth"] = np.float64(surface["rooting_depth"])
+    surface["infiltration_capacity"] = np.float64(surface["infiltration_capacity"])
+    surface["sowing_day"] = np.int64(surface["sowing_day"])
+    surface["harvest_day"] = np.int64(surface["harvest_day"])
+    surface["crop_factor_stages"] = np.array(surface["crop_factor_stages"], dtype=np.float64)
+    surface["crop_factor_stage_dates"] = np.array(surface["crop_factor_stage_dates"])
+    return mapping
+
+
+def test_numpy_parameters_build_and_run_as_wsimod():
+    """N1: a configuration built in Python with numpy values (as from a numpy or pandas column)
+    builds as it did before the M3 number check, and runs bitwise as WSIMOD runs it, over 30
+    days of ``growing_spring`` in both modes; ``None``, a string and a list of strings are still
+    refused (``test_malformed_growing_values_are_refused_by_name``)."""
+    days = 30
+    reference, print_days = wsimod_reference_by_day(
+        _with_numpy_values(CASES["growing_spring"].build()), days=days
+    )
+    for mode in MODES:
+        model, state, drivers = build_model(
+            read_wsimod_config(_with_numpy_values(CASES["growing_spring"].build())),
+            pollutants=MODES[mode],
+        )
+        diagnostics: dict = {"decisions": False}
+        results = wsimod_run(model, state, drivers, days=days, diagnostics=diagnostics)
+        diagnostics["node_names"] = model.wsimod_day.node_names
+        found = assert_matches_wsimod(
+            results,
+            reference,
+            diagnostics=diagnostics,
+            case=f"growing_spring-numpy-{mode}",
+            quality=MODES[mode],
+            print_days=print_days,
+            store_bounded_prints=store_bounded("growing_spring"),
+        )
+        assert found["worst"] == 0.0 and found["admissions"] == []
+    # a float32 scalar builds too (WSIMOD then computes in float32, so no parity is asserted)
+    mapping = CASES["growing_spring"].build()
+    mapping["nodes"][0]["surfaces"][0]["rooting_depth"] = np.float32(0.5)
+    build_model(read_wsimod_config(mapping), pollutants=True)
 
 
 def test_case_runs_where_wsimod_crashes_wtw_zero_input():

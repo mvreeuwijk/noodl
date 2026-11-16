@@ -1329,6 +1329,36 @@ def test_malformed_growing_values_are_refused_by_name(name, value, message):
             _validate(mapping, pollutants=pollutants)
 
 
+def test_only_pythons_math_is_named_as_a_wsimod_domain_error():
+    """N2: ``Surface.run`` relabels a :class:`PythonMathError` from the per-instance math helpers
+    (the surface, the function, the day, the cause and WSIMOD's same step), and nothing else: a
+    ``TypeError`` or ``ValueError`` of noodl's own code propagates untouched."""
+    from noodl.apps.wsimod.vqip import PythonMathError, pow_python
+
+    def domain(*, active):
+        return pow_python(torch.tensor(0.0, dtype=F64), torch.tensor(-0.5, dtype=F64)), None
+
+    def defect(*, active):
+        raise TypeError("a defect of noodl's own code")
+
+    for function, expected, message in (
+        (domain, ValueError, r"surfaces\.g: domain raised ZeroDivisionError .* on day 0"),
+        (defect, TypeError, "^a defect of noodl's own code$"),
+    ):
+        land = _nutrient_land(initial_storage=_START)
+        surface = land.surfaces[0]
+        _nut_ctx(land)
+        surface.inflows, surface.processes, surface.outflows = [function], [], []
+        with pytest.raises(expected, match=message) as raised:
+            surface.run(active=TRUE)
+        if expected is ValueError:
+            assert "WSIMOD raises at the same step" in str(raised.value)
+            assert isinstance(raised.value.__cause__, PythonMathError)
+    with pytest.raises(PythonMathError) as raised:  # the complex power, a TypeError in torch
+        pow_python(torch.tensor(-1.0, dtype=F64), torch.tensor(1.3, dtype=F64))
+    assert isinstance(raised.value.__cause__, TypeError)
+
+
 _DOMAINS = [
     ("rooting_depth", 0.0),
     ("bulk_density", 0.0),

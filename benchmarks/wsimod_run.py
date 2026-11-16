@@ -48,7 +48,7 @@ from tests.verification._wsimod_cases import CASES
 
 F64 = torch.float64
 DAYS = 60
-GROWING_DAYS = 120  # growing_spring is sown on run day 90
+GROWING_DAYS = 120  # growing_spring is sown on run day 182: these days end before the sowing (Y92)
 BATCHES = (1, 10, 100)
 DEMOS = ("quickstart", "oxford")
 DATA = Path(__file__).resolve().parent.parent / "tests" / "data" / "wsimod"
