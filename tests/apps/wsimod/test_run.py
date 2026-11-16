@@ -125,6 +125,7 @@ def test_the_prints_that_carry_the_node_and_the_date_match_the_records(case, eve
         ("decay_queue_groundwater", 40),
         ("decay_arc", 30),
         ("river_nutrients", 60),
+        ("growing_spring", 60),  # 3c: the pools, days_after_sow and the covers
     ],
 )
 def test_step_by_step_equals_wsimod_run(case, days):
@@ -409,6 +410,240 @@ def test_quantity_only_volumes_never_depend_on_3b_values(case, days):
     assert float(base.arc_flow.abs().max()) > 0.0
     assert torch.equal(base.arc_flow, other.arc_flow)
     assert torch.equal(base.tank_storage, other.tank_storage)
+
+
+# --- 3c: batches, stepping, state and quantity-only structure (Task 10) -----------------------
+G = "wsimod.GrowingSurface."
+SPRING = "node:land/surfaces.wheat/"
+# 250 days for growing_spring, not the brief's 100: the crop is sown on run day 182 (2004-03-31),
+# so the uptake caps (Review Focus 1) are not reached before day 211 (measured, 250 is the
+# case's own bookkeeping horizon)
+BATCH_3C = {
+    "growing_spring": (
+        250,
+        {
+            G + "kfr": [1.0, 0.2, 5.0, 0.05],
+            G + "uptake1": [1.0, 0.5, 2.0, 0.1],
+            G + "ET_depletion_factor": [1.0, 0.6, 1.4, 0.8],
+            G + "crop_factor_stages": [1.0, 1.3, 0.7, 1.0],
+            G + "nutrient_pool.degrhpar": [1.0, 0.5, 2.0, 0.1],
+            "wsimod.nhx-fertiliser": [1.0, 0.0, 3.0, 0.5],
+        },
+    ),
+    "surface_deposition": (
+        100,
+        {
+            "wsimod.ImperviousSurface.pollutant_load": [1.0, 0.0, 3.0, 0.5],
+            "wsimod.PerviousSurface.pollutant_load": [1.0, 2.0, 0.0, 4.0],
+            "wsimod.srp-dry": [1.0, 0.0, 2.0, 5.0],
+            "wsimod.ImperviousSurface.area": [1.0, 0.5, 2.0, 1.5],
+        },
+    ),
+}
+
+
+def _newton_passes(records: list, instance: int) -> int:
+    """The passes of one instance's adsorption Newton loop on one day, read from the per-iteration
+    ``residual`` decisions (the loop reports no count): the iterations whose test held."""
+    passes = 0
+    for r in records:
+        if r.site.startswith(f"{SPRING}adsorption/newton:") and r.site.endswith("/residual"):
+            passes += bool(r.active[instance]) and bool(r.outcome[instance])
+    return passes
+
+
+@pytest.mark.parametrize("case", list(BATCH_3C))
+def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(case):
+    """Four instances of the growing surface differ in ``kfr``, ``uptake1``,
+    ``ET_depletion_factor``, the crop-factor stages, a pool rate and a fertiliser column; of the
+    deposition surfaces in the loads, a deposition column and the area. Each equals its single
+    run, state included."""
+    days, plan = BATCH_3C[case]
+    model, state, drivers = _case(case)
+    batched = _scaled(drivers, plan)
+    if case == "surface_deposition":  # only the phosphate column of the loads varies
+        for key in plan:
+            if key.endswith("pollutant_load"):
+                varied = drivers[key].expand(4, *drivers[key].shape).clone()
+                varied[:, :, 0] *= _tensors(*plan[key]).reshape(4, 1)
+                batched[key] = varied
+    diagnostics = {"decisions": True}
+    ran = wsimod_run(model, state, batched, days=days, diagnostics=diagnostics)
+    together = _comparable(ran, dict(model.wsimod_day.last_state))
+    assert ran.arc_flow.shape[0] == 4
+    if case == "growing_spring":
+        # on some day two instances take different Newton iteration counts, and on some day
+        # different uptake caps (calc_crop_uptake/cap:N or cap:P among the instances that reach it)
+        counts = [
+            len({_newton_passes(records, i) for i in range(4)})
+            for records in diagnostics["decisions"]
+        ]
+        assert max(counts) > 1
+        capped = [
+            d
+            for records in diagnostics["decisions"]
+            for d in records
+            if d.site in (f"{SPRING}calc_crop_uptake/cap:N", f"{SPRING}calc_crop_uptake/cap:P")
+            and len(set(d.outcome[d.active].tolist())) > 1
+        ]
+        assert capped
+    else:
+        assert not torch.equal(ran.tank_quality[0], ran.tank_quality[1])
+    for i in range(4):
+        single_drivers = {k: (v[i] if k in plan else v) for k, v in batched.items()}
+        single = wsimod_run(model, state, single_drivers, days=days)
+        alone = _comparable(single, dict(model.wsimod_day.last_state))
+        assert alone.keys() == together.keys()
+        for name, value in alone.items():
+            assert torch.equal(value, together[name][i]), (name, i)
+
+
+LAND_STATE = {
+    "wsimod.nutrient_pool": {
+        ("land", "surfaces.wheat.nutrient_pool", "fast_pool", "N"): 3.5,
+        ("land", "surfaces.wheat.nutrient_pool", "humus_pool", "P"): 1.25,
+    },
+    "wsimod.days_after_sow": {("land", "surfaces.wheat"): 40.0},
+    "wsimod.crop_cover": {("land", "surfaces.wheat"): 0.3},
+    "wsimod.ground_cover": {("land", "surfaces.wheat"): 0.4},
+}
+
+
+def test_the_3c_state_round_trips():
+    """The pools (one row per pool and nutrient, D4), ``days_after_sow`` and both covers are set
+    by label and reach day 0 (the sown crop is 41 days old after it); a run warm-started
+    from a run's last state equals the continuation. The pool factors are per-day stores and are
+    not carried (Y69): they are not in the state."""
+    model, default, drivers = _case("growing_spring")
+    state = initial_state(model, values=LAND_STATE)
+    day = model.wsimod_day
+    assert not any("factor" in key for key in state)
+    for key, rows in LAND_STATE.items():
+        labels = day.state_labels(key)
+        for label, value in rows.items():
+            assert float(state[key][labels.index(label)]) == value
+            assert not torch.equal(
+                state[key][labels.index(label)], default[key][labels.index(label)]
+            )
+    first = model.step(state, drivers, dt=DAY, t=0.0)
+    assert float(first["wsimod.days_after_sow"]) == 41.0
+    assert float(model.step(default, drivers, dt=DAY, t=0.0)["wsimod.days_after_sow"]) == -1.0
+
+    def stepped(start, k0, k1):
+        out, flows = start, []
+        for k in range(k0, k1):
+            out = model.step(out, drivers, dt=DAY, t=k * DAY)
+            flows.append(model.wsimod_day.last_record.arc_flow)
+        return out, flows
+
+    whole, whole_flows = stepped(state, 0, 10)
+    middle, early = stepped(state, 0, 4)
+    resumed, late = stepped(middle, 4, 10)
+    for key in whole:
+        assert torch.equal(whole[key], resumed[key]), key
+    assert all(torch.equal(a, b) for a, b in zip(whole_flows, early + late, strict=True))
+    other, _ = stepped(default, 0, 10)
+    assert not torch.equal(whole["wsimod.nutrient_pool"], other["wsimod.nutrient_pool"])
+    assert not torch.equal(whole["wsimod.days_after_sow"], other["wsimod.days_after_sow"])
+
+
+def test_a_warm_start_mid_season_crosses_the_harvest():
+    """Review Focus 4: a run of 300 days ends mid-season (2004-07-26, ``days_after_sow > 0``); a
+    second model warm-started from its last state runs 60 more days, across the harvest (raw
+    day 250, 2004-09-06, run day 341). The continuation equals days 300-360 of one 360-day run
+    (``torch.equal``) and ``days_after_sow`` is -1 from the harvest day on."""
+    model, state, drivers = _case("growing_spring")
+    whole = wsimod_run(model, state, drivers, days=360)
+    whole_final = dict(model.wsimod_day.last_state)
+    first = wsimod_run(model, state, drivers, days=300)
+    midway = dict(model.wsimod_day.last_state)
+    assert float(midway["wsimod.days_after_sow"]) > 0.0
+    second, _, drivers_2 = _case("growing_spring")
+    stepped, flows, sown = midway, [], []
+    for k in range(300, 360):
+        stepped = second.step(stepped, drivers_2, dt=DAY, t=k * DAY)
+        flows.append(second.wsimod_day.last_record.arc_flow)
+        sown.append(float(stepped["wsimod.days_after_sow"]))
+    assert torch.equal(torch.stack(flows), whole.arc_flow[300:360])
+    assert torch.equal(first.arc_flow, whole.arc_flow[:300])
+    for key, value in whole_final.items():
+        assert torch.equal(stepped[key], value), key
+    assert sown[341 - 300 - 1] > 0.0  # the day before the harvest
+    assert all(value == -1.0 for value in sown[341 - 300 :]), sown
+
+
+def _quantity_only_pair(case: str, days: int, scale: dict):
+    """``case``'s quantity-only volumes, with the drivers of ``scale`` (name -> factor) as they are
+    and multiplied."""
+    model, state, drivers = build_model(read_wsimod_config(CASES[case].build()), pollutants=False)
+    base = wsimod_run(model, state, drivers, days=days)
+    changed = {k: (v * scale[k] if k in scale else v) for k, v in drivers.items()}
+    assert set(scale) <= set(drivers), set(scale) - set(drivers)
+    other = wsimod_run(model, state, changed, days=days)
+    return base, other
+
+
+def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
+    """``growing_spring`` and ``surface_deposition``: every driver a quantity-only run lists as
+    ignored or never reads (uptake, erosion, adsorption, denitrification, the deposition,
+    fertiliser and manure forcing) is changed and the volumes are ``torch.equal``; the same for
+    the configuration's ``data_input_dict`` and ``pollutant_load`` values."""
+    names = (
+        "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion srfilt macrofilt "
+        "limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes bulk_density"
+    ).split()
+    scale = {G + n: 1.7 for n in names}
+    for kind in ("fertiliser", "manure"):
+        scale.update({f"wsimod.{p}-{kind}": 3.0 for p in ("nhx", "noy", "srp")})
+    scale.update({f"wsimod.{p}-dry": 2.0 for p in ("nhx", "noy", "srp")})
+    base, other = _quantity_only_pair("growing_spring", 200, scale)
+    assert float(base.arc_flow.abs().max()) > 0.0
+    assert torch.equal(base.arc_flow, other.arc_flow)
+    assert torch.equal(base.tank_storage, other.tank_storage)
+    scale = {f"wsimod.{p}-{w}": 4.0 for p in ("nhx", "noy", "srp") for w in ("dry", "wet")}
+    base, other = _quantity_only_pair("surface_deposition", 100, scale)
+    assert float(base.arc_flow.abs().max()) > 0.0
+    assert torch.equal(base.arc_flow, other.arc_flow)
+    assert torch.equal(base.tank_storage, other.tank_storage)
+    # the values written in the configuration
+    for case in ("growing_spring", "surface_deposition"):
+        mapping = CASES[case].build()
+        changed = copy.deepcopy(mapping)
+        for node in changed["nodes"]:
+            for surface in node.get("surfaces") or []:
+                for key, series in (surface.get("data_input_dict") or {}).items():
+                    surface["data_input_dict"][key] = series * 2.0
+                for name in surface.get("pollutant_load") or {}:
+                    if name != "temperature":
+                        surface["pollutant_load"][name] *= 3.0
+        assert changed != mapping
+        runs = []
+        for configuration in (mapping, changed):
+            model, state, drivers = build_model(read_wsimod_config(configuration), pollutants=False)
+            runs.append(wsimod_run(model, state, drivers, days=100))
+        assert torch.equal(runs[0].arc_flow, runs[1].arc_flow)
+        assert torch.equal(runs[0].tank_storage, runs[1].tank_storage)
+
+
+def test_quantity_only_lists_the_3c_parameters():
+    """What the configuration writes and a quantity-only run never reads is listed: the surface
+    data (the deposition, fertiliser and manure), the loads and the soil-temperature weights.
+    The volume parameters (``ET_depletion_factor``, ``rooting_depth``, ``crop_factor_stages``)
+    are not."""
+    listed = {}
+    for case in ("growing_spring", "surface_deposition"):
+        model, _, _ = build_model(read_wsimod_config(CASES[case].build()), pollutants=False)
+        listed[case] = model.ignored_by_quantity_only
+    assert "land.surfaces.wheat.data_input_dict" in listed["growing_spring"]
+    assert "land.surfaces.wheat.soil_temp_w_prev" in listed["growing_spring"]
+    for surface in ("roofs", "lawns"):
+        assert f"suburb.surfaces.{surface}.pollutant_load" in listed["surface_deposition"]
+        assert f"suburb.surfaces.{surface}.data_input_dict" in listed["surface_deposition"]
+    assert "suburb.surfaces.yards.data_input_dict" in listed["surface_deposition"]
+    for name in ("ET_depletion_factor", "rooting_depth", "crop_factor_stages"):
+        assert not any(item.endswith(name) for item in listed["growing_spring"]), name
+    model, _, _ = build_model(read_wsimod_config(CASES["growing_spring"].build()), pollutants=True)
+    assert model.ignored_by_quantity_only == []
 
 
 def test_the_results_follow_wsimods_record_layout():
