@@ -188,12 +188,13 @@ _DOMAIN = (
 )
 _REFUSED = {"<=": "<= 0", "<": "< 0", "==": "0"}
 
-# land.py:1186-1250, WSIMOD's attributes as written (Python evaluates the expressions), set only
-# in ``__init__`` and reachable through the overrides (``:1376-1410``); and the two constructor
-# keywords that are batched parameters (``:1085-1094``)
 # the growing parameters a quantity-only run reads; ``crop_factor_stages`` is a structural value
 # (Y72). Every other one of GROWING_DEFAULTS that a configuration gives is listed as ignored
 QUANTITY_ONLY_READ = frozenset({"ET_depletion_factor", "rooting_depth"})
+
+# land.py:1186-1250, WSIMOD's attributes as written (Python evaluates the expressions), set only
+# in ``__init__`` and reachable through the overrides (``:1376-1410``); and the two constructor
+# keywords that are batched parameters (``:1085-1094``)
 GROWING_DEFAULTS: dict[str, float] = {
     "ET_depletion_factor": 1,
     "rooting_depth": 1,

@@ -490,7 +490,8 @@ def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(name):
             if d.site in (f"{SPRING}calc_crop_uptake/cap:N", f"{SPRING}calc_crop_uptake/cap:P")
             and len(set(d.outcome[d.active].tolist())) > 1
         ]
-        assert capped or days < 250
+        if days == 250:  # the caps differ only once the crop is established (day 211)
+            assert capped
     else:
         assert not torch.equal(ran.tank_quality[0], ran.tank_quality[1])
     for i in range(4):
@@ -647,7 +648,9 @@ def test_quantity_only_lists_the_3c_parameters():
     surface = entry.setdefault("surfaces", {}).setdefault("wheat", {})
     for name in ignored_growing:
         surface[name] = {"adosorption_nr_limit": 2e-5, "slope": 4}.get(name, 0.02)
-    read = ("ET_depletion_factor", "rooting_depth", "crop_factor_stages")  # given in the surface
+    read = ("ET_depletion_factor", "rooting_depth", "crop_factor_stages")
+    (given,) = [s for n in mapping["nodes"] if n["name"] == "land" for s in n["surfaces"]]
+    assert all(name in given for name in read)  # the configuration gives them: not listed
     network = read_wsimod_config(mapping)
     model, _, _ = build_model(network, pollutants=False)
     listed = model.ignored_by_quantity_only
