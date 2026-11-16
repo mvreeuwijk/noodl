@@ -16,6 +16,12 @@ half the DIN or the organic nitrogen whatever its rate: no gradient), off the ``
 guards; negative WTW solids are an event, not a kink. The
 River's decisions compare masses (kg), so its margins are measured against the largest arc mass
 (``margin_scale="mass"``) instead of the largest arc flow (m3).
+3c-i adds the growing surface, its nutrient pool and the surface deposition (Task 11). An entry
+may run a window of its case (its dates from ``start`` on, the configured state on that date,
+amended by ``initial``) and check further scalars on the same runs (``more``). The adsorption's
+Newton tests and the spec's continuous switches are held to a distance in steps instead of the
+scale (``STEPPED``). Two tests add the batched gradient of the loads and the deposition (Y58,
+Y59) and the zero gradient of ``adosorption_nr_limit``.
 This file is also the whole-model check of the hand-written gradients of ``pow_half``,
 ``exp_python`` and ``pow_python`` (bitwise Python math).
 """
@@ -42,6 +48,21 @@ DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
 REL = 1e-6  # the step and the agreement
 KINK = 1e-6  # |margin| of an active decision, relative to the case scale
 NOISE = 1e-12  # a margin change this small (relative to the scale) is rounding
+# 3c: decisions whose distance to the jump is measured in steps, 2 |margin| / |margin(+h) -
+# margin(-h)| (the parameter changes of h it would take to flip them), not against the scale:
+# - the adsorption's Newton tests compare concentrations (mg/l: the step |dx| with 1e-6 xn) and
+#   the residual in kg/km2, in no unit of the arcs (their margins are 1e-8 to 1e-5 on every day);
+# - the spec's continuous switches (Differentiability): the pool transformation's in_/out_ (the
+#   sign of a day's increase, both sides 0 at 0) and erosion's eff_erodedP > 0 (nothing eroded on
+#   both sides). Near a freeze or a thaw, or on a day of little runoff, they sit 1e-5 kg from 0,
+#   below the mass scale's 4e-5, yet 1e4 steps and more from their switch
+STEPPED = (
+    "/adsorption/newton:",
+    "/soil_pool_transformation/inorganic_",
+    "/soil_pool_transformation/organic_",
+    "/erosion/phosphorus",
+)
+STEPS = 1e3  # a STEPPED decision is at least this many steps from its switch
 
 
 @dataclass(frozen=True)
@@ -64,19 +85,28 @@ class Spec:
     margin_scale: str = "flow"
     # other driver values held fixed in every run: ((key, label, value), ...)
     also: tuple = ()
+    # 3c: the window, the run's first date as an index into the case's dates (its configured
+    # initial state then starts on that date), and further scalars checked on the same three runs
+    start: int = 0
+    more: tuple = ()
+    # other initial state values in every run, ((key, label, value), ...): a window's start
+    initial: tuple = ()
 
 
-def _model(case: str, pollutants: bool):
+def _model(case: str, pollutants: bool, start: int = 0, days: int | None = None):
     if case == "quickstart":
         network = read_wsimod_config(DATA / "quickstart")
     else:
-        network = read_wsimod_config(CASES[case].build())
+        mapping = CASES[case].build()
+        if start:  # a window: the case's dates from ``start`` on, the forcing as it is
+            mapping["dates"] = mapping["dates"][start : start + days]
+        network = read_wsimod_config(mapping)
     return build_model(network, pollutants=pollutants)[0]
 
 
 def _configured(model, spec: Spec) -> float:
     kind = spec.set[0]
-    if kind == "scale":
+    if kind in ("scale", "month"):
         return 1.0
     day = model.wsimod_day
     if kind == "state":
@@ -97,20 +127,40 @@ def _fixed(spec: Spec) -> dict:
     return values
 
 
+def _state(model, spec: Spec, value: dict | None = None):
+    """The initial state with ``spec.initial`` and then ``value`` (key -> {label: value})."""
+    values: dict = {}
+    for key, label, fixed in spec.initial:
+        values.setdefault(key, {})[label] = fixed
+    for key, rows in (value or {}).items():
+        values.setdefault(key, {}).update(rows)
+    return initial_state(model, values=values or None)
+
+
 def _inputs(model, spec: Spec, p):
     kind = spec.set[0]
     if kind == "state":
         _, key, label = spec.set
-        return initial_state(model, values={key: {label: p}}), initial_drivers(model)
+        return _state(model, spec, {key: {label: p}}), initial_drivers(model)
     if kind == "driver":
         _, key, label, *column = spec.set
         value = {label: p} if not column else {label: {column[0]: p}}
         values = _fixed(spec)
         values.setdefault(key, {}).update(value)
-        return initial_state(model), initial_drivers(model, values=values)
+        return _state(model, spec), initial_drivers(model, values=values)
+    drivers = initial_drivers(model, values=_fixed(spec) or None)
+    if kind == "month":  # p multiplies one label's series on the days of one month ("YYYY-MM")
+        _, key, label, month = spec.set
+        day = model.wsimod_day
+        rows = torch.tensor([d.startswith(month) for d in day.network.date_labels])
+        assert bool(rows.any()), month
+        series = drivers[key]
+        column = torch.zeros(series.shape[-1], dtype=torch.bool)
+        column[day.drivers[key].labels.index(label)] = True
+        drivers[key] = torch.where(rows[:, None] & column, series * p, series)
+        return _state(model, spec), drivers
     # "scale": p multiplies the forcing series (one column of the concentrations)
     _, key, *column = spec.set
-    drivers = initial_drivers(model, values=_fixed(spec) or None)
     series = drivers[key]
     if column:
         index = list(model.wsimod_day.drivers[key].columns).index(column[0])
@@ -119,7 +169,7 @@ def _inputs(model, spec: Spec, p):
         drivers[key] = torch.stack(parts, dim=-1)
     else:
         drivers[key] = series * p
-    return initial_state(model), drivers
+    return _state(model, spec), drivers
 
 
 def _value(model, results, scalar):
@@ -128,13 +178,26 @@ def _value(model, results, scalar):
         return results.arc_flow[:, results.arc_names.index(scalar[1])].sum()
     if kind == "tank":
         return results.tank_storage[-1, results.tank_names.index((scalar[1], scalar[2]))]
+    day = model.wsimod_day
     if kind == "final":  # a store's mass after the last day, from the state (a decay tank is
-        # not in the tank_* results, X40)
+        # not in the tank_* results, X40); "volume" its volume
         _, node, attribute, pollutant = scalar
-        day = model.wsimod_day
         row = day.state_labels("wsimod.storage").index((node, attribute))
-        return day.last_state["wsimod.storage"][row, 1 + list(day.p.names).index(pollutant)]
-    index = list(model.wsimod_day.p.names).index(scalar[2])
+        column = 0 if pollutant == "volume" else 1 + list(day.p.names).index(pollutant)
+        return day.last_state["wsimod.storage"][row, column]
+    if kind == "pool":  # a growing surface's nutrient pool after the last day
+        _, node, surface, pool, nutrient = scalar
+        label = (node, f"surfaces.{surface}.nutrient_pool", pool, nutrient)
+        return day.last_state["wsimod.nutrient_pool"][
+            day.state_labels("wsimod.nutrient_pool").index(label)
+        ]
+    if kind == "arcs":  # several arcs' volume (pollutant None) or pollutant, summed over the days
+        _, arcs, pollutant = scalar
+        columns = [results.arc_names.index(a) for a in arcs]
+        if pollutant is None:
+            return results.arc_flow[:, columns].sum()
+        return results.arc_quality[:, columns, list(day.p.names).index(pollutant)].sum()
+    index = list(day.p.names).index(scalar[2])
     return results.arc_quality[:, results.arc_names.index(scalar[1]), index].sum()
 
 
@@ -142,7 +205,8 @@ def _run(model, spec: Spec, p):
     state, drivers = _inputs(model, spec, p)
     diagnostics: dict = {"decisions": True}
     results = wsimod_run(model, state, drivers, days=spec.days, diagnostics=diagnostics)
-    return _value(model, results, spec.scalar), results, diagnostics["decisions"]
+    values = [_value(model, results, scalar) for scalar in (spec.scalar, *spec.more)]
+    return values, results, diagnostics["decisions"]
 
 
 def _records(decisions):
@@ -156,9 +220,10 @@ def _records(decisions):
 
 
 def _jumps(runs, scale):
-    """``(same, margin, where)`` for the base, ``+h`` and ``-h`` runs' decision records: whether
-    every active decision has the same outcome in the three, the smallest ``|margin|`` over them
-    and the (day, site, call, round) it belongs to.
+    """``(same, margin, where, steps)`` for the base, ``+h`` and ``-h`` runs' decision records:
+    whether every active decision has the same outcome in the three, the smallest ``|margin|``
+    over them and the (day, site, call, round) it belongs to, and the fewest steps to a jump of
+    the ``STEPPED`` decisions, which ``margin`` leaves out.
 
     A decision whose margin differs by at most ``NOISE * scale`` between the ``+h`` and ``-h``
     runs does not depend on the parameter within the step, and is no jump. It is a comparison
@@ -170,7 +235,7 @@ def _jumps(runs, scale):
     A decision active in some runs only is a different outcome, unless it too compares
     quantities at rounding level (the branch that opened it was rounding noise)."""
     base, up, down = runs
-    same, margin, where = True, float("inf"), None
+    same, margin, where, steps = True, float("inf"), None, (float("inf"), None)
     for key in set().union(*runs):
         found = [run.get(key) for run in runs]
         if None in found:  # active in some runs only: a call the noise of another decision opened
@@ -182,22 +247,30 @@ def _jumps(runs, scale):
             continue
         elif len({f[0] for f in found}) > 1:
             same = False
+        elif any(site in key[1] for site in STEPPED):
+            away = 2 * min(abs(f[1]) for f in found) / abs(up[key][1] - down[key][1])
+            if away < steps[0]:
+                steps = (away, key)
         else:
             smallest = min(abs(f[1]) for f in found)
             if smallest < margin:
                 margin, where = smallest, key
-    return same, margin, where
+    return same, margin, where, steps
 
 
 def check(spec: Spec) -> dict:
-    """The three evaluations: autograd at the point, central differences, the decision record."""
-    model = _model(spec.case, spec.pollutants)
+    """The three evaluations: autograd at the point, central differences, the decision record.
+    ``scalar``, ``ad`` and ``fd`` are lists, one entry per scalar (``spec.scalar``, then
+    ``spec.more``)."""
+    model = _model(spec.case, spec.pollutants, spec.start, spec.days)
     point = _configured(model, spec) if spec.point is None else spec.point
     assert point != 0.0
     h = REL * abs(point)
     p = torch.tensor(point, dtype=F64, requires_grad=True)
-    value, results, base = _run(model, spec, p)
-    (ad,) = torch.autograd.grad(value, p)
+    values, results, base = _run(model, spec, p)
+    ad = [
+        torch.autograd.grad(v, p, retain_graph=k + 1 < len(values))[0] for k, v in enumerate(values)
+    ]
     with torch.no_grad():
         up, _, up_decisions = _run(model, spec, torch.tensor(point + h, dtype=F64))
         down, _, down_decisions = _run(model, spec, torch.tensor(point - h, dtype=F64))
@@ -205,16 +278,19 @@ def check(spec: Spec) -> dict:
     if spec.margin_scale == "mass":
         additive = model.wsimod_day.p.volume_or_additive_mask[1:]
         scale = float(results.arc_quality.detach().abs()[..., additive].max())
-    same, margin, where = _jumps([_records(d) for d in (base, up_decisions, down_decisions)], scale)
+    same, margin, where, steps = _jumps(
+        [_records(d) for d in (base, up_decisions, down_decisions)], scale
+    )
     return {
         "point": point,
-        "scalar": float(value),
-        "ad": float(ad),
-        "fd": float((up - down) / (2 * h)),
+        "scalar": [float(v.detach()) for v in values],
+        "ad": [float(g) for g in ad],
+        "fd": [float((u - d) / (2 * h)) for u, d in zip(up, down, strict=True)],
         "scale": scale,
         "same_outcomes": same,
         "margin": margin,
         "where": where,
+        "steps": steps,
     }
 
 
@@ -577,6 +653,152 @@ SPECS = {
     ),
 }
 
+# --- 3c-i: the growing surface, its nutrient pool and the surface deposition (Task 11) ---------
+_G = "wsimod.GrowingSurface."
+_WHEAT = ("land", "wheat")
+_WHEAT_DATA = ("land", "surfaces.wheat")  # the surface data rows
+_SOIL_TANK = ("land", "surface:wheat")
+_LAND_OUT = ("land_to_aquifer", "land_to_brook")
+_DIN = ("pool", "land", "wheat", "dissolved_inorganic_pool", "N")
+_ADS_P = ("pool", "land", "wheat", "adsorbed_inorganic_pool", "P")
+_OUT_VOLUME = ("arcs", _LAND_OUT, None)
+_SOIL_VOLUME = ("final", "land", "surface:wheat", "volume")
+# growing_spring's humus pool is empty and nothing fills it (the configured soil has no humus,
+# degrhpar moves no fast nitrogen or phosphorus into it in these windows): erosion then takes all
+# its phosphorus from the adsorbed pool (erode_P, nutrient_pool.py:367-394) and the out-arc
+# org-phosphorus does not depend on it. 60 kg of humus phosphorus at the window's start opens the
+# org-phosphorus path, and keeps every day's eroded phosphorus (the erosion/phosphorus margin)
+# above the threshold
+_HUMUS_P = (
+    ("wsimod.nutrient_pool", ("land", "surfaces.wheat.nutrient_pool", "humus_pool", "P"), 60.0),
+)
+
+
+def _no_nitrate(parameter, *column) -> Spec:
+    """``growing_no_nitrate`` from 2004-09-05 (run day 340) for 120 days, the soil starting at
+    1000 m3: stressed (``Ks < 1``, the depletion above ``RAW``) on the first days, then wetted
+    above the outflow threshold by the winter rain, so that the stress coefficient reaches the
+    out-arc volume. From day 0 the crop is never stressed in 120 days (``ET_depletion_factor``
+    has no gradient), and over the summer it is stressed with no outflow after it."""
+    return Spec(
+        "growing_no_nitrate",
+        120,
+        True,
+        ("driver", f"{_G}{parameter}", _WHEAT, *column),
+        _OUT_VOLUME,
+        start=340,
+        more=(_SOIL_VOLUME,),
+        initial=(("wsimod.storage", _SOIL_TANK, 1000.0),),
+    )
+
+
+def _spring(setting, scalar, *more, point=None, start=0, days=120, **kwargs) -> Spec:
+    """``growing_spring`` for ``days`` from run day ``start`` (0: 2003-10-01), its decisions
+    held to the mass scale."""
+    return Spec(
+        "growing_spring",
+        days,
+        True,
+        setting,
+        scalar,
+        point,
+        margin_scale="mass",
+        start=start,
+        more=more,
+        **kwargs,
+    )
+
+
+def _growing(parameter, scalar, *more, **kwargs) -> Spec:
+    return _spring(("driver", f"{_G}{parameter}", _WHEAT), scalar, *more, **kwargs)
+
+
+def _pool(parameter) -> Spec:
+    return _spring(("driver", f"{_G}nutrient_pool.{parameter}", _WHEAT, "N"), _DIN)
+
+
+def _month(variable, month, pollutant="nitrate") -> Spec:
+    return _spring(
+        ("month", f"wsimod.{variable}", _WHEAT_DATA, month), ("final", *_SOIL_TANK, pollutant)
+    )
+
+
+_NITRATE_OUT = ("arcs", _LAND_OUT, "nitrate")
+_PHOSPHATE_OUT = ("arcs", _LAND_OUT, "phosphate")
+_EROSION = (("arcs", _LAND_OUT, "solids"), ("arcs", _LAND_OUT, "org-phosphorus"))
+# the crop window: from 2004-01-19 (run day 110), sown on window day 71 (2004-03-30); uptake1 at 5
+# (configured 15): at 15 the crop empties the dissolved inorganic pool within weeks of the sowing,
+# the uptake is then capped by the pool on most days and the final DIN.N is insensitive (central
+# differences at the rounding floor, 3e-6)
+_CROP = dict(start=110)
+_UPTAKE1 = 5.0
+# the cover window: from 2004-01-29 (run day 120), sown on window day 61, the covers growing to
+# the end
+_COVER = dict(start=120, initial=_HUMUS_P)
+
+SPECS_3C = {
+    # the crop calendar and the water stress (calc_crop_cover) without a nutrient pool
+    "GrowingSurface.crop_factor_stages[3]": _no_nitrate("crop_factor_stages", 3),
+    "GrowingSurface.ET_depletion_factor": _no_nitrate("ET_depletion_factor"),
+    "GrowingSurface.rooting_depth": _no_nitrate("rooting_depth"),
+    # uptake (with the crop)
+    "GrowingSurface.uptake1": _growing("uptake1", _DIN, _NITRATE_OUT, point=_UPTAKE1, **_CROP),
+    "GrowingSurface.uptake3": _growing(
+        "uptake3", _DIN, _NITRATE_OUT, also=((f"{_G}uptake1", _WHEAT, _UPTAKE1),), **_CROP
+    ),
+    # denitrification and the soil-moisture factor, from 2003-10-01: the soil dries below field
+    # capacity in November (exppar, thetapow) and is saturated in winter (satact)
+    "GrowingSurface.denpar": _growing("denpar", _DIN, _NITRATE_OUT),
+    "GrowingSurface.hsatINs": _growing("hsatINs", _DIN, _NITRATE_OUT),
+    "GrowingSurface.exppar": _growing("exppar", _DIN, _NITRATE_OUT),
+    "GrowingSurface.satact": _growing("satact", _DIN, _NITRATE_OUT),
+    "GrowingSurface.thetapow": _growing("thetapow", _DIN, _NITRATE_OUT),
+    # adsorption: kfr at 20 (configured 153.7, at which the equilibrium hardly moves: ads.P changes
+    # by 5e-6 of itself for a doubled kfr, below what central differences resolve); nfr at 0.6
+    # (configured 1/2.6, likewise, 2e-5)
+    "GrowingSurface.kfr": _growing("kfr", _ADS_P, _PHOSPHATE_OUT, point=20.0),
+    "GrowingSurface.nfr": _growing("nfr", _ADS_P, _PHOSPHATE_OUT, point=0.6),
+    "GrowingSurface.kadsdes": _growing("kadsdes", _ADS_P, _PHOSPHATE_OUT),
+    # erosion: the window from 2003-10-01 has 30 days above 5 mm of rain
+    "GrowingSurface.erodibility": _growing("erodibility", *_EROSION, initial=_HUMUS_P),
+    "GrowingSurface.sreroexp": _growing("sreroexp", *_EROSION, initial=_HUMUS_P),
+    "GrowingSurface.srfilt": _growing("srfilt", *_EROSION, initial=_HUMUS_P),
+    # the covers (calc_crop_cover in the season, Y61): through erosion
+    "GrowingSurface.crop_cover_max": _growing("crop_cover_max", *_EROSION, **_COVER),
+    "GrowingSurface.ground_cover_max": _growing("ground_cover_max", *_EROSION, **_COVER),
+    # the pool's rates and fractions (the N column)
+    "NutrientPool.minfpar": _pool("minfpar"),
+    "NutrientPool.immobdpar": _pool("immobdpar"),
+    "NutrientPool.fraction_manure_to_dissolved_inorganic": _pool(
+        "fraction_manure_to_dissolved_inorganic"
+    ),
+    # the surface data, one month each: srp reaches the tank's phosphate, never its nitrate
+    # (adjust_vqip_to_liquid scales the P species by P only, land.py:1594-1603)
+    "nhx-fertiliser": _month("nhx-fertiliser", "2003-11"),
+    "noy-dry": _month("noy-dry", "2003-11"),
+    "srp-manure": _month("srp-manure", "2004-01", "phosphate"),
+    # the Land's temperature through tdf: from 2004-04-04 (run day 186) for 70 days the soil stays
+    # between 6 and 20 degC (off the 5 degC jump and the 0 degC kink, L12)
+    "temperature (tdf)": _spring(("scale", "wsimod.temperature"), _DIN, start=186, days=70),
+    # Y58, Y59: the impervious load and the wet deposition, 20 days of surface_deposition (a
+    # gradient run of it costs about 0.1 s a day)
+    "ImperviousSurface.pollutant_load": Spec(
+        "surface_deposition",
+        20,
+        True,
+        ("driver", "wsimod.ImperviousSurface.pollutant_load", ("suburb", "roofs"), "phosphate"),
+        ("arcs", ("suburb_to_storm", "suburb_to_brook"), "phosphate"),
+    ),
+    "srp-wet": Spec(
+        "surface_deposition",
+        20,
+        True,
+        ("scale", "wsimod.srp-wet"),
+        ("arcs", ("suburb_to_storm", "suburb_to_brook"), "phosphate"),
+    ),
+}
+SPECS.update(SPECS_3C)
+
 
 # the quickstart runs take about 20 s each: three stay in the default selection, the rest are slow;
 # so are the 3b runs listed below them
@@ -603,6 +825,9 @@ SLOW = {
     "River.T_wdays [org-nitrogen]",
     "temperature (river) [nitrate]",
     "temperature (river) [org-nitrogen]",
+    # 3c: every growing run takes 15-30 s alone (120 days with the pool, three runs per entry);
+    # the surface_deposition entries stay in the default selection
+    *(name for name, spec in SPECS_3C.items() if spec.case != "surface_deposition"),
 }
 
 
@@ -611,14 +836,103 @@ SLOW = {
     [pytest.param(n, marks=pytest.mark.slow) if n in SLOW else n for n in SPECS],
 )
 def test_gradient_matches_central_differences(name):
-    r = check(SPECS[name])
-    rel = abs(r["ad"] - r["fd"]) / max(abs(r["ad"]), abs(r["fd"]), 1e-300)
-    print(
-        f"GRAD | {name} | {SPECS[name].case} | {SPECS[name].days} | p={r['point']:.6g} | "
-        f"scalar={r['scalar']:.9g} | ad={r['ad']:.10g} | fd={r['fd']:.10g} | rel={rel:.1e} | "
-        f"min margin={r['margin']:.3g} (scale {r['scale']:.4g})"
-    )
+    spec = SPECS[name]
+    r = check(spec)
+    scalars = (spec.scalar, *spec.more)
+    for scalar, value, ad, fd in zip(scalars, r["scalar"], r["ad"], r["fd"], strict=True):
+        rel = abs(ad - fd) / max(abs(ad), abs(fd), 1e-300)
+        print(
+            f"GRAD | {name} | {spec.case} | {spec.start}+{spec.days} | {scalar} | "
+            f"p={r['point']:.6g} | scalar={value:.9g} | ad={ad:.10g} | fd={fd:.10g} | "
+            f"rel={rel:.1e} | min margin={r['margin']:.3g} (scale {r['scale']:.4g}) at "
+            f"{r['where']} | steps {r['steps'][0]:.3g} at {r['steps'][1]}"
+        )
     assert r["same_outcomes"], f"{name}: the +-h runs' active decisions differ"
     assert r["margin"] > KINK * r["scale"], f"{name}: an active decision is within {KINK} of a jump"
-    assert r["ad"] != 0.0, f"{name}: the scalar does not depend on the parameter"
-    assert abs(r["ad"] - r["fd"]) <= REL * max(abs(r["ad"]), abs(r["fd"])), r
+    assert r["steps"][0] > STEPS, f"{name}: a decision is within {STEPS} steps of its switch: {r}"
+    for scalar, ad, fd in zip(scalars, r["ad"], r["fd"], strict=True):
+        assert ad != 0.0, f"{name}: {scalar} does not depend on the parameter"
+        assert abs(ad - fd) <= REL * max(abs(ad), abs(fd)), (scalar, r)
+
+
+# --- 3c: batched gradients (Y58, Y59) and the adsorption limit -----------------------------------
+_SUBURB_OUT = ("suburb_to_storm", "suburb_to_brook")
+_BATCH_DAYS = 10  # every day reads the loads and the deposition: no month boundary is needed
+
+
+def _deposition_drivers(drivers, load, dry, wet):
+    """``surface_deposition``'s drivers with the roofs' phosphate load ``load`` and the dry
+    ``srp`` and wet ``nhx`` series of both surfaces multiplied by ``dry`` and ``wet``: numbers, or
+    one value per instance (the leading batch dimension)."""
+    key = "wsimod.ImperviousSurface.pollutant_load"
+    loads = drivers[key]  # (surfaces, pollutants): roofs then yards, phosphate first
+    roofs = torch.zeros_like(loads, dtype=torch.bool)
+    roofs[0, 0] = True
+    if load.dim():
+        loads = loads.expand(load.shape[0], *loads.shape)
+
+    def per_instance(x):
+        return x.reshape(-1, 1, 1) if x.dim() else x
+
+    return {
+        **drivers,
+        key: torch.where(roofs, per_instance(load), loads),
+        "wsimod.srp-dry": drivers["wsimod.srp-dry"] * per_instance(dry),
+        "wsimod.nhx-wet": drivers["wsimod.nhx-wet"] * per_instance(wet),
+    }
+
+
+def test_a_batched_gradient_equals_its_single_runs():
+    """Y58, Y59: two ``surface_deposition`` instances differ in the roofs' phosphate load
+    (``pollutant_load``), the dry ``srp`` and the wet ``nhx`` deposition forcing. Each instance's
+    out-arc phosphate and ammonia and their gradients with respect to the three equal its single
+    run's (``torch.equal``), and the two instances differ."""
+    model = _model("surface_deposition", True)
+    names = list(model.wsimod_day.p.names)
+    state, drivers = initial_state(model), initial_drivers(model)
+    values = {"load": (2e-6, 7e-6), "dry": (1.0, 2.5), "wet": (1.0, 0.4)}
+
+    def scalars(p):
+        results = wsimod_run(model, state, _deposition_drivers(drivers, **p), days=_BATCH_DAYS)
+        columns = [results.arc_names.index(a) for a in _SUBURB_OUT]
+        quality = results.arc_quality[..., columns, :].sum(dim=(-2, -3))
+        return [quality[..., names.index(n)] for n in ("phosphate", "ammonia")]
+
+    p = {k: torch.tensor(v, dtype=F64, requires_grad=True) for k, v in values.items()}
+    together = scalars(p)
+    grads = [torch.autograd.grad(v.sum(), list(p.values()), retain_graph=True) for v in together]
+    assert all(v.shape == (2,) for v in together)
+    for i in range(2):
+        q = {k: torch.tensor(v[i], dtype=F64, requires_grad=True) for k, v in values.items()}
+        for k, alone in enumerate(scalars(q)):
+            assert torch.equal(alone.detach(), together[k][i].detach()), (k, i)
+            single = torch.autograd.grad(alone, list(q.values()), retain_graph=True)
+            for name, g, batched in zip(values, single, grads[k], strict=True):
+                assert torch.equal(g, batched[i]), (k, i, name, float(g), float(batched[i]))
+    phosphate, ammonia = grads
+    # the phosphate depends on the load and srp, the ammonia on nhx; the instances differ
+    assert all(float(g.abs().min()) > 0.0 for g in (*phosphate[:2], ammonia[2]))
+    assert all(not torch.equal(v[0], v[1]) for v in together)
+
+
+def test_the_adsorption_limit_gradient_is_zero_through_a_run():
+    """``adosorption_nr_limit`` is the Newton loop's tolerance: it decides the iteration count, a
+    detached decision, and enters no value (Y25). Its gradient through 30 days of
+    ``growing_spring`` is absent or zero, while the same scalar (the final ``ads.P`` and the
+    out-arc phosphate) depends on the adsorption: ``kfr``, set the same way, has a gradient."""
+    model = _model("growing_spring", True)
+    layout = model.wsimod_day.drivers
+    p = {
+        name: torch.tensor(
+            float(layout[_G + name].template[layout[_G + name].labels.index(_WHEAT)]),
+            dtype=F64,
+            requires_grad=True,
+        )
+        for name in ("adosorption_nr_limit", "kfr")
+    }
+    drivers = initial_drivers(model, values={_G + name: {_WHEAT: v} for name, v in p.items()})
+    results = wsimod_run(model, initial_state(model), drivers, days=30)
+    value = _value(model, results, _ADS_P) + _value(model, results, _PHOSPHATE_OUT)
+    grad, kfr = torch.autograd.grad(value, (p["adosorption_nr_limit"], p["kfr"]), allow_unused=True)
+    assert grad is None or torch.equal(grad, torch.zeros_like(grad))
+    assert kfr is not None and float(kfr) != 0.0

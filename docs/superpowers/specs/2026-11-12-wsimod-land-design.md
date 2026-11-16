@@ -1478,13 +1478,22 @@ The protocol is 3a's:
 
 - central differences at relative step 1e-6 and agreement 1e-6;
 - the `"decisions"` asserted identical between ±h;
-- the kink rule of W92/W93.
+- the kink rule of W92/W93. The adsorption's Newton tests (their margins are concentrations, in
+  no unit of the arcs) and the continuous switches above (the transformation's `in_`/`out_`,
+  `eff_erodedP > 0`) are held to at least 1e3 steps of `h` from their switch, instead of
+  `1e-6 × scale` (Task 11).
+
+An entry may run a window of its case: its dates from a later day, with the configured initial
+state on that day, amended where the window needs it (`growing_no_nitrate` from a stressed soil;
+`growing_spring` with humus phosphorus, which it never accrues, so that erosion reaches
+org-phosphorus).
 
 The derivatives checked are those of arc pollutant masses, volumes, final storages and the pools
 with respect to:
 
 - `crop_factor_stages` and `ET_depletion_factor`, through the volumes; `rooting_depth`;
-  `irrigation_coefficient`; `current_surface_area`;
+  `irrigation_coefficient`; `current_surface_area`; `crop_cover_max` and `ground_cover_max`,
+  through erosion;
 - `uptake1`, `uptake3`, `denpar`, `hsatINs`, `exppar`, `kfr`, `nfr`, `kadsdes`, `erodibility`,
   `sreroexp`, `srfilt`, `satact` and `thetapow`;
 - the pool rates `minfpar`, `immobdpar` and `fraction_manure_to_dissolved_inorganic`;
