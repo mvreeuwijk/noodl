@@ -3219,3 +3219,338 @@ def test_a_kadsdes_whose_exp_overflows_is_refused():
     assert bool(sites[f"{S8}/change"].outcome[0])
     theirs = _wsimod_adsorption(parameter, draw)
     _assert_same(theirs, _Row(ours, 0), theirs.adsorption(), (in_[0], out_[0]), "inside")
+
+
+# --- IrrigationSurface (Task 13) ---------------------------------------------------------------
+SIMPLE = Pollutants(("phosphate", "temperature"), ("phosphate",), ("temperature",))
+_IRRIGATION_AREA = 100.0
+_IRRIGATION_DEPTH = 0.5  # capacity 100 * 0.5 * 0.4 = 20 m3
+
+
+def _irrigation_land(pollutants=NUT, **parameters) -> Land:
+    spec = SurfaceSpec(
+        "irr",
+        "IrrigationSurface",
+        {"area": _IRRIGATION_AREA, "rooting_depth": _IRRIGATION_DEPTH, **parameters},
+        {},
+        constructed_variables=frozenset(),
+        constructed_load=(),
+    )
+    return make_node(NodeSpec("land", "Land", "Land", {}, {}, [spec]), None, pollutants)
+
+
+def _wsimod_irrigation(pollutants, *, coefficient: float = 0.3, storage: dict | None = None):
+    """WSIMOD's ``IrrigationSurface`` on a stub parent whose ``pull_distributed`` is
+    scripted by the caller (``parent.script``); it records its requests in ``parent.requests``."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes.land import IrrigationSurface as WsimodIrrigation
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    reset_wsimod_globals()
+    constants.POLLUTANTS = list(pollutants.names)
+    constants.ADDITIVE_POLLUTANTS = list(pollutants.additive)
+    constants.NON_ADDITIVE_POLLUTANTS = list(pollutants.non_additive)
+
+    def pull_distributed(vqip, of_type=None, tag="default"):
+        parent.requests.append((dict(vqip), tuple(of_type)))
+        return dict(parent.script())
+
+    parent = SimpleNamespace(requests=[], script=None, pull_distributed=pull_distributed)
+    keys = ("volume", *pollutants.names)
+    return WsimodIrrigation(
+        irrigation_coefficient=coefficient,
+        parent=parent,
+        surface="irr",
+        area=_IRRIGATION_AREA,
+        rooting_depth=_IRRIGATION_DEPTH,
+        pollutant_load={},
+        initial_storage={**dict.fromkeys(keys, 0.0), **(storage or {})},
+    )
+
+
+def _scripted(land: Land, requests: list, script) -> None:
+    """``land.pull_distributed`` answering from ``script()``, recording the active requests."""
+
+    def pull_distributed(vqip, of_type=None, tag="default", *, active):
+        if bool(active):
+            requests.append((float(vqip[..., 0]), tuple(of_type)))
+        return script(vqip, active)
+
+    land.pull_distributed = pull_distributed
+
+
+def _irrigation_scenarios(rng) -> list[dict]:
+    """Days before sowing (``None``), the sowing day, dry days with a demand (partly dry soil,
+    full soil: ``cmd <= FLOAT_ACCURACY``), wet days (no demand) and a demand below
+    ``FLOAT_ACCURACY``."""
+    out = []
+    for k in range(160):
+        kind = k % 8
+        days = {0: None, 1: 0}.get(kind, rng.choice((1, 3, 40)))
+        evaporation = rng.uniform(2.0, 9.0)
+        precipitation = rng.uniform(0.0, 1.5) if kind != 4 else evaporation + rng.uniform(0.1, 1.0)
+        storage = rng.uniform(3.0, 19.0) if kind not in (5, 6) else 20.0 + rng.uniform(0.0, 3.0)
+        if kind == 7:  # a demand below FLOAT_ACCURACY (coefficient 0.3)
+            precipitation = evaporation - 1e-12
+        out.append(
+            {
+                "days": days,
+                "evaporation": evaporation,
+                "precipitation": precipitation,
+                "storage": storage,
+                "supply": {n: rng.uniform(0.0, 0.4) for n in NUT.additive},
+                "share": rng.uniform(0.4, 1.0),
+                "pools": [[rng.uniform(0.0, 2.0), rng.uniform(0.0, 2.0)] for _ in POOLS],
+            }
+        )
+    return out
+
+
+def test_irrigate_equals_wsimods():
+    """``land.py:2347-2381``, bitwise, over days before sowing, the sowing day, dry days with a
+    demand, saturated days (``cmd <= FLOAT_ACCURACY``: the demand 0 and a zero-volume pull is
+    still made) and a supply carrying nutrients: the tank, the pools and the pull requests."""
+    rng = random.Random(1301)
+    theirs = _wsimod_irrigation(NUT)
+    land = _irrigation_land(irrigation_coefficient=0.3)
+    ours = land.surfaces[0]
+    seen = dict.fromkeys(("none", "sowing", "demand", "saturated", "small", "wet"), 0)
+    for k, case in enumerate(_irrigation_scenarios(rng)):
+        days = case["days"]
+        volume = {"volume": case["storage"], "temperature": 9.5, **case["supply"]}
+        theirs.days_after_sow = days
+        ours.days_after_sow = torch.tensor(-1.0 if days is None else float(days), dtype=F64)
+        theirs.evaporation = {**dict.fromkeys(_KEYS, 0.0), "volume": case["evaporation"]}
+        theirs.precipitation = {**dict.fromkeys(_KEYS, 0.0), "volume": case["precipitation"]}
+        ours.evaporation = NUT.to_vqip({"volume": case["evaporation"]})
+        ours.precipitation = NUT.to_vqip({"volume": case["precipitation"]})
+        theirs.storage = {**dict.fromkeys(_KEYS, 0.0), **volume}
+        ours.storage = NUT.to_vqip(volume)
+        _set_their_pools(theirs, case["pools"])
+        ours.nutrient_pool.storage = torch.tensor(case["pools"], dtype=F64)
+        theirs.parent.requests.clear()
+
+        # the supply is ``share`` of the request, with the case's nutrients
+        theirs.parent.script = lambda case=case: {
+            **dict.fromkeys(_KEYS, 0.0),
+            **case["supply"],
+            "volume": theirs.parent.requests[-1][0]["volume"] * case["share"],
+        }
+        requests: list = []
+        _scripted(
+            land,
+            requests,
+            lambda vqip, active, case=case: (
+                NUT.to_vqip({**case["supply"], "volume": float(vqip[..., 0]) * case["share"]})
+                * active[..., None]
+            ),
+        )
+        _nut_ctx(land)
+        theirs.irrigate()
+        ours.irrigate(active=TRUE)
+        assert [(v["volume"], t) for v, t in theirs.parent.requests] == requests, k
+        assert torch.equal(ours.storage, _vector(theirs.storage)), k
+        assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs)), k
+        pulled = [v for v, _ in requests]
+        demand = max(case["evaporation"] - case["precipitation"], 0) * 0.3
+        if days is None:
+            seen["none"] += 1
+        elif days == 0:
+            seen["sowing"] += 1
+        elif demand <= 1e-11:
+            seen["wet" if case["precipitation"] > case["evaporation"] else "small"] += 1
+        elif pulled == [0.0]:
+            seen["saturated"] += 1
+        else:
+            seen["demand"] += 1
+            assert pulled[0] == demand and requests[0][1] == (
+                "River",
+                "Node",
+                "Groundwater",
+                "Reservoir",
+            )
+    assert all(seen.values()), seen
+
+
+def test_irrigation_without_nitrate_leaves_the_pool_alone():
+    """L13, Y20: with the pollutants ``phosphate`` and ``temperature`` (no ``nitrate``) WSIMOD
+    raises ``KeyError: 'org-nitrogen'`` at ``land.py:2373`` on the first day with a demand; noodl
+    has no pool, forces the supply into the tank, and nothing else changes."""
+    import traceback
+
+    theirs = _wsimod_irrigation(SIMPLE, storage={"volume": 10.0, "temperature": 9.0})
+    theirs.days_after_sow = 3
+    theirs.evaporation = {"volume": 6.0, "phosphate": 0.0, "temperature": 0.0}
+    theirs.precipitation = {"volume": 1.0, "phosphate": 0.0, "temperature": 0.0}
+    theirs.parent.script = lambda: {"volume": 1.5, "phosphate": 0.3, "temperature": 9.0}
+    with pytest.raises(KeyError, match="org-nitrogen") as raised:
+        theirs.irrigate()
+    frame = traceback.extract_tb(raised.value.__traceback__)[-1]
+    assert frame.filename.endswith("land.py") and frame.lineno == 2373
+    land = _irrigation_land(SIMPLE, irrigation_coefficient=0.3)
+    ours = land.surfaces[0]
+    assert ours.nutrient_pool is None and ours.has_nutrients is False
+    ours.days_after_sow = torch.tensor(3.0, dtype=F64)
+    ours.storage = SIMPLE.to_vqip({"volume": 10.0, "temperature": 9.0})
+    ours.evaporation = SIMPLE.to_vqip({"volume": 6.0})
+    ours.precipitation = SIMPLE.to_vqip({"volume": 1.0})
+    requests: list = []
+    supply = SIMPLE.to_vqip({"volume": 1.5, "phosphate": 0.3})
+    _scripted(land, requests, lambda v, a: supply * a[..., None])
+    land.ctx = Ctx(SIMPLE, FA, torch.Size(()), day=0, node_names=["land"], record_decisions=True)
+    ours.irrigate(active=TRUE)
+    assert requests == [(5 * 0.3, ("River", "Node", "Groundwater", "Reservoir"))]
+    assert float(ours.storage[..., 0]) == 11.5 and float(ours.storage[..., 1]) == 0.3
+
+
+def test_irrigated_nitrite_enters_the_tank_and_not_the_pool():
+    """Spec, ``irrigate``: the pool takes organic N and P and ``ammonia + nitrate`` and
+    ``phosphate``; the supply's nitrite is in the tank only."""
+    land = _irrigation_land(irrigation_coefficient=0.3)
+    ours = land.surfaces[0]
+    ours.days_after_sow = torch.tensor(5.0, dtype=F64)
+    ours.storage = NUT.to_vqip({"volume": 5.0, "temperature": 9.0})
+    ours.evaporation = NUT.to_vqip({"volume": 6.0})
+    ours.precipitation = NUT.to_vqip({"volume": 0.0})
+    pools = [[0.1 * (i + 1), 0.2 * (i + 1)] for i in range(len(POOLS))]
+    ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+    supply = {"volume": 1.8, "nitrite": 0.25, "nitrate": 0.5, "ammonia": 0.125, "phosphate": 0.0625}
+    supply.update({"org-nitrogen": 0.375, "org-phosphorus": 0.03125, "temperature": 8.0})
+    _scripted(land, [], lambda v, a: NUT.to_vqip(supply) * a[..., None])
+    _nut_ctx(land)
+    ours.irrigate(active=TRUE)
+    assert float(ours.storage[..., NUT.column("nitrite")]) == 0.25
+    after = ours.nutrient_pool.storage
+    assert after[DI].tolist() == [pools[DI][0] + (0.125 + 0.5), pools[DI][1] + 0.0625]
+    assert after[DO].tolist() == [pools[DO][0] + 0.375, pools[DO][1] + 0.03125]
+    for pool in (FAST, HUMUS, ADS):
+        assert after[pool].tolist() == pools[pool]
+    assert float(after[..., 0].sum() - torch.tensor(pools)[..., 0].sum()) == pytest.approx(
+        0.125 + 0.5 + 0.375, abs=1e-15
+    )  # the 0.25 of nitrite is in no pool
+
+
+def test_irrigation_surfaces_irrigate_in_surface_order():
+    """``Land.apply_irrigation`` (``land.py:192-198``): every ``IrrigationSurface.irrigate`` in
+    surface order and nothing else; the return values are not summed."""
+    spec = [
+        SurfaceSpec("a", "IrrigationSurface", {}, {}, frozenset(), ()),
+        SurfaceSpec("lawn", "PerviousSurface", {}, {}, frozenset(), ()),
+        SurfaceSpec("b", "IrrigationSurface", {}, {}, frozenset(), ()),
+    ]
+    land = make_node(NodeSpec("land", "Land", "Land", {}, {}, spec), None, NUT)
+    order = []
+    for surface in land.surfaces:
+        surface.irrigate = lambda *, active, name=surface.name: order.append(name)
+    land.apply_irrigation(active=TRUE)
+    assert order == ["a", "b"]
+    assert land.running_inflow_mb.shape == (1 + NUT.K,) and not bool(land.running_inflow_mb.any())
+
+
+def _irrigation_mapping(**overrides) -> dict:
+    from tests.verification._wsimod_cases import _irrigation
+
+    mapping = _irrigation()
+    if overrides:
+        mapping["overrides"] = {
+            "nodes": {"farm": {"type_": "Land", "name": "farm", "surfaces": overrides}}
+        }
+    return mapping
+
+
+def test_the_climate_is_carried():
+    """D5: ``surface_climate`` is two rows per irrigation surface, evaporation then
+    precipitation, in m3. The state starts at 0, and after a day it holds that day's flows, which
+    an ``apply_irrigation`` before ``Land.run`` reads: sown on day 0, ``days_after_sow`` is still
+    0 when day 1 irrigates (``calc_crop_cover`` runs in ``Land.run``), so the first irrigation is
+    day 2's, from day 1's flows (day 2 itself is wet and has no demand of its own)."""
+    from noodl.apps.wsimod import build_model, initial_state, read_wsimod_config, wsimod_run
+    from tests.verification._wsimod_cases import _irrigation_early
+
+    mapping = _irrigation_early()
+    mapping["nodes"][0]["surfaces"][0]["sowing_day"] = 274  # the first date: sown on day 0
+    mapping["nodes"][0]["surfaces"][0]["initial_storage"] = _irrigation_dry_soil()
+    forcing = mapping["nodes"][0]["data_input_dict"]
+    for date, (rain, et0) in zip(
+        mapping["dates"], ((0.0, 0.004), (0.0, 0.004), (0.03, 0.001)), strict=False
+    ):
+        forcing[("precipitation", date)], forcing[("et0", date)] = rain, et0
+    model, _, _ = build_model(read_wsimod_config(mapping))
+    day = model.wsimod_day
+    assert day.state_labels("wsimod.surface_climate") == [
+        ("farm", f"surfaces.{s}", flow)
+        for s in ("irr_a", "irr_b")
+        for flow in ("evaporation", "precipitation")
+    ]
+    assert day.key_labels["wsimod.surface_climate"].unit == "m3"
+    assert initial_state(model)["wsimod.surface_climate"].tolist() == [0.0] * 4
+    results = wsimod_run(model, days=4)
+    evaporation, precipitation = results.surface["evaporation"], results.surface["precipitation"]
+    state = day.last_state["wsimod.surface_climate"]
+    assert state.tolist() == [
+        float(evaporation[3, 0]),
+        float(precipitation[3, 0]),
+        float(evaporation[3, 1]),
+        float(precipitation[3, 1]),
+    ]
+    into = [i for i, name in enumerate(results.arc_names) if name.endswith("_to_farm")]
+    supplied = results.arc_flow[:, into].sum(dim=-1)
+    demand = [max(float(evaporation[d, 0]) - float(precipitation[d, 0]), 0) * 0.3 for d in range(4)]
+    assert supplied[:2].tolist() == [0.0, 0.0]  # the climate is 0, then the sowing day's
+    assert demand[1] > 0 and demand[2] == 0.0  # day 2's own flows have no demand
+    assert float(supplied[2]) == pytest.approx(demand[1], rel=1e-9)  # yesterday's flows
+
+
+def _irrigation_dry_soil() -> dict:
+    from tests.verification._wsimod_cases import _soil_water
+
+    return _soil_water(1200.0)  # below the capacity of 2000 m3: a moisture deficit
+
+
+def test_irrigation_coefficient_override_equals_wsimods():
+    """The override (``land.py:2334-2345``) is a driver ``"wsimod.IrrigationSurface.
+    irrigation_coefficient"`` with the constructor's value (default 0.1) per surface, and the
+    merged value is WSIMOD's."""
+    pytest.importorskip("wsimod")
+    from noodl.apps.wsimod import build_model, initial_drivers
+    from tests.verification._wsimod_reference import wsimod_model
+
+    mapping = _irrigation_mapping(irr_a={"irrigation_coefficient": 0.45})
+    model, _, _ = build_model(read_wsimod_config(mapping))
+    key = "wsimod.IrrigationSurface.irrigation_coefficient"
+    assert initial_drivers(model)[key].tolist() == [0.45, 0.1]
+    labels = model.wsimod_day._drivers[key].labels
+    assert labels == [("farm", "irr_a"), ("farm", "irr_b")]
+    farm = wsimod_model(mapping).nodes["farm"]
+    assert [farm.get_surface(n).irrigation_coefficient for n in ("irr_a", "irr_b")] == [0.45, 0.1]
+    # without the override the constructor's 0.3 and the default 0.1
+    base, _, _ = build_model(read_wsimod_config(_irrigation_mapping()))
+    assert initial_drivers(base)[key].tolist() == [0.3, 0.1]
+
+
+def test_quantity_only_reads_the_irrigation_coefficient():
+    """Y72: ``irrigation_coefficient`` sets the demand, so a quantity-only run reads it and does
+    not list it; the other growing parameters it is not given with are listed as before."""
+    from noodl.apps.wsimod import build_model
+
+    mapping = _irrigation_mapping(irr_a={"irrigation_coefficient": 0.45, "kfr": 100.0})
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    listed = model.ignored_by_quantity_only
+    assert "farm.surfaces.irr_a.kfr" in listed
+    assert not any("irrigation_coefficient" in item for item in listed)
+    assert not any("nutrient_pool" in item for item in listed)
+
+
+def test_the_irrigation_surface_is_a_schema_class():
+    """Constructor chain (``land.py:2317``): ``irrigation_coefficient`` first, ``GrowingSurface``'s
+    keywords after; the override is the coefficient, and ``depth`` is derived."""
+    schema = SURFACE_SCHEMAS["IrrigationSurface"]
+    assert schema.parameters["irrigation_coefficient"] == 0.1
+    assert list(schema.parameters)[:1] == ["irrigation_coefficient"] or (
+        "irrigation_coefficient" in schema.parameters
+    )
+    assert "irrigation_coefficient" in schema.override_keys
+    assert set(schema.override_keys) >= set(SURFACE_SCHEMAS["GrowingSurface"].override_keys)
+    assert "depth" in schema.derived and "depth" not in schema.override_keys

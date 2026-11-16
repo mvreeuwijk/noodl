@@ -216,6 +216,8 @@ _CONSTRUCTORS: dict[str, tuple[dict[str, object], str | None]] = {
         },
         "PerviousSurface",
     ),
+    # land.py:2317: the first keyword, ahead of GrowingSurface's
+    "IrrigationSurface": ({"irrigation_coefficient": 0.1}, "GrowingSurface"),
     # arcs.py
     "Arc": (
         {
@@ -377,6 +379,7 @@ _OVERRIDES: dict[str, frozenset[str]] = {
             "rooting_depth",
         }
     ),
+    "IrrigationSurface": frozenset({"irrigation_coefficient"}),  # land.py:2334-2345
     "Arc": frozenset({"capacity", "preference"}),  # arcs.py:87-96
 }
 
@@ -392,12 +395,14 @@ _RENAMED = {
 _NOT_OVERRIDES = {
     "ImperviousSurface": frozenset({"depth"}),
     "GrowingSurface": frozenset({"depth"}),
+    "IrrigationSurface": frozenset({"depth"}),
 }
 _DERIVED = {
     "Surface": frozenset({"capacity", "parent"}),
     "ImperviousSurface": frozenset({"capacity", "parent", "depth"}),
     "PerviousSurface": frozenset({"capacity", "parent"}),
     "GrowingSurface": frozenset({"capacity", "parent", "depth"}),
+    "IrrigationSurface": frozenset({"capacity", "parent", "depth"}),
 }
 
 
@@ -454,7 +459,13 @@ def _schema(name: str) -> ClassSchema:
 NODE_SCHEMAS: dict[str, ClassSchema] = {name: _schema(name) for name in _NODE_CLASSES}
 SURFACE_SCHEMAS: dict[str, ClassSchema] = {
     name: _schema(name)
-    for name in ("Surface", "ImperviousSurface", "PerviousSurface", "GrowingSurface")
+    for name in (
+        "Surface",
+        "ImperviousSurface",
+        "PerviousSurface",
+        "GrowingSurface",
+        "IrrigationSurface",
+    )
 }
 ARC_SCHEMAS: dict[str, ClassSchema] = {
     name: _schema(name)
@@ -473,7 +484,6 @@ ARC_SCHEMAS: dict[str, ClassSchema] = {
 
 # Classes WSIMOD has and this port does not, with where they go (spec, Scope).
 OUT_OF_SCOPE: dict[str, str] = {
-    "IrrigationSurface": "3c",
     "GardenSurface": "3c",
     "VariableAreaSurface": "3c",
     "EnfieldFoulSewer": "refused (W4: undefined storm_exchange, sewer.py:288-291)",

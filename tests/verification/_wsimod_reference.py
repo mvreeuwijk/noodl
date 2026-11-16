@@ -561,10 +561,14 @@ def _wsimod_store(node, path: str):
     (``<tank>.internal_arc.register``/``.present``) is WSIMOD's ``queue`` dict (the rows, by
     time) and its key set (``tanks.py:481-486``, ``arcs.py:567``), and a growing surface's
     ``days_after_sow`` of ``None`` (unsown) is noodl's ``-1`` (D6), and its ``nutrient_pool`` is
-    the ``(5, 2)`` list of its five stores' ``N`` and ``P`` (D4)."""
+    the ``(5, 2)`` list of its five stores' ``N`` and ``P`` (D4), and an irrigation surface's
+    ``surface_climate`` the volumes ``[evaporation, precipitation]`` (D5)."""
     if path.endswith(".days_after_sow"):
         value = _attribute(node, path)
         return -1 if value is None else value
+    if path.endswith(".surface_climate"):  # the two flows' volumes (D5)
+        surface = _attribute(node, path.rsplit(".", 1)[0])
+        return [surface.evaporation["volume"], surface.precipitation["volume"]]
     if path.endswith(".nutrient_pool"):  # the five stores, (5, 2): pools in order, N then P
         pools = _attribute(node, path).pools
         return [[pool.storage[n] for n in "NP"] for pool in pools]

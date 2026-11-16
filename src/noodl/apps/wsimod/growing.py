@@ -146,8 +146,10 @@ __all__ = [
     "GROWING_DEFAULTS",
     "NUTRIENT_POLLUTANTS",
     "STRUCTURE_DEFAULTS",
+    "IRRIGATION_TYPES",
     "CalendarDay",
     "GrowingSurface",
+    "IrrigationSurface",
     "quick_interp",
 ]
 
@@ -1517,3 +1519,113 @@ class GrowingSurface(PerviousSurface):
 
 
 SURFACE_CLASSES["GrowingSurface"] = GrowingSurface
+
+# land.py:2363-2366: where an irrigation surface's water comes from
+IRRIGATION_TYPES = ("River", "Node", "Groundwater", "Reservoir")
+
+
+class IrrigationSurface(GrowingSurface):
+    """``IrrigationSurface`` (``land.py:2314-2381``): a growing surface that draws the water its
+    crop lacks from the ``Land``'s in-arcs.
+
+    ``irrigation_coefficient`` (``:2317``, default 0.1; an override, ``:2334-2345``) is the
+    proportion of the area irrigated times the proportion of the demand met; it is a driver,
+    ``"wsimod.IrrigationSurface.irrigation_coefficient"``, read in quantity-only runs too, so it
+    is never listed as ignored (Y72). The surface's climate (the volumes of its last ``ihacres``
+    flows) is carried (``surface_climate``, D5): ``Land.apply_irrigation`` runs wherever the
+    orchestration puts it, and before ``Land.run`` it reads the previous day's flows (0 on day
+    0).
+
+    The decisions are ``S/irrigate/{crop,deficit,demand,saturated}``, ``S`` being
+    ``node:N/surfaces.<s>``, then the pull's own sites and the tank's ``get_excess`` sites."""
+
+    surface_class: ClassVar[str] = "IrrigationSurface"
+    is_irrigated: ClassVar[bool] = True
+    carried_fields: ClassVar[tuple[str, ...]] = (*GrowingSurface.carried_fields, "surface_climate")
+    parameter_defaults: ClassVar[dict[str, float]] = {
+        **GrowingSurface.parameter_defaults,
+        "irrigation_coefficient": 0.1,
+    }
+
+    @classmethod
+    def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """:meth:`GrowingSurface.state_fields` and the carried climate (D5)."""
+        return (*super().state_fields(nutrients=nutrients), "surface_climate")
+
+    @property
+    def surface_climate(self) -> Tensor:
+        """The volumes of ``evaporation`` and ``precipitation``, ``(..., 2)`` (D5, a view)."""
+        return torch.stack(
+            torch.broadcast_tensors(self.evaporation[..., 0], self.precipitation[..., 0]), dim=-1
+        )
+
+    @surface_climate.setter
+    def surface_climate(self, value: Tensor) -> None:
+        """Both flows rebuilt as ``v_change_vqip(empty, volume)`` (``land.py:1029-1031``)."""
+        value = _f64(value)
+        self.evaporation = v_change_vqip(self.p, self.ctx.empty(), value[..., 0])
+        self.precipitation = v_change_vqip(self.p, self.ctx.empty(), value[..., 1])
+
+    def irrigate(self, *, active: Tensor) -> None:
+        """``land.py:2347-2381``. With a crop (``days_after_sow > 0``; ``crop``) the demand is
+        ``max(evaporation - precipitation, 0) * irrigation_coefficient`` (``deficit``, ``:2352``);
+        above ``FLOAT_ACCURACY`` (``demand``) it is set to 0 where the soil's moisture deficit
+        ``get_excess / area`` is at most ``FLOAT_ACCURACY`` (``saturated``, ``:2357``), and the
+        parent pulls it (a zero-volume pull is still made, ``:2363``) from its in-arcs of
+        :data:`IRRIGATION_TYPES`. The supply is forced into the tank (``:2369``), where the
+        irrigation water arrives through the ``Land``'s in-arcs (3a's balance counts it, and
+        ``irrigate``'s return is never summed, ``:197-198``).
+
+        The pool takes the supply's organic N and P into the dissolved organic pool and its
+        ``ammonia + nitrate`` and ``phosphate`` into the dissolved inorganic pool
+        (``:2372-2381``), only with ``nitrate`` a pollutant: WSIMOD reads five pollutant keys
+        whatever the pollutants and raises ``KeyError`` (L13, Y20). The irrigated nitrite
+        enters the tank and not the pool."""
+        ctx = self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("irrigate")
+        site = f"{self.site}/irrigate"
+        crop = active & ctx.decide(
+            f"{site}/crop", self.days_after_sow, ">", 0.0, active=active, call=call
+        )
+        deficit = dmax(
+            ctx,
+            f"{site}/deficit",
+            self.evaporation[..., 0] - self.precipitation[..., 0],
+            0.0,
+            active=crop,
+            call=call,
+        )
+        demand = deficit * self._param("irrigation_coefficient")
+        wanted = crop & ctx.decide(f"{site}/demand", demand, ">", ctx.fa, active=crop, call=call)
+        moisture = self.get_excess(active=wanted)[..., 0] / self.area
+        saturated = wanted & ctx.decide(
+            f"{site}/saturated", moisture, "<=", ctx.fa, active=wanted, call=call
+        )
+        demand = torch.where(saturated, torch.zeros_like(demand), demand)
+        supplied = self.parent.pull_distributed(
+            self._volume_vqip(demand), of_type=IRRIGATION_TYPES, active=wanted
+        )
+        self.push_storage(supplied, force=True, active=wanted)
+        pool = self.nutrient_pool
+        if pool is None:  # Y20
+            return
+        column = self.p.column
+        organic = torch.stack(
+            torch.broadcast_tensors(
+                supplied[..., column("org-nitrogen")], supplied[..., column("org-phosphorus")]
+            ),
+            dim=-1,
+        )
+        inorganic = torch.stack(
+            torch.broadcast_tensors(
+                supplied[..., column("ammonia")] + supplied[..., column("nitrate")],
+                supplied[..., column("phosphate")],
+            ),
+            dim=-1,
+        )
+        pool.allocate_organic_irrigation(organic, active=wanted)
+        pool.allocate_inorganic_irrigation(inorganic, active=wanted)
+
+
+SURFACE_CLASSES["IrrigationSurface"] = IrrigationSurface

@@ -1717,6 +1717,214 @@ def _surface_overrides() -> dict:
     }
 
 
+# --- IrrigationSurface (Task 13; spec, Verification 3) ------------------------------------------
+_IRRIGATION_DAYS = 120  # Y68: past both sowings (run days 16 and 36) and several dry spells
+
+
+def _irrigated(name: str, **values) -> dict:
+    return {"surface": name, "type_": "IrrigationSurface", **values}
+
+
+def _irrigation_water(volume: float, scale: float = 1.0, temperature: float = 9.0) -> dict:
+    """A source's ``initial_storage``: ``volume`` m3 whose nutrient concentrations are
+    ``scale`` times :func:`_soil_water`'s (kg), so the supply carries nitrate, ammonia, nitrite,
+    phosphate and organic N and P into the pools."""
+    water = _soil_water(volume, temperature)
+    return {k: v if k in ("volume", "temperature") else v * scale for k, v in water.items()}
+
+
+def _irrigation_forcing(dates: list[str], seed: int) -> dict:
+    """A ``Land``'s forcing for irrigation: wet spells (soil full: the saturated test), dry
+    spells under a high ``et0`` (a demand) and mixed days."""
+    rng = random.Random(seed)
+    data = {}
+    for k, date in enumerate(dates):
+        wet = k % 40 < 8
+        dry = 8 <= k % 40 < 30
+        depth = rng.uniform(0.012, 0.03) if wet else 0.0 if dry else rng.choice((0.0, 1e-3, 4e-3))
+        data[("precipitation", date)] = round(depth, 7)
+        data[("et0", date)] = round(rng.uniform(2e-3, 6e-3), 7)
+        data[("temperature", date)] = round(8.0 + 10.0 * math.sin(k / 9) + rng.uniform(-2, 2), 4)
+    return data
+
+
+def _irrigation(
+    *, days: int = _IRRIGATION_DAYS, orchestration: list[dict] | None = None, seed: int = 130
+) -> dict:
+    """An ``IrrigationSurface`` pair fed by a ``River``, a ``Groundwater`` and a ``Reservoir``
+    through the ``Land``'s in-arcs (``land.py:2363-2366``), the eight pollutants so that the
+    supply's nutrients reach the pools (``:2372-2381``). ``irr_a`` (coefficient 0.3) is sown on
+    day 290 (run day 16) and ``irr_b`` (the default 0.1) on day 310 (run day 36): the days before
+    sowing, the sowing day itself (no crop yet, ``days_after_sow = 0``), dry days with demand and
+    saturated days (``cmd <= FLOAT_ACCURACY``: a zero-volume pull, ``:2357-2363``) all occur, and
+    the second surface pulls from the sources the first has drawn on. The default orchestration
+    puts ``apply_irrigation`` after the day's ``Land.run`` (as WSIMOD's own configurations do);
+    ``irrigation_early`` puts it first (D22)."""
+    dates = _land_dates(days)
+    inputs = _monthly(_GROWING_INPUTS, "2003-10", 5)
+    crop = {
+        "area": 1e4,
+        "rooting_depth": 0.5,
+        "ET_depletion_factor": 0.5,
+        "harvest_day": 250,
+        "infiltration_capacity": 0.02,
+        "initial_soil_storage": dict(_SOIL),
+        "data_input_dict": inputs,
+        **_SPRING_STAGES,
+    }
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "farm",
+                [
+                    _irrigated(
+                        "irr_a",
+                        irrigation_coefficient=0.3,
+                        sowing_day=290,
+                        initial_storage=_soil_water(3400.0),
+                        **crop,
+                    ),
+                    _irrigated(
+                        "irr_b",
+                        sowing_day=310,
+                        initial_storage=_soil_water(2800.0, 10.0),
+                        **{**crop, "area": 8000.0},
+                    ),
+                ],
+                _irrigation_forcing(dates, seed),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("brook_src", "Catchment")
+            | {"data_input_dict": _irrigation_catchment(dates, seed + 1)},
+            _river(
+                "stream",
+                damp=0.5,
+                length=2000.0,
+                width=2.0,
+                velocity=1728.0,
+                initial_storage=_irrigation_water(400.0, 0.6, 7.0),
+                # the biochemistry's forcing (nitrate is a pollutant); no discharge is called
+                data_input_dict={("temperature", d): 7.0 for d in dates},
+            ),
+            _store(
+                "well",
+                "Groundwater",
+                capacity=1e5,
+                residence_time=20.0,
+                initial_storage=_irrigation_water(600.0, 1.5, 11.0),
+            ),
+            _store(
+                "tank", "Reservoir", capacity=300.0, initial_storage=_irrigation_water(250.0, 1.0)
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_stream", "brook_src", "stream"),
+            _arc("stream_to_farm", "stream", "farm", preference=2.0),
+            _arc("well_to_farm", "well", "farm", preference=1.0),
+            _arc("tank_to_farm", "tank", "farm", preference=0.5, capacity=40.0),
+            _arc("farm_to_aquifer", "farm", "aquifer"),
+            _arc("farm_to_brook", "farm", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": orchestration
+        or [
+            {"Land": "run"},
+            {"Groundwater": "distribute"},
+            {"Land": "apply_irrigation"},
+            {"Catchment": "route"},
+        ],
+    }
+
+
+def _irrigation_catchment(dates: list[str], seed: int) -> dict:
+    """The ``River``'s upstream: a small flow with nutrients, so that its supply changes."""
+    rng = random.Random(seed)
+    data = {}
+    for date in dates:
+        data[("flow", date)] = round(rng.uniform(4.0, 14.0), 6)
+        data[("temperature", date)] = round(rng.uniform(5.0, 12.0), 4)
+        for pollutant, concentration in (
+            ("ammonia", 1e-3),
+            ("nitrite", 2e-4),
+            ("nitrate", 5e-3),
+            ("phosphate", 3e-4),
+            ("org-nitrogen", 1e-3),
+            ("org-phosphorus", 2e-4),
+            ("solids", 0.0),
+        ):
+            data[(pollutant, date)] = round(concentration * rng.uniform(0.8, 1.2), 9)
+    return data
+
+
+def _irrigation_early() -> dict:
+    """D22: ``Land.apply_irrigation`` before ``Land.run`` in the orchestration, so ``irrigate``
+    reads the surfaces' flows of the previous day (the carried climate, D5; 0 on day 0)."""
+    return _irrigation(
+        orchestration=[
+            {"Land": "apply_irrigation"},
+            {"Land": "run"},
+            {"Groundwater": "distribute"},
+            {"Catchment": "route"},
+        ],
+        seed=132,
+    )
+
+
+_IRRIGATION_CRASH_DAYS = 40
+
+
+def _irrigation_without_nutrients() -> dict:
+    """noodl only, L13: with the pollutants ``phosphate`` and ``temperature`` (no ``nitrate``) the
+    first day with a demand raises ``KeyError: 'org-nitrogen'`` at ``land.py:2373`` (the pool
+    update reads five pollutant keys whatever the pollutants), where noodl updates no pool
+    (Y20). One ``Reservoir`` supplies; the surface is sown on run day 4 and the forcing is dry."""
+    days = _IRRIGATION_CRASH_DAYS
+    dates = _land_dates(days)
+    forcing = {}
+    for k, date in enumerate(dates):
+        forcing[("precipitation", date)] = 0.012 if k < 4 else 0.0
+        forcing[("et0", date)] = 0.004
+        forcing[("temperature", date)] = 10.0 + (k % 4)
+    return {
+        **_SIMPLE,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "farm",
+                [
+                    _irrigated(
+                        "irr",
+                        area=5000.0,
+                        rooting_depth=0.5,
+                        ET_depletion_factor=0.5,
+                        sowing_day=278,
+                        irrigation_coefficient=0.4,
+                        initial_storage=1000.0,
+                        **_SPRING_STAGES,
+                    )
+                ],
+                forcing,
+            ),
+            _store("tank", "Reservoir", capacity=500.0, initial_storage=400.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("tank_to_farm", "tank", "farm"),
+            _arc("farm_to_brook", "farm", "brook"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Land": "apply_irrigation"}],
+    }
+
+
 _GROWING_AUTUMN_DAYS = 300  # Y68: past the harvest (run day 291); 400 under slow
 _GROWING_AUTUMN_SLOW_DAYS = 400
 
@@ -3210,6 +3418,29 @@ CASES: dict[str, Case] = {
         days=_SURFACE_OVERRIDES_DAYS,
         scale=2000.0,
         replay=("land",),
+    ),
+    "irrigation": Case(
+        build=_irrigation,
+        days=_IRRIGATION_DAYS,
+        scale=3400.0,
+        replay=("farm",),
+        bookkeeping_days=60,  # Y68: past both sowings, with demands and saturated days
+    ),
+    "irrigation_early": Case(
+        build=_irrigation_early,
+        days=_IRRIGATION_DAYS,
+        scale=3400.0,
+        replay=("farm",),
+        bookkeeping_days=60,  # Y68: past both sowings, with demands and saturated days
+    ),
+    "irrigation_without_nutrients": Case(
+        build=_irrigation_without_nutrients,
+        days=_IRRIGATION_CRASH_DAYS,
+        scale=1000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("KeyError", "land.py:2373"),
+        crash_day=5,  # sown on run day 4: the demand starts on day 5
     ),
     "growing_autumn": Case(
         build=_growing_autumn,

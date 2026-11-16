@@ -412,7 +412,6 @@ REFUSALS = [
     (_with(dates=["2000-01-01 12:00"]), "12:00"),
     (_with(pollutants=["a"], additive_pollutants=["b"], non_additive_pollutants=[]), "'b'"),
     (_node(type_="EnfieldFoulSewer"), "EnfieldFoulSewer"),
-    (_node(type_="Land", surfaces=[{"type_": "IrrigationSurface"}]), "3c"),
     (_node(type_="Land", surfaces=[{"type_": "GardenSurface"}]), "3c"),
     (_node(type_="Land", surfaces=[{"type_": "VariableAreaSurface"}]), "3c"),
     (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "capacity": 1}]), "capacity"),

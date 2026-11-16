@@ -494,6 +494,43 @@ non-positive number in WSIMOD. These parameter checks run at build in either mod
 every batched instance when the day is bound, but only with pollutants on: a quantity-only run
 has no pool, so nothing reads them.
 
+### The irrigation surface
+
+An `IrrigationSurface` is a `GrowingSurface` that draws the water its crop lacks from the `Land`'s
+in-arcs (`land.py:2314-2381`). `Land.apply_irrigation` runs every one's `irrigate`, in surface
+order (`:192-198`); the default orchestration of WSIMOD's own configurations puts the
+`Land: apply_irrigation` step after `Land: run`. With a crop (`days_after_sow > 0`: not on the
+sowing day) the demand is `max(evaporation - precipitation, 0) * irrigation_coefficient` of the
+surface's last `ihacres` (`:2352`). Above `FLOAT_ACCURACY`, where the soil's moisture deficit
+`get_excess / area` is at most `FLOAT_ACCURACY` (a saturated soil) the demand becomes 0, and the
+`Land` pulls it (a zero-volume pull is still made, and 3a transcribes what that does) from its
+in-arcs of type `River`, `Node`, `Groundwater` and `Reservoir`. The supply is forced into the tank.
+The irrigation water arrives through the `Land`'s arcs, so the node balance of 3a counts it;
+`irrigate`'s return value is never summed (`:197-198`).
+
+With `nitrate` a pollutant the pool takes the supply's `org-nitrogen` and `org-phosphorus` into
+the dissolved organic pool and its `ammonia + nitrate` and `phosphate` into the dissolved
+inorganic pool (`:2372-2381`). The irrigated nitrite enters the tank and not the pool, another
+pool-tank gap like those above. **WSIMOD reads those five pollutant keys whatever the pollutants
+(L13):** without `org-nitrogen` (or any of them) it raises `KeyError` on the first day with a
+demand (`land.py:2373`). Every other pool access sits behind the `nitrate` switch, so noodl does the
+evident intent and updates the pool only when `nitrate` is a pollutant (Y20); without it there is
+no pool and nothing else changes (case `irrigation_without_nutrients`).
+
+`irrigation_coefficient` (default 0.1, the proportion of the area irrigated times the proportion of
+the demand met) is the driver `"wsimod.IrrigationSurface.irrigation_coefficient"` `(..., n)`, and
+an override (`:2334-2345`). It sets the volumes, so a quantity-only run reads it and does not list
+it as ignored.
+
+**The climate is carried.** `evaporation` and `precipitation` are the surface's flows from its
+last `ihacres`. When `Land.apply_irrigation` runs after `Land.run` they are the same day's; in an
+orchestration that runs it first they are the previous day's (0 on day 0), so their volumes are
+state: `"wsimod.surface_climate"` (m3), two rows per irrigation surface,
+`(land, "surfaces.<name>", "evaporation")` then `(land, "surfaces.<name>", "precipitation")`. The
+state holds no water (the tank has it), so the mass balance leaves it out. Because
+`calc_crop_cover` runs in `Land.run`, an `apply_irrigation` before it still sees yesterday's
+`days_after_sow`: a crop sown on day 0 is first irrigated on day 2.
+
 ### The soil temperature
 
 With a `temperature` pollutant, a `PerviousSurface` moves its storage's temperature every day
@@ -810,6 +847,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
 | `"wsimod.nutrient_pool"` | `(node, "surfaces.<name>.nutrient_pool", pool, nutrient)` | every growing surface's five nutrient pools, `N` then `P` of each (kg), `(..., 10 n_growing)`, with `nitrate` a pollutant and pollutants on |
 | `"wsimod.days_after_sow"`, `"wsimod.crop_cover"`, `"wsimod.ground_cover"` | `(node, "surfaces.<name>")` | every growing surface's days since sowing (`-1` before sowing: WSIMOD's `None`; d) and its crop and ground cover (-), `(..., n_growing)`, in both modes |
+| `"wsimod.surface_climate"` | `(node, "surfaces.<name>", "evaporation" or "precipitation")` | every irrigation surface's last evaporation and precipitation volumes (m3), `(..., 2 n_irrigation)`, in both modes |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
 volume with no pollutants and a mapping a VQIP by name, `{"volume": 5.0, "phosphate": 0.1}`; a
@@ -837,7 +875,7 @@ series — are listed by name in
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
 and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) the same configuration is
 refused if a process that is not ported yet would change the pollutants (the
-irrigation, garden and variable-area surfaces, 3c): until then, such configurations need `pollutants=False`. A surface's
+garden and variable-area surfaces, 3c): until then, such configurations need `pollutants=False`. A surface's
 `pollutant_load` is live (`Surface.simple_deposition`); a key that is not a run pollutant is listed in
 `model.unread`, as `<land>.surfaces.<surface>.pollutant_load.<key>`.
 
@@ -931,6 +969,7 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface`: the soil temperature factor is `T / 5` below 5 °C, not HYPE's product, so it jumps at 5 °C (L12) | reproduced, documented | `test_the_soil_factors_equal_wsimods` |
 | `GrowingSurface`: a float `initial_soil_storage`, which the docstring allows, raises `TypeError` (L16) | refused | `test_initial_soil_storage_refusals` |
 | `NutrientPool`: its parameters cannot be configured (L20) | drivers with WSIMOD's defaults; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` |
+| `IrrigationSurface.irrigate` reads five pollutant keys whatever the pollutants (L13) | the pool is updated only when `nitrate` is a pollutant (Y20) | `test_irrigation_without_nitrate_leaves_the_pool_alone`; `test_case_runs_where_wsimod_crashes[irrigation_without_nutrients-pollutants]` (WSIMOD raises `KeyError` at `land.py:2373` on day 5, the first day with a demand) |
 | `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]`; `test_wsimod_erosion_without_solids_raises` |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
@@ -1057,7 +1096,7 @@ unloaded medians differ by 5 %).
 ## Limitations
 
 - **Sub-project 3c.** The processes that change a pollutant (the land's nutrient pools, `GrowingSurface`, the garden and
-  irrigation surfaces) are refused unless neutral; a surface's `pollutant_load` and monthly deposition data are live. The soil temperature, the treatment works'
+  garden surfaces) are refused unless neutral; a surface's `pollutant_load` and monthly deposition data are live. The soil temperature, the treatment works'
   pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
   `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with nutrient pools needs `pollutants=False`.
 - **Input and output.** A configuration is read, not written. `extensions` and
@@ -1150,7 +1189,15 @@ has to be debugged, not admitted.
   `GROWING_PRINT_C = 2`. Those four cases are mapped (`test_the_store_bounded_prints`: each
   prints such lines); every other case, the crash cases' days before their crash included, is
   unmapped and so asserts that it prints none.
-- **Crashes** (`test_case_runs_where_wsimod_crashes*`): ten cases where WSIMOD raises. Three run
+- **Irrigation** (`irrigation`, `irrigation_early`, 120 days; `irrigation_without_nutrients`, the crash case below):
+  two `IrrigationSurface`s sown on run days 16 and 36 and fed by a `River`, a `Groundwater` and a
+  `Reservoir` through the `Land`'s in-arcs, with the eight pollutants. Soils start above capacity,
+  so the days before sowing, the sowing day, dry days with a demand and saturated days (a
+  zero-volume pull) all occur (asserted from the decisions of both cases); `irrigation_early`
+  runs `apply_irrigation` before `Land.run` (the carried climate). Both are bitwise equal to
+  WSIMOD, and the `Land` replay (its `apply_irrigation` call, with its pulls and replies) is
+  bitwise. WSIMOD prints no mass-balance line on either.
+- **Crashes** (`test_case_runs_where_wsimod_crashes*`): eleven cases where WSIMOD raises. Three run
   in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,
   `nonresidential_demand`). For two, a decaying `Groundwater` and `QueueGroundwater` without a
   `filename` override (`decay_groundwater`, `decay_queue_groundwater`), noodl refuses by name
@@ -1163,7 +1210,8 @@ has to be debugged, not admitted.
   0, so `ihacres` pulls through `pull_storage`: L5, `:1460`, day 0), `growing_zero_n` and
   `growing_nitrite_only` (no rain on day 0, so the transformation divides first: L6, `:1758`, day
   0) and `growing_empty_soil` (an empty soil, `ET_depletion_factor = 0.5`, dry deposition and a
-  crop sown on the first day: L7, `:1899`, day 1).
+  crop sown on the first day: L7, `:1899`, day 1). A sixth, `irrigation_without_nutrients` (L13, `KeyError` at `:2373`, day 5), runs a surface with the
+  pollutants `phosphate` and `temperature` and no event: noodl updates no pool.
 - **Gradients** (`tests/verification/test_wsimod_gradients.py`): 49 entries (22 from 3a, 27 from
   3b), central differences at a relative step of 1e-6, the two perturbed runs' decision outcomes
   identical. The worst relative disagreement is 1.5e-7 (`River.T_wdays [nitrate]`; then

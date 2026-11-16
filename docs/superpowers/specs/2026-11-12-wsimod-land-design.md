@@ -776,6 +776,9 @@ if days_after_sow:                                                            # 
 - `evaporation` and `precipitation` are the surface's flows from its last `ihacres`. In the
   default orchestration that is the same day's `Land.run`; in another orchestration it can be
   the previous day's, so they are carried (State).
+- `days_after_sow` is also the previous day's when `apply_irrigation` runs before `Land.run`
+  (`calc_crop_cover` runs in `Land.run`): a crop sown on day 0 is first irrigated on day 2, from
+  day 1's flows (Task 13, `test_the_climate_is_carried`).
 - A demand set to 0 by the saturated-soil test still makes a zero-volume pull (`:2363`), which
   3a's distribute transcribes.
 - The irrigation water arrives through the `Land`'s in-arcs, so 3a's node balance counts it.

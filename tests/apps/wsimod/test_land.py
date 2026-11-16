@@ -105,8 +105,9 @@ def volume(x) -> float:
 def test_the_classes_are_registered_under_the_names_wsimod_gives_them():
     assert NODE_CLASSES["Land"] is Land and Land.wsimod_type == "Land"
     assert Land.step_methods == ("run", "apply_irrigation")
-    # GrowingSurface registers itself when ``growing`` is imported (D2)
-    assert {k: v for k, v in SURFACE_CLASSES.items() if k != "GrowingSurface"} == {
+    # the growing classes register themselves when ``growing`` is imported (D2)
+    growing = {"GrowingSurface", "IrrigationSurface"}
+    assert {k: v for k, v in SURFACE_CLASSES.items() if k not in growing} == {
         "Surface": Surface,
         "ImperviousSurface": ImperviousSurface,
         "PerviousSurface": PerviousSurface,
@@ -584,7 +585,9 @@ def test_garden_demand_is_zero_without_a_garden_surface():
     assert volume(homes.total_demand) == 1 * 0.12  # the house demand alone
 
 
-def test_apply_irrigation_does_nothing():
+def test_apply_irrigation_without_an_irrigation_surface_does_nothing():
+    """``land.py:192-198``: ``irrigation_functions`` holds only ``lambda: None`` unless the land
+    has an ``IrrigationSurface`` (the irrigating one is tested in ``test_growing.py``)."""
     land = make_land([surface("PerviousSurface", "lawn", area=100.0)])
     day(land)
     before = {k: v.clone() for k, v in land.stores().items()}

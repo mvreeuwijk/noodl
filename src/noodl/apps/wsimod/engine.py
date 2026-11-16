@@ -118,6 +118,10 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   transformation, the uptake and denitrification pull from the tank through ``pull_pollutants``
   (its ``clip`` sites), and record the event ``"nutrient_pool_not_tracking"`` where its clamp
   removed more than ``FLOAT_ACCURACY`` (WSIMOD's dead check, L10, Y16).
+  An ``IrrigationSurface`` adds ``node:N/surfaces.<name>/irrigate/{crop,deficit,demand,saturated}``
+  (``:2350``, ``:2352``'s ``max``, ``:2356``, ``:2357``), the ``Land``'s ``pull_distributed``
+  sites for its pull and the tank's ``get_excess`` sites; ``Land.apply_irrigation`` makes none of
+  its own (``:192-198``).
   Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's

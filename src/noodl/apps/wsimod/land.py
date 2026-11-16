@@ -1014,7 +1014,13 @@ class Land(Node):
 
     # --- orchestration --------------------------------------------------------------------------
     def apply_irrigation(self, *, active: Tensor) -> None:
-        """``land.py:192-198``: only ``lambda: None`` (``:97``); irrigation surfaces are 3c."""
+        """``land.py:192-198``: every irrigation surface's ``irrigate`` in surface order
+        (``irrigation_functions``, ``:97``, ``:115-118``; the first entry is ``lambda: None``).
+        The functions' return values are not summed."""
+        active = torch.as_tensor(active, dtype=torch.bool)
+        for surface in self.surfaces:
+            if getattr(surface, "is_irrigated", False):
+                surface.irrigate(active=active)
 
     def run(self, *, active: Tensor) -> None:
         """``land.py:200-244``:

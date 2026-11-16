@@ -517,7 +517,8 @@ def test_the_cases_cover_every_listed_feature():
     surface_decay_nitrification land_run_twice river_nutrients river_double_discharge
     surface_deposition growing_no_nitrate growing_default_depletion growing_spring growing_autumn
     growing_decay deposition_non_additive growing_no_din growing_zero_n growing_nitrite_only
-    growing_empty_soil growing_lean_soil surface_overrides""".split()
+    growing_empty_soil growing_lean_soil surface_overrides irrigation irrigation_early
+    irrigation_without_nutrients""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",
@@ -527,6 +528,7 @@ def test_the_cases_cover_every_listed_feature():
         "growing_zero_n",
         "growing_nitrite_only",
         "growing_empty_soil",
+        "irrigation_without_nutrients",
     }
     # D13: the cases WSIMOD runs as they are until it raises
     assert {n: (spec.crash, spec.crash_day) for n, spec in CASES.items() if spec.crash} == {
@@ -535,6 +537,7 @@ def test_the_cases_cover_every_listed_feature():
         "growing_zero_n": (("ZeroDivisionError", "land.py:1758"), 0),
         "growing_nitrite_only": (("ZeroDivisionError", "land.py:1758"), 0),
         "growing_empty_soil": (("ZeroDivisionError", "land.py:1899"), 1),
+        "irrigation_without_nutrients": (("KeyError", "land.py:2373"), 5),
     }
     # D24: the cases whose default run is a prefix of their dates
     # (Y68: the growing cases' long horizons moved to slow)
@@ -558,6 +561,8 @@ def test_the_cases_cover_every_listed_feature():
         "growing_decay": 60,
         "surface_deposition": 90,
         "growing_no_nitrate": 250,
+        "irrigation": 60,
+        "irrigation_early": 60,
     }
     # D12: the cases whose round-off prints are admitted within the store bound
     assert STORE_BOUNDED <= {n for n, spec in CASES.items() if spec.wsimod}
@@ -961,6 +966,7 @@ CRASH_EVENTS = {
     "growing_zero_n": "transformation_no_din",
     "growing_nitrite_only": "transformation_no_din",
     "growing_empty_soil": "crop_uptake_dry_soil",
+    "irrigation_without_nutrients": None,  # Y20: noodl updates no pool, silently
 }
 CRASH_RUNS = [
     pytest.param(name, mode, id=f"{name}-{mode}")

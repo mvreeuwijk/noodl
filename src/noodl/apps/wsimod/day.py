@@ -117,6 +117,7 @@ STATE_KEYS = (
     "wsimod.days_after_sow",
     "wsimod.crop_cover",
     "wsimod.ground_cover",
+    "wsimod.surface_climate",
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
@@ -138,6 +139,7 @@ _NOT_HELD = (
     "wsimod.days_after_sow",
     "wsimod.crop_cover",
     "wsimod.ground_cover",
+    "wsimod.surface_climate",
 )
 # keys of one value per row, not a VQIP
 _FLAT_KEYS = (
@@ -149,6 +151,7 @@ _FLAT_KEYS = (
     "wsimod.days_after_sow",
     "wsimod.crop_cover",
     "wsimod.ground_cover",
+    "wsimod.surface_climate",
 )
 _STATE_UNITS = {
     "wsimod.travel_queue_present": "-",
@@ -159,6 +162,7 @@ _STATE_UNITS = {
     "wsimod.days_after_sow": "d",
     "wsimod.crop_cover": "-",
     "wsimod.ground_cover": "-",
+    "wsimod.surface_climate": "m3",
 }
 # a growing surface's carried crop register -> its state key (D4)
 _CROP_REGISTERS = {
@@ -204,6 +208,10 @@ _STATE_TEXT = {
     "wsimod.crop_cover": (
         "every growing surface's crop cover (land.py:1550-1558), kept outside the season until "
         "the harvest resets it"
+    ),
+    "wsimod.surface_climate": (
+        "the evaporation and precipitation volumes of every irrigation surface's last ihacres "
+        "(land.py:1029-1044, read by :2352), two rows per surface"
     ),
     "wsimod.ground_cover": (
         "every growing surface's ground cover (land.py:1550-1558), kept outside the season "
@@ -258,6 +266,7 @@ _PARAMETER_UNITS = {
     "surface_coefficient": "-",
     "percolation_coefficient": "-",
     "et0_coefficient": "-",
+    "irrigation_coefficient": "-",
     "ihacres_p": "-",
     "soil_temp_w_prev": "-",
     "soil_temp_w_air": "-",
@@ -848,6 +857,11 @@ class WsimodDay:
                     surface = path.split(".")[1]
                     rows = [(spec.name, f"surfaces.{surface}")]
                     put(_CROP_REGISTERS[last], node, path, rows, ())
+                elif path.startswith("surfaces.") and last == "surface_climate":
+                    # D4: flat, the two flows' volumes per irrigation surface; (2,) in the engine
+                    surface = f"surfaces.{path.split('.')[1]}"
+                    rows = [(spec.name, surface, flow) for flow in ("evaporation", "precipitation")]
+                    put("wsimod.surface_climate", node, path, rows, (2,))
                 elif path.startswith("surfaces.") and last == "total_decayed":
                     # X35: the attribute path, not "surface:<name>" (D7)
                     surface = path.split(".")[1]
