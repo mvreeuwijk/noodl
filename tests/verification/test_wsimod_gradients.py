@@ -863,10 +863,11 @@ SPECS_3C_II = {
         more=(("final", "land", "surface:half", "volume"),),
     ),
     # the Demand's factor on the garden water (demand.py:288-301), which g2 receives from day 6
-    # (its soil leaves saturation) on
+    # (its soil leaves saturation) on. 25 days: with the nutrient pool (I2) g2's P uptake cap
+    # (calc_crop_uptake/cap:P) is within 2e-5 of its jump on day 26
     "ResidentialDemand.gardening_efficiency": Spec(
         "garden",
-        30,
+        25,
         True,
         ("driver", "wsimod.ResidentialDemand.gardening_efficiency", "homes"),
         ("final", "gardens", "surface:g2", "volume"),

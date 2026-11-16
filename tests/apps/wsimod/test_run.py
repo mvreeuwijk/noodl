@@ -600,15 +600,18 @@ def test_the_3c_state_round_trips():
 
 
 def test_a_warm_start_mid_season_crosses_the_harvest():
-    """Review Focus 4: a run of 300 days ends mid-season (2004-07-26, ``days_after_sow > 0``); a
-    second model warm-started from its last state runs 60 more days, across the harvest (raw
-    day 250, 2004-09-06, run day 341). The continuation equals days 300-360 of one 360-day run
-    (``torch.equal``) and ``days_after_sow`` is -1 from the harvest day on."""
+    """Review Focus 4: one model stepped for 360 days passes day 300 mid-season (2004-07-26,
+    ``days_after_sow > 0``); a second model warm-started from that day's state runs the 60 days
+    after it, across the harvest (raw day 250, 2004-09-06, run day 341). The continuation equals
+    days 300-360 of the first, flows and final state (``torch.equal``), and ``days_after_sow``
+    is -1 from the harvest day on."""
     model, state, drivers = _case("growing_spring")
-    whole = wsimod_run(model, state, drivers, days=360)
-    whole_final = dict(model.wsimod_day.last_state)
-    first = wsimod_run(model, state, drivers, days=300)
-    midway = dict(model.wsimod_day.last_state)
+    whole, whole_flows, midway = state, [], None
+    for k in range(360):
+        if k == 300:
+            midway = dict(whole)
+        whole = model.step(whole, drivers, dt=DAY, t=k * DAY)
+        whole_flows.append(model.wsimod_day.last_record.arc_flow)
     assert float(midway["wsimod.days_after_sow"]) > 0.0
     second, _, drivers_2 = _case("growing_spring")
     stepped, flows, sown = midway, [], []
@@ -616,9 +619,8 @@ def test_a_warm_start_mid_season_crosses_the_harvest():
         stepped = second.step(stepped, drivers_2, dt=DAY, t=k * DAY)
         flows.append(second.wsimod_day.last_record.arc_flow)
         sown.append(float(stepped["wsimod.days_after_sow"]))
-    assert torch.equal(torch.stack(flows), whole.arc_flow[300:360])
-    assert torch.equal(first.arc_flow, whole.arc_flow[:300])
-    for key, value in whole_final.items():
+    assert torch.equal(torch.stack(flows), torch.stack(whole_flows[300:360]))
+    for key, value in whole.items():
         assert torch.equal(stepped[key], value), key
     assert sown[341 - 300 - 1] > 0.0  # the day before the harvest
     assert all(value == -1.0 for value in sown[341 - 300 :]), sown
@@ -719,7 +721,9 @@ def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
     """``growing_spring`` and ``surface_deposition``: every driver a quantity-only run lists as
     ignored or never reads (uptake, erosion, adsorption, denitrification, the deposition,
     fertiliser and manure forcing) is changed and the volumes are ``torch.equal``; the same for
-    the configuration's ``data_input_dict`` and ``pollutant_load`` values."""
+    the configuration's ``data_input_dict`` and ``pollutant_load`` values. ``growing_spring``'s
+    drivers run 200 days, past its sowing (run day 182); the deposition and configuration
+    variants 30 days (Y90)."""
     names = (
         "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion srfilt macrofilt "
         "limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes bulk_density "
@@ -734,7 +738,7 @@ def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
     assert torch.equal(base.arc_flow, other.arc_flow)
     assert torch.equal(base.tank_storage, other.tank_storage)
     scale = {f"wsimod.{p}-{w}": 4.0 for p in ("nhx", "noy", "srp") for w in ("dry", "wet")}
-    base, other = _quantity_only_pair("surface_deposition", 100, scale)
+    base, other = _quantity_only_pair("surface_deposition", 30, scale)
     assert float(base.arc_flow.abs().max()) > 0.0
     assert torch.equal(base.arc_flow, other.arc_flow)
     assert torch.equal(base.tank_storage, other.tank_storage)
@@ -753,7 +757,7 @@ def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
         runs = []
         for configuration in (mapping, changed):
             model, state, drivers = build_model(read_wsimod_config(configuration), pollutants=False)
-            runs.append(wsimod_run(model, state, drivers, days=100))
+            runs.append(wsimod_run(model, state, drivers, days=30))
         assert torch.equal(runs[0].arc_flow, runs[1].arc_flow)
         assert torch.equal(runs[0].tank_storage, runs[1].tank_storage)
 
@@ -762,7 +766,9 @@ def test_quantity_only_lists_the_3c_parameters():
     """What the configuration writes and a quantity-only run never reads is listed (Y72): the
     surface data, the loads, the soil-temperature weights and every growing parameter but the
     ones the run reads (``ET_depletion_factor``, ``rooting_depth``, ``crop_factor_stages``). The
-    nutrient-pool drivers do not exist in a quantity-only run and are not listed."""
+    nutrient-pool drivers do not exist in a quantity-only run and are not listed. The
+    ``initial_soil_storage`` and the pollutants of a surface's ``initial_storage`` are listed
+    (M2), as a node tank's are."""
     ignored_growing = (
         "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion slope srfilt "
         "macrofilt limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes "
@@ -783,6 +789,9 @@ def test_quantity_only_lists_the_3c_parameters():
     listed = model.ignored_by_quantity_only
     assert "land.surfaces.wheat.data_input_dict" in listed
     assert "land.surfaces.wheat.soil_temp_w_prev" in listed
+    # M2: only the pool reads initial_soil_storage, and the volume alone of the tank's VQIP
+    assert "land.surfaces.wheat.initial_soil_storage" in listed
+    assert "land.surfaces.wheat.initial_storage" in listed
     for name in ignored_growing:
         assert f"land.surfaces.wheat.{name}" in listed, name
     for name in read:

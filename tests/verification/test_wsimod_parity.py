@@ -16,11 +16,12 @@ WSIMOD cannot run (``wtw_zero_input``, ``nonresidential_demand``) or runs only u
 crash (``land_sewer_ponding`` with a lowered sewer capacity) are tested for the crash and for
 noodl's evident-intent run (W4). ``river_double_discharge`` is the named exception to the print
 check (D17, X32): WSIMOD's River balance is wrong by construction there and prints every day.
-The growing cases with a nutrient pool (3c: ``growing_spring``, 365 days by default and its three
-years under ``slow``, ``growing_autumn``, ``growing_decay``, ``growing_lean_soil``) are bitwise on
-every series, but WSIMOD prints round-off "mass balance error" lines for an additive pollutant at
-their land: the one print admission (Y35, Y41, D12) takes them where ``|x| <= GROWING_PRINT_C *
-eps * S`` (``STORE_BOUNDED``), and every other case asserts that it prints none.
+The cases with a nutrient pool (3c: a growing surface with ``nitrate``; ``growing_spring`` runs
+365 days by default and its three years under ``slow``) are bitwise on every series, but WSIMOD
+can print round-off "mass balance error" lines for an additive pollutant at their land: the one
+print admission (Y35, Y41, Y91, D12) takes them at every such land where ``|x| <=
+GROWING_PRINT_C * eps * S`` (``STORE_BOUNDED``), and every other land and case asserts that it
+prints none.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import functools
 import io
 import re
 import traceback
+import warnings
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,7 @@ from noodl.apps.wsimod import (  # noqa: E402
     read_wsimod_config,
     wsimod_run,
 )
+from noodl.apps.wsimod.classes import SURFACE_SCHEMAS  # noqa: E402
 from noodl.apps.wsimod.day import WsimodDay  # noqa: E402
 from noodl.apps.wsimod.engine import Decision  # noqa: E402
 from noodl.apps.wsimod.nutrient_pool import DI, DO  # noqa: E402
@@ -126,10 +129,14 @@ def test_demo_matches_wsimod(case, mode, days):
     assert bool(results.arc_flow.abs().sum() > 0)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("case", ["quickstart", "oxford"])
 def test_demo_quantity_only_equals_the_pollutant_run_volumes(case):
     """Spec, Verification 3: a quantity-only run's volumes equal the pollutant run's, exactly
-    (``torch.equal``): every arc flow, tank storage and surface field."""
+    (``torch.equal``): every arc flow, tank storage and surface field. ``slow`` (Y90): the
+    default ``test_demo_matches_wsimod`` compares both modes bitwise with WSIMOD's one run, so
+    the volumes are equal by transitivity; this item would pay for the demos twice when xdist
+    puts it on another worker."""
     days = FULL if case == "quickstart" else 365
     quantity, _ = ours(case, "quantity", days)
     pollutant_run, _ = ours(case, "pollutants", days)
@@ -356,27 +363,62 @@ def test_a_print_noodl_does_not_record_is_refused():
 
 # --- the purpose-built cases ---------------------------------------------------------------------
 MODES = {"quantity": False, "pollutants": True}
-# D12 (Y35, Y41): WSIMOD's node check prints round-off "mass balance error for <additive> of x in
-# land" lines on these growing cases (always org-phosphorus or org-nitrogen, |x| ~ 1e-17 kg),
-# while noodl's balance closes; they are admitted where |x| <= GROWING_PRINT_C * eps * S, S the
-# largest store of that pollutant on the land's surfaces and residence tanks that day or the day
-# before. Measured max |x| / (eps S) per case, over its longest horizon (Task 9b): growing_spring
-# 1.277 (1096 days, day 908; 0.432 over its default 365), growing_autumn 0.404 (400),
-# growing_decay 0.479 (200), growing_lean_soil 0.610 (60), surface_overrides 0.170 (100, Task 12;
-# one line), variable_area 0.889 (100, Task 15; three lines, all on the land); hence c =
-# ceil(1.277) = 2. Every
-# other case is unmapped, and its parity item asserts that it prints no such line.
-GROWING_PRINT_C = 2
-STORE_BOUNDED = frozenset(
-    {
-        "growing_spring",
-        "growing_autumn",
-        "growing_decay",
-        "growing_lean_soil",
-        "surface_overrides",
-        "variable_area",
-    }
-)
+# D12 (Y35, Y41, Y91): WSIMOD's node check prints round-off "mass balance error for <additive> of
+# x in <land>" lines (org-phosphorus or org-nitrogen, |x| ~ 1e-17 kg) at a Land that holds a
+# growing surface with nitrate among the pollutants (the nutrient pool's Python math), while
+# noodl's balance closes. They are admitted at every such Land of every case (STORE_BOUNDED, a
+# property of the configuration, not of where lines were seen: the C library's last bit differs
+# between platforms) where |x| <= GROWING_PRINT_C * eps * S, S the largest store of that pollutant
+# on the land's surfaces and residence tanks that day or the day before; every other Land and
+# case asserts that it prints none. The bound protects the comparison; the series stay bitwise.
+GROWING_PRINT_C = 2  # ceil of the largest measured ratio (PRINTS_MEASURED); raise it to the
+# ceiling of a platform's own maximum if that is larger, and record both
+STORE_BOUNDED = {
+    "growing_spring": ("land",),
+    "surface_overrides": ("land",),
+    "irrigation": ("farm",),
+    "irrigation_early": ("farm",),
+    "garden": ("gardens",),
+    "variable_area": ("land",),
+    "growing_autumn": ("land",),
+    "growing_decay": ("land",),
+    "growing_lean_soil": ("land",),
+}
+# the cases that print enough lines on any platform for "at least one line" to be a test
+MANY_PRINTS = frozenset({"growing_spring"})
+# Windows 11, WSIMOD 0.8.1 (Y91): (lines, max |x| / (eps S)) at the land over the default days,
+# and over the slow days where a case has them. Measured, not asserted (I3): another platform's
+# counts are reported by a warning
+PRINTS_MEASURED = {
+    "growing_spring": (43, 0.432),  # 104 lines, 1.277 over its 1096 slow days (day 908)
+    "surface_overrides": (1, 0.170),
+    "irrigation": (0, 0.0),
+    "irrigation_early": (0, 0.0),
+    "garden": (0, 0.0),
+    "variable_area": (3, 0.889),
+    "growing_autumn": (7, 0.400),  # 9 lines, 0.404 over its 400 slow days
+    "growing_decay": (11, 0.479),  # 11 lines, 0.479 over its 200 slow days
+    "growing_lean_soil": (12, 0.610),
+}
+
+
+@functools.cache
+def nutrient_lands(name: str) -> tuple[str, ...]:
+    """The Lands of case ``name`` that hold a growing surface with ``nitrate`` among the run's
+    pollutants: where WSIMOD's round-off pollutant lines can fall (D12, Y91)."""
+    network = read_wsimod_config(CASES[name].build())
+    if "nitrate" not in network.pollutants.names:
+        return ()
+    return tuple(
+        node.name
+        for node in network.nodes
+        if node.cls == "Land" and any(SURFACE_SCHEMAS[s.cls].growing for s in node.surfaces)
+    )
+
+
+def store_bounded(name: str) -> dict[str, float]:
+    """The ``store_bounded_prints`` of case ``name``: every Land of :func:`nutrient_lands`."""
+    return {land: GROWING_PRINT_C for land in nutrient_lands(name)}
 
 
 def _case_param(name: str, mode: str):
@@ -439,7 +481,7 @@ def _assert_case_matches(name: str, mode: str, days: int | None = None) -> None:
         quality=MODES[mode],
         print_days=print_days,
         expected_mass_balance_prints=EXPECTED_MASS_BALANCE_PRINTS.get(name, ()),
-        store_bounded_prints={"land": GROWING_PRINT_C} if name in STORE_BOUNDED else {},
+        store_bounded_prints=store_bounded(name),
     )
     assert found["worst"] == 0.0 and found["admissions"] == []
     assert len(results.dates) == (CASES[name].days if days is None else days)
@@ -494,11 +536,22 @@ def test_the_wtw_treatment_case_makes_negative_solids_on_cold_days():
     assert not bool(quantity.any())  # no additive pollutants, no solids to go negative
 
 
-@pytest.mark.parametrize("name", [n for n, spec in CASES.items() if set(spec.modes) >= set(MODES)])
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Y90: a case WSIMOD runs is compared bitwise in both modes with its one WSIMOD run by
+        # test_case_matches_wsimod, so its volumes are equal by transitivity: slow here
+        pytest.param(name, marks=pytest.mark.slow) if spec.wsimod else name
+        for name, spec in CASES.items()
+        if set(spec.modes) >= set(MODES)
+    ],
+)
 def test_quantity_only_equals_the_pollutant_run_volumes(name):
     """Spec, Verification 3, on every case: a quantity-only run's volumes equal the pollutant
     run's, exactly (``torch.equal``): every arc flow, tank storage and surface field, over the
-    case's bookkeeping prefix (``Case.bookkeeping``, Y68)."""
+    case's bookkeeping prefix (``Case.bookkeeping``, Y68). By default only the three cases
+    WSIMOD does not run (``wtw_zero_input``, ``growing_default_depletion``,
+    ``nonresidential_demand``); the others are ``slow`` (Y90)."""
     days = CASES[name].bookkeeping
     quantity, _ = case_ours(name, "quantity", days)
     pollutants, _ = case_ours(name, "pollutants", days)
@@ -510,6 +563,26 @@ def test_quantity_only_equals_the_pollutant_run_volumes(name):
         assert torch.equal(values.nan_to_num(), other.nan_to_num()), field
 
 
+def decision_outcomes(decisions, prefix: str = "", days: int | None = None) -> dict[str, set[bool]]:
+    """``{site less prefix: the outcomes taken}`` over the active instances of every decision
+    whose site starts with ``prefix``, on the days before ``days`` (all by default) of
+    ``decisions``, one list of :class:`Decision` per day (``diagnostics["decisions"]`` or each
+    day's ``ctx.decisions``); a scalar or a batched run alike (M5)."""
+    out: dict[str, set[bool]] = {}
+    for records in decisions[:days]:
+        for d in records:
+            if d.site.startswith(prefix) and bool(d.active.any()):
+                out.setdefault(d.site[len(prefix) :], set()).update(d.outcome[d.active].tolist())
+    return out
+
+
+def _day_decisions(name: str, days: int) -> list[list[Decision]]:
+    """Each day's decisions of noodl's day driver on case ``name`` (pollutants on)."""
+    day = WsimodDay(read_wsimod_config(CASES[name].build()), pollutants=True)
+    day.record_decisions = True
+    return [list(ctx.decisions) for _, ctx, _ in day.run_days(days=days)]
+
+
 @pytest.mark.parametrize("name", ["irrigation", "irrigation_early"])
 def test_the_irrigation_cases_reach_every_irrigate_branch(name):
     """From the decisions (spec, Verification 3; Task 13, Y80): on each case's bookkeeping
@@ -517,13 +590,7 @@ def test_the_irrigation_cases_reach_every_irrigate_branch(name):
     outcomes at both irrigation surfaces: before and after sowing, a negative and a positive
     deficit, demands above and below ``FLOAT_ACCURACY`` and saturated and unsaturated soils. A
     site that never records fails."""
-    day = WsimodDay(read_wsimod_config(CASES[name].build()), pollutants=True)
-    day.record_decisions = True
-    seen: dict[str, set[bool]] = {}
-    for _, ctx, _ in day.run_days(days=CASES[name].bookkeeping):
-        for d in ctx.decisions:
-            if bool(d.active.any()):
-                seen.setdefault(d.site, set()).update(d.outcome[d.active].tolist())
+    seen = decision_outcomes(_day_decisions(name, CASES[name].bookkeeping))
     for surface in ("irr_a", "irr_b"):
         for branch in ("crop", "deficit", "demand", "saturated"):
             site = f"node:farm/surfaces.{surface}/irrigate/{branch}"
@@ -536,14 +603,7 @@ def test_the_garden_case_reaches_both_garden_branches():
     250, and a dry one) are active with both outcomes at ``g2``, the surface that holds the
     handlers, and no decision is recorded at ``g1``, whose
     handlers the last garden replaced (L18). The outcomes themselves are recorded."""
-    spec = CASES["garden"]
-    day = WsimodDay(read_wsimod_config(spec.build()), pollutants=True)
-    day.record_decisions = True
-    seen: dict[str, set[bool]] = {}
-    for _, ctx, _ in day.run_days(days=spec.bookkeeping):
-        for d in ctx.decisions:
-            if bool(d.active.any()):
-                seen.setdefault(d.site, set()).update(d.outcome[d.active].tolist())
+    seen = decision_outcomes(_day_decisions("garden", CASES["garden"].bookkeeping))
     for branch in ("deficit", "saturated"):
         site = f"node:gardens/surfaces.g2/calculate_irrigation_demand/{branch}"
         assert seen.get(site) == {False, True}, (site, seen.get(site))
@@ -613,8 +673,12 @@ def test_the_cases_cover_every_listed_feature():
         "irrigation": 60,
         "irrigation_early": 60,
     }
-    # D12: the cases whose round-off prints are admitted within the store bound
-    assert STORE_BOUNDED <= {n for n, spec in CASES.items() if spec.wsimod}
+    # D12 (Y91): the cases whose round-off prints are admitted within the store bound are every
+    # case WSIMOD runs with a nutrient land, and its lands
+    assert STORE_BOUNDED == {
+        n: nutrient_lands(n) for n, spec in CASES.items() if spec.wsimod and nutrient_lands(n)
+    }
+    assert set(PRINTS_MEASURED) == set(STORE_BOUNDED) and MANY_PRINTS <= set(STORE_BOUNDED)
 
 
 def tiny_dropped(results) -> torch.Tensor:
@@ -770,18 +834,6 @@ RIVER_BRANCHES: dict[str, dict[str, frozenset[bool]]] = {
 }
 
 
-def _river_outcomes(decisions, days: int, river: str) -> dict[str, set[bool]]:
-    """``{branch: the outcomes active on some day < days}`` of ``river``'s biochemistry
-    decisions."""
-    out: dict[str, set[bool]] = {}
-    prefix = f"node:{river}/{BIO}/"
-    for day in decisions[:days]:
-        for d in day:
-            if d.site.startswith(prefix) and bool(d.active):
-                out.setdefault(d.site[len(prefix) :], set()).add(bool(d.outcome))
-    return out
-
-
 @pytest.mark.slow
 def test_river_nutrients_reaches_every_branch():
     """R3, X39, D24: with the decisions recorded over the full 1100 days, each branch the case is
@@ -798,7 +850,7 @@ def test_river_nutrients_reaches_every_branch():
     lost = diagnostics["events"]["river_nitrogen_lost"]
     for days in (spec.days, spec.slow_days):
         for river, branches in RIVER_BRANCHES.items():
-            seen = _river_outcomes(diagnostics["decisions"], days, river)
+            seen = decision_outcomes(diagnostics["decisions"], f"node:{river}/{BIO}/", days)
             for branch, outcomes in branches.items():
                 assert seen[branch] == outcomes, (days, river, branch, seen[branch])
         assert bool(lost[:days, names.index("r_up")].any()), days
@@ -1063,6 +1115,7 @@ def test_case_runs_where_wsimod_crashes(name, mode):
             case=f"{name}-{mode}",
             quality=MODES[mode],
             print_days=print_days,
+            store_bounded_prints=store_bounded(name),
         )
         assert found["worst"] == 0.0 and found["admissions"] == []
     results, diagnostics = case_ours(name, mode)
@@ -1075,6 +1128,66 @@ def test_case_runs_where_wsimod_crashes(name, mode):
     for values in (results.arc_flow, results.tank_storage, results.surface["storage"]):
         assert bool(torch.isfinite(values).all())
     assert mass_balance_worst(results) <= BOUND
+
+
+def _with_surface_override(case: str, surface: str, **values) -> dict:
+    """``case``'s configuration with ``values`` as WSIMOD overrides of its Land's ``surface``."""
+    mapping = CASES[case].build()
+    land = next(n["name"] for n in mapping["nodes"] if n["type_"] == "Land")
+    override = {"type_": "Land", "name": land, "surfaces": {surface: values}}
+    mapping.setdefault("overrides", {}).setdefault("nodes", {})[land] = override
+    return mapping
+
+
+def test_a_small_nfr_stops_both_engines_on_the_same_step():
+    """I1: ``nfr = 1e-3`` on ``growing_spring``'s ``wheat`` underflows adsorption's first guess
+    ``exp((log(conc_sol) - log(kfr)) / nfr)`` to 0, and ``0 ** (nfr - 1)`` raises
+    ``ZeroDivisionError`` in WSIMOD (``land.py:2210``, day 0). noodl raises on the same day,
+    naming the surface, the function, the date and the cause, whether ``nfr`` is an override
+    or one row of a batched driver (one instance stops the batch: Python's math)."""
+    mapping = _with_surface_override("growing_spring", "wheat", nfr=1e-3)
+    _, error, day, _ = wsimod_until_crash_by_day(mapping)
+    assert type(error).__name__ == "ZeroDivisionError" and day == 0
+    assert _innermost_land_line(error) == "land.py:2210"
+    named = (
+        r"node:land/surfaces\.wheat: adsorption raised ZeroDivisionError \(0\.0 cannot be "
+        r"raised to a negative power\) on day 0 \(2003-10-01\).*WSIMOD raises at the same step"
+    )
+    with pytest.raises(ValueError, match=named) as raised:
+        model, state, drivers = build_model(read_wsimod_config(mapping), pollutants=True)
+        wsimod_run(model, state, drivers, days=1)
+    assert isinstance(raised.value.__cause__, ZeroDivisionError)
+    model, state, drivers = build_model(
+        read_wsimod_config(CASES["growing_spring"].build()), pollutants=True
+    )
+    key = "wsimod.GrowingSurface.nfr"
+    batched = {**drivers, key: torch.stack([drivers[key], torch.full_like(drivers[key], 1e-3)])}
+    with pytest.raises(ValueError, match=named):
+        wsimod_run(model, state, batched, days=1)
+
+
+def test_a_negative_current_surface_area_with_nitrate_is_refused_by_name():
+    """I1: ``current_surface_area = -1`` on ``variable_area``'s ``half`` makes its climate share,
+    and so its eroding flow, negative; erosion's ``(flow / 4) ** 1.3`` is complex and WSIMOD's
+    ``min`` raises ``TypeError`` (``land.py:1984``) on day 0. With ``nitrate`` among the
+    pollutants noodl refuses the value by name at build (both modes, as the other parameter
+    domains) and per instance of a batched driver."""
+    mapping = CASES["variable_area"].build()
+    mapping["nodes"][0]["surfaces"][1]["current_surface_area"] = -1.0
+    _, error, day, _ = wsimod_until_crash_by_day(mapping)
+    assert type(error).__name__ == "TypeError" and day == 0
+    assert _innermost_land_line(error) == "land.py:1984"
+    named = r"surface 'half': current_surface_area -1\.0 is < 0.*TypeError \(land\.py:1984\)"
+    for mode in MODES:
+        with pytest.raises(ValueError, match=named):
+            build_model(read_wsimod_config(mapping), pollutants=MODES[mode])
+    model, state, drivers = build_model(
+        read_wsimod_config(CASES["variable_area"].build()), pollutants=True
+    )
+    key = "wsimod.VariableAreaSurface.current_surface_area"
+    batched = {**drivers, key: torch.stack([drivers[key], -drivers[key]])}
+    with pytest.raises(ValueError, match=r"surfaces\.half: current_surface_area .* is < 0"):
+        wsimod_run(model, state, batched, days=1)
 
 
 def test_case_runs_where_wsimod_crashes_wtw_zero_input():
@@ -1189,10 +1302,7 @@ def growing_days(name: str, days: int) -> tuple[list[dict], object]:
     rows = []
     for _, ctx, engine in day.run_days(days=days):
         surface = engine.nodes["land"].surfaces[0]
-        outcomes: dict[str, set[bool]] = {}
-        for d in ctx.decisions:
-            if bool(d.active):
-                outcomes.setdefault(d.site, set()).add(bool(d.outcome))
+        outcomes = decision_outcomes([ctx.decisions])
         rows.append(
             {
                 "surface": surface.name,
@@ -1530,27 +1640,58 @@ def test_growing_spring_reaches_every_branch():
 # --- the store-bounded prints (Task 9b; D12, Y41) -----------------------------------------------
 @pytest.mark.parametrize("name", sorted(STORE_BOUNDED))
 def test_the_store_bounded_prints(name):
-    """D12: a mapped case's WSIMOD run prints round-off pollutant lines at its land over its
-    default days (so its mapping is measured, not idle), each of an additive pollutant and
-    within ``GROWING_PRINT_C * eps * S``; the parity item admits exactly these. The volume lines
-    stay W86's comparison (``test_the_store_bound_admits_nothing_else``)."""
+    """D12 (Y91): every round-off pollutant line WSIMOD prints at a nutrient land over the
+    default days is of an additive pollutant and within ``GROWING_PRINT_C * eps * S``; the
+    parity item admits exactly these. Only ``MANY_PRINTS`` must print one (43 lines here), so
+    that the admission is measured, not idle; for the other cases the count and the largest
+    ratio are a measurement (``PRINTS_MEASURED``), and a platform that differs is reported by a
+    warning, never a failure. The volume lines stay W86's comparison
+    (``test_the_store_bound_admits_nothing_else``)."""
     reference, print_days = case_theirs_by_day(name)
-    lines = store_bounded_lines(reference, print_days, "land")
-    assert lines
+    lines = [
+        line
+        for land in STORE_BOUNDED[name]
+        for line in store_bounded_lines(reference, print_days, land)
+    ]
     assert {line["pollutant"] for line in lines} <= set(reference.additive) - {"volume"}
-    ratio = max(abs(line["x"]) / (EPSILON * line["S"]) for line in lines)
-    assert 0.0 < ratio <= GROWING_PRINT_C, ratio
     assert all(line["S"] > 0.0 for line in lines)
+    ratio = max((abs(line["x"]) / (EPSILON * line["S"]) for line in lines), default=0.0)
+    assert ratio <= GROWING_PRINT_C, ratio
+    if name in MANY_PRINTS:
+        assert lines and ratio > 0.0
+    count, measured = PRINTS_MEASURED[name]
+    if (len(lines), round(ratio, 3)) != (count, measured):
+        warnings.warn(
+            f"{name}: WSIMOD printed {len(lines)} round-off lines (max {ratio:.3f} eps S) where "
+            f"Windows printed {count} (max {measured}): record this platform's figures (Y91)",
+            stacklevel=1,
+        )
+
+
+def _with_round_off_line(reference, print_days, land: str, pollutant: str, ratio: float):
+    """``reference`` with one more pollutant line at ``land`` on its last day, ``|x| = ratio *
+    eps * S`` (S that day's store bound): a round-off line that does not depend on the
+    platform's C library."""
+    day = len(reference.dates) - 1
+    probe = f"mass balance error for {pollutant} of 1e-300 in {land}"
+    printed, days = [*reference.printed, probe], [*print_days, day]
+    bound = store_bounded_lines(dataclasses.replace(reference, printed=printed), days, land)[-1]
+    line = f"mass balance error for {pollutant} of {ratio * EPSILON * bound['S']!r} in {land}"
+    return dataclasses.replace(reference, printed=[*reference.printed, line]), days
 
 
 def test_the_store_bound_admits_nothing_else():
-    """D12 on ``growing_lean_soil``: without its mapping its round-off lines fail (that is how
+    """D12 on ``growing_lean_soil``, with one more round-off line at half the bound, so that the
+    test holds whatever this platform prints: without its mapping the line fails (that is how
     an unmapped case asserts zero lines); with it, a line beyond ``c * eps * S``, a volume line
     of the land as small as the round-off and a line of a non-additive pollutant each fail, and
     the admission needs the print days."""
     name = "growing_lean_soil"
     results, diagnostics = case_ours(name, "pollutants")
     reference, print_days = case_theirs_by_day(name)
+    reference, print_days = _with_round_off_line(
+        reference, print_days, "land", "org-phosphorus", 0.5
+    )
     kwargs = {"diagnostics": diagnostics, "case": name, "quality": True}
     mapped = {"land": GROWING_PRINT_C}
     found = assert_matches_wsimod(
@@ -1561,7 +1702,7 @@ def test_the_store_bound_admits_nothing_else():
         assert_matches_wsimod(results, reference, print_days=print_days, **kwargs)
     with pytest.raises(ValueError, match="store_bounded_prints needs print_days"):
         assert_matches_wsimod(results, reference, store_bounded_prints=mapped, **kwargs)
-    first = store_bounded_lines(reference, print_days, "land")[0]
+    first = store_bounded_lines(reference, print_days, "land")[-1]  # the added line
     k = reference.printed.index(first["line"])
     over = (GROWING_PRINT_C + 0.5) * EPSILON * first["S"]
     for line, error in (

@@ -1907,28 +1907,47 @@ def _garden() -> dict:
     (the check runs before ``Land.run``): 0 on day 0 and, with the forcing's first days wet, on
     the next ones. ``g2`` starts over capacity (250 m3 against 240), and that start alone gives
     its saturated days (days 0-5, ``cmd <= FLOAT_ACCURACY``, ``:2416``); the wet spells do not
-    fill the soil."""
+    fill the soil.
+
+    The run has the eight pollutants (I2), so both garden surfaces keep the nutrient pool, with
+    an ``initial_soil_storage`` and five months of fertiliser, manure and deposition data, and
+    the 0 degC garden water enters a tank whose nutrients leave in the pool's proportions. The
+    homes load seven of them."""
     days = _GARDEN_DAYS
     dates = _dates(days)
+    inputs = _monthly(_GROWING_INPUTS, "2000-01", 5)
+    nutrient = {"data_input_dict": inputs, "initial_soil_storage": dict(_SOIL)}
+    homes = _homes("homes", days, 56)
+    homes["pollutant_load"] = {k: 0.01 * (i + 1) for i, k in enumerate(_NUTRIENT_EIGHT[:-1])}
     return {
-        **_POLLUTANTS,
+        **_NUTRIENTS,
         "dates": dates,
         "nodes": [
-            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(900.0)),
+            _store("supply", "Storage", capacity=1e4, initial_storage=_soil_water(900.0, 11.0)),
             _store("dist", "Distribution", leakage=0.0),
-            _homes("homes", days, 56),
+            homes,
             _land(
                 "gardens",
                 [
-                    _garden_surface("g1", area=800.0, initial_storage=_stocked(150.0)),
-                    _garden_surface("g2", area=1200.0, initial_storage=_stocked(250.0)),
-                    _pervious("lawn", area=500.0, depth=0.5, initial_storage=_stocked(80.0)),
+                    _garden_surface(
+                        "g1", area=800.0, initial_storage=_soil_water(150.0, 11.0), **nutrient
+                    ),
+                    _garden_surface(
+                        "g2", area=1200.0, initial_storage=_soil_water(250.0, 11.0), **nutrient
+                    ),
+                    _pervious(
+                        "lawn", area=500.0, depth=0.5, initial_storage=_soil_water(80.0, 11.0)
+                    ),
                 ],
                 _irrigation_forcing(dates, 57),
             ),
             _land(
                 "plain",
-                [_pervious("patch", area=600.0, depth=0.5, initial_storage=_stocked(90.0))],
+                [
+                    _pervious(
+                        "patch", area=600.0, depth=0.5, initial_storage=_soil_water(90.0, 11.0)
+                    )
+                ],
                 _irrigation_forcing(dates, 58),
             ),
             _store("drain", "Sewer", capacity=50.0),
