@@ -72,6 +72,7 @@ __all__ = [
     "PerviousSurface",
     "Surface",
     "month_start",
+    "runs_nutrients",
     "surface_derived",
 ]
 
@@ -108,6 +109,13 @@ LAND_FORCING = ("precipitation", "et0", "temperature")
 
 def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
+
+
+def runs_nutrients(pollutants: Sequence[str]) -> bool:
+    """WSIMOD's nutrient switch, ``"nitrate" in constants.POLLUTANTS`` (``land.py:1276``): the one
+    source of a growing surface's ``has_nutrients`` and of ``Land.store_paths_of``'s
+    ``nutrients`` (D5). Task 6's pool stores rely on both deriving from it."""
+    return "nitrate" in pollutants
 
 
 def month_start(date: datetime) -> datetime:
@@ -328,6 +336,7 @@ class Surface(DecayTank):
     def stores(self) -> dict[str, Tensor]:
         """``storage``, the per-day flows and ``total_decayed``: always held and compared in the
         replay; carried by the Land only when ``nitrite`` is a pollutant (D8)."""
+        # a growing surface's has_nutrients is runs_nutrients(pollutants), as the Land's paths
         nutrients = getattr(self, "has_nutrients", False)
         return {
             "storage": self.storage,
@@ -803,7 +812,7 @@ class Land(Node):
         self.running_inflow_mb = empty(pollutants, ())
         self.running_outflow_mb = empty(pollutants, ())
         self.store_paths = self.store_paths_of(
-            [(s.cls, s.name) for s in spec.surfaces], nutrients="nitrate" in pollutants.names
+            [(s.cls, s.name) for s in spec.surfaces], nutrients=runs_nutrients(pollutants.names)
         )
         # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
         # running mass balance are the day's (W75). A surface's total_decayed is carried when
@@ -824,6 +833,7 @@ class Land(Node):
         registers (``Surface.state_fields``; a growing surface's pool only with ``nutrients``,
         ``"nitrate"`` among the run's pollutants, D5) and ``total_decayed``, and the running mass
         balance."""
+        _register_all()  # the classes that register themselves (growing)
         paths = [f"{tank}.storage" for tank in cls._TANKS]
         for surface_cls, name in surfaces:
             surface = SURFACE_CLASSES[surface_cls]

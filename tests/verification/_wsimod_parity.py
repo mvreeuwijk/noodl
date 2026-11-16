@@ -39,6 +39,7 @@ __all__ = [
     "mass_balance_worst",
     "wsimod_reference_by_day",
     "wsimod_until_crash",
+    "wsimod_until_crash_by_day",
 ]
 
 BOUND = 1e-12
@@ -412,6 +413,16 @@ def wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]:
     time (``Model.run`` over one date continues from the state the last one left), until it
     raises. Returns the record of the days before the crash day (``reference_of_rows``; empty
     when it crashes on day 0), the exception and the crash day. A run that never raises fails."""
+    reference, error, day, _ = wsimod_until_crash_by_day(mapping)
+    return reference, error, day
+
+
+def wsimod_until_crash_by_day(
+    mapping,
+) -> tuple[WsimodReference, BaseException, int, list[int]]:
+    """:func:`wsimod_until_crash` plus the day of each line of the reference's ``printed``
+    (``print_days`` of :func:`assert_matches_wsimod`): each day's run prints into its own
+    buffer, so a line's day is the run that printed it."""
     from wsimod.core import constants
 
     model = wsimod_model(mapping)
@@ -420,6 +431,7 @@ def wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]:
     tanks: list = []
     surfaces: list = []
     printed: list[str] = []
+    print_days: list[int] = []
     for day, date in enumerate(dates):
         out = io.StringIO()
         try:
@@ -429,11 +441,13 @@ def wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]:
             reference = reference_of_rows(
                 dates[:day], flows, tanks, surfaces, printed, tuple(constants.POLLUTANTS)
             )
-            return reference, error, day
+            return reference, error, day, print_days
         flows += f
         tanks += t
         surfaces += s
-        printed += out.getvalue().splitlines()
+        lines = out.getvalue().splitlines()
+        printed += lines
+        print_days += [day] * len(lines)
     raise AssertionError(f"WSIMOD ran all {len(dates)} days without raising (D13)")
 
 

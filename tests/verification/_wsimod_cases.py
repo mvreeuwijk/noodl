@@ -45,10 +45,13 @@ class Case:
     # ``wsimod=False`` (the generic parity and replay skip it); its own test compares the days
     # before the crash (``_wsimod_parity.wsimod_until_crash``)
     crash: tuple[str, str] | None = None
+    crash_day: int | None = None  # D13: the day WSIMOD raises on, which its test pins
 
     def __post_init__(self) -> None:
         if self.crash is not None and self.wsimod:
             raise ValueError("a crash case (D13) has wsimod=False")
+        if (self.crash is None) != (self.crash_day is None):
+            raise ValueError("a crash case (D13) names its crash and its crash day together")
 
 
 # A short pollutant list: one additive, one more additive, one non-additive.
@@ -2653,6 +2656,7 @@ CASES: dict[str, Case] = {
         scale=200.0,
         wsimod=False,
         crash=("ZeroDivisionError", "land.py:1566"),
+        crash_day=11,
     ),
     "land_percolation_threshold": Case(
         build=_land_percolation_threshold,

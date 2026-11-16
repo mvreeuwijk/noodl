@@ -64,7 +64,7 @@ from torch import Tensor
 
 from noodl.apps.wsimod.constants import SURFACE_INPUTS
 from noodl.apps.wsimod.engine import dmax
-from noodl.apps.wsimod.land import SURFACE_CLASSES, PerviousSurface, month_start
+from noodl.apps.wsimod.land import SURFACE_CLASSES, PerviousSurface, month_start, runs_nutrients
 from noodl.apps.wsimod.vqip import Pollutants, safe_den, write
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -265,7 +265,7 @@ class GrowingSurface(PerviousSurface):
         self.ground_cover = _f64(0.0)
         self.crop_factor = _f64(0.0)
         self.et0_coefficient = _f64(1.0)
-        self.has_nutrients = "nitrate" in pollutants.names  # :1276
+        self.has_nutrients = runs_nutrients(pollutants.names)  # :1276, as Land.store_paths_of
         self.calendar: list[CalendarDay] = []
         self.inflows.insert(0, self.calc_crop_cover)  # :1275
 
@@ -298,8 +298,9 @@ class GrowingSurface(PerviousSurface):
         stages = self._stages_default if stages is None else _f64(stages)
         length = len(self.crop_factor_stage_dates)
         if stages.ndim == 0 or stages.shape[-1] < length:
+            count = stages.shape[-1] if stages.ndim else 0
             raise ValueError(
-                f"{self.site}: crop_factor_stages has {stages.shape[-1:]} entries but "
+                f"{self.site}: crop_factor_stages has {count} entries but "
                 f"crop_factor_stage_dates has {length} (land.py:1547)"
             )
         if stages.shape[-1] > length:

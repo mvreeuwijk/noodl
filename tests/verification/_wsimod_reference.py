@@ -480,6 +480,7 @@ def _store_paths(node) -> tuple[str, ...]:
     from wsimod.core import constants
 
     from noodl.apps.wsimod.engine import _register_all
+    from noodl.apps.wsimod.land import runs_nutrients
     from noodl.apps.wsimod.node import NODE_CLASSES
 
     _register_all()
@@ -487,7 +488,7 @@ def _store_paths(node) -> tuple[str, ...]:
     if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces (D5)
         return cls.store_paths_of(
             [(type(s).__name__, s.surface) for s in node.surfaces],
-            nutrients="nitrate" in constants.POLLUTANTS,
+            nutrients=runs_nutrients(constants.POLLUTANTS),
         )
     tank = type(getattr(node, "tank", None)).__name__
     paths = cls.store_paths

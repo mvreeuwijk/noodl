@@ -841,7 +841,7 @@ def test_step_cannot_leave_the_network_dates():
 
     network = read_wsimod_config(_two_growing())
     model, state, drivers = build_model(network)
-    with pytest.raises(ValueError, match="t"):
+    with pytest.raises(ValueError, match="is not a whole number of days inside the dates"):
         model.step(state, drivers, dt=86400.0, t=len(network.dates) * 86400.0)
 
 
@@ -869,3 +869,52 @@ def test_et0_coef_is_recorded_for_every_non_impervious_surface():
     ]
     for name in ("short", "long"):
         assert torch.equal(et0[:, column[name]], crop[:, column[name]])
+
+
+# the unit of every growing parameter (WSIMOD's comments, land.py:1170-1250)
+_GROWING_UNITS = {
+    "ET_depletion_factor": "-", "rooting_depth": "m", "crop_factor_stages": "-",
+    "crop_cover_max": "-", "ground_cover_max": "-", "satact": "-", "thetaupp": "-",
+    "thetalow": "-", "thetapow": "-", "uptake1": "g/m2/y", "uptake2": "-", "uptake3": "1/d",
+    "uptake_PNratio": "-", "erodibility": "g*d/(J*mm)", "sreroexp": "-", "cohesion": "kPa",
+    "slope": "-", "srfilt": "-", "macrofilt": "-", "limpar": "-", "exppar": "-",
+    "hsatINs": "mg/l", "denpar": "-", "adosorption_nr_limit": "-", "kfr": "l/kg", "nfr": "-",
+    "kadsdes": "1/d", "bulk_density": "kg/m3",
+}  # fmt: skip
+
+
+def test_every_growing_parameter_has_its_unit():
+    """D6, W20: each of the 27 growing parameters and ``crop_factor_stages`` has WSIMOD's
+    unit on its driver ``"wsimod.GrowingSurface.<p>"``."""
+    from noodl.apps.wsimod import build_model
+
+    assert set(_GROWING_UNITS) == {*GROWING_DEFAULTS, "crop_factor_stages"}
+    model, _, _ = build_model(read_wsimod_config(_two_growing()))
+    drivers = model.wsimod_day.drivers
+    for name, unit in _GROWING_UNITS.items():
+        assert drivers[f"wsimod.GrowingSurface.{name}"].unit == unit, name
+
+
+def test_store_paths_of_registers_the_growing_class_in_a_fresh_interpreter():
+    """``Land.store_paths_of`` reads ``SURFACE_CLASSES`` after ``_register_all``."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    code = (
+        "from noodl.apps.wsimod.land import Land\n"
+        "paths = Land.store_paths_of([('GrowingSurface', 'g')])\n"
+        "assert 'surfaces.g.days_after_sow' in paths, paths\n"
+    )
+    path = os.pathsep.join(p for p in (str(root / "src"), os.environ.get("PYTHONPATH")) if p)
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        timeout=300,
+        env={**os.environ, "PYTHONPATH": path},
+    )
+    assert done.returncode == 0, done.stderr

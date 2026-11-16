@@ -53,7 +53,7 @@ from tests.verification._wsimod_parity import (  # noqa: E402
     assert_matches_wsimod,
     mass_balance_worst,
     wsimod_reference_by_day,
-    wsimod_until_crash,
+    wsimod_until_crash_by_day,
 )
 from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
 
@@ -485,8 +485,8 @@ def test_the_cases_cover_every_listed_feature():
         "growing_default_depletion",
     }
     # D13: the cases WSIMOD runs as they are until it raises
-    assert {n: spec.crash for n, spec in CASES.items() if spec.crash} == {
-        "growing_default_depletion": ("ZeroDivisionError", "land.py:1566"),
+    assert {n: (spec.crash, spec.crash_day) for n, spec in CASES.items() if spec.crash} == {
+        "growing_default_depletion": (("ZeroDivisionError", "land.py:1566"), 11),
     }
     # D24: the one case whose default run is a prefix of its dates
     assert {n: spec.slow_days for n, spec in CASES.items() if spec.slow_days} == {
@@ -901,7 +901,7 @@ CRASH_RUNS = [
 
 @functools.cache
 def crashed(name: str):
-    return wsimod_until_crash(CASES[name].build())
+    return wsimod_until_crash_by_day(CASES[name].build())
 
 
 def _innermost_land_line(error: BaseException) -> str:
@@ -923,15 +923,20 @@ def test_case_runs_where_wsimod_crashes(name, mode):
     records the event at the land (the evident intent instead of the exception), and over the
     whole run its results are finite and its balance closes."""
     spec = CASES[name]
-    reference, error, day = crashed(name)
+    reference, error, day, print_days = crashed(name)
     kind, line = spec.crash
     assert type(error).__name__ == kind
     assert _innermost_land_line(error) == line
-    assert 0 <= day < spec.days
+    assert day == spec.crash_day  # the recipe's crash day, pinned (D13)
     if day:
         results, diagnostics = case_ours(name, mode, day)
         found = assert_matches_wsimod(
-            results, reference, diagnostics=diagnostics, case=f"{name}-{mode}", quality=MODES[mode]
+            results,
+            reference,
+            diagnostics=diagnostics,
+            case=f"{name}-{mode}",
+            quality=MODES[mode],
+            print_days=print_days,
         )
         assert found["worst"] == 0.0 and found["admissions"] == []
     results, diagnostics = case_ours(name, mode)
