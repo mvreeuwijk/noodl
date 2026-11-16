@@ -5,8 +5,20 @@ A growing surface is a :class:`~noodl.apps.wsimod.land.PerviousSurface` whose ph
 and ground cover and a water-stress coefficient. ``calc_crop_cover`` (``:1514-1572``) runs first in
 the surface's ``inflows`` (``:1275``) and writes the day's ``et0_coefficient``
 (``crop_factor * Ks``), which ``ihacres`` reads through ``get_climate``
-(:meth:`~noodl.apps.wsimod.land.PerviousSurface.crop_et0_coefficient`). The nutrient processes
-(``nitrate`` among the pollutants) are later tasks; ``has_nutrients`` records the switch.
+(:meth:`~noodl.apps.wsimod.land.PerviousSurface.crop_et0_coefficient`).
+
+**The nutrient pool** (``nitrate`` among the pollutants, ``has_nutrients``; ``land.py:1273``,
+``:1276``). The surface owns a :class:`~noodl.apps.wsimod.nutrient_pool.NutrientPool`
+(``nutrient_pool``, ``None`` without ``nitrate``), started from the tank's storage and
+``initial_soil_storage`` (``:1293-1324``). Its inputs are the deposition overrides
+(``:2267-2311``), ``fertiliser`` and ``manure`` (``:1649-1710``), each scaled to the tank by
+``adjust_vqip_to_liquid`` (``:1574-1603``); its outputs so far are ``pull_storage``
+(``:1433-1493``), whose nutrient columns leave in the pool's proportions, and
+``effective_precipitation_flushing`` (``:1605-1647``), which extracts the same outflows from the
+dissolved pools a second time (L8, reproduced: Y16, Y45). The soil processes after
+``calculate_soil_temperature`` are later tasks (D20). A tank with no inorganic N gives the three
+N species 0 in ``pull_storage``, where WSIMOD raises ``ZeroDivisionError`` (``:1460``; L5, Y18;
+the decision ``S/pull_storage/no_din`` and the event ``"pull_storage_no_din"``).
 
 **The calendar is built at build time** (spec, Approach rule 2, D7).
 :meth:`GrowingSurface.set_dates` evaluates, for every date of the network and in WSIMOD's own
@@ -47,7 +59,10 @@ Quirks transcribed (spec, ``calc_crop_cover``):
 State: ``days_after_sow`` is ``-1`` for WSIMOD's ``None`` (and ``0`` on the sowing day), the covers
 persist outside the season until the harvest resets them (``(...)`` tensors, written under the
 caller's ``active`` mask). The decisions are ``S/calc_crop_cover/{unsown,crop,depletion,unstressed,
-stress_floor,stress_zero_denominator}``, ``S`` being ``node:N/surfaces.<s>``.
+stress_floor,stress_zero_denominator}``, ``S`` being ``node:N/surfaces.<s>``; with the pool,
+``S/pull_storage/{empty,clip,no_din}`` and ``S/adjust_vqip_to_liquid/{N,P}`` (``call`` counts the
+dry, wet, fertiliser and manure calls in that order), and the pool's own
+``S.nutrient_pool.<pool>/extract/clip:<N|P>``.
 """
 
 from __future__ import annotations
@@ -63,9 +78,18 @@ import torch
 from torch import Tensor
 
 from noodl.apps.wsimod.constants import SURFACE_INPUTS
-from noodl.apps.wsimod.engine import dmax
+from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.land import SURFACE_CLASSES, PerviousSurface, month_start, runs_nutrients
-from noodl.apps.wsimod.vqip import Pollutants, safe_den, write
+from noodl.apps.wsimod.nutrient_pool import (
+    ADS,
+    DI,
+    DO,
+    FAST,
+    NUTRIENT_POOL_PAIRS,
+    NUTRIENT_POOL_SCALARS,
+    NutrientPool,
+)
+from noodl.apps.wsimod.vqip import Pollutants, extract_vqip, safe_den, v_change_vqip, write
 
 if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import SurfaceSpec, WsimodNetwork
@@ -73,11 +97,49 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "GROWING_DEFAULTS",
+    "NUTRIENT_POLLUTANTS",
     "STRUCTURE_DEFAULTS",
     "CalendarDay",
     "GrowingSurface",
     "quick_interp",
 ]
+
+# With ``nitrate`` a pollutant a growing surface reads these (``land.py:1294-1307``, ``:1465``,
+# ``:2088``, ``:1822``; WSIMOD's docstring, ``:1119-1121``, omits ``solids``: L24)
+NUTRIENT_POLLUTANTS = (
+    "ammonia",
+    "nitrite",
+    "nitrate",
+    "phosphate",
+    "org-nitrogen",
+    "org-phosphorus",
+    "solids",
+    "temperature",
+)
+# land.py:1308-1324: the keys of initial_soil_storage, in the order WSIMOD reads them
+_SOIL_STORAGE_KEYS = (
+    "phosphate",
+    "ammonia",
+    "nitrate",
+    "nitrite",
+    "org-nitrogen",
+    "org-phosphorus",
+)
+# The parameter domains that, with ``nitrate``, stand for a WSIMOD crash (spec, Validation):
+# (name, the refused comparison with 0, why)
+_DOMAIN = (
+    ("rooting_depth", "<=", "the soil's physical depth (land.py:1849, :2186 divide by it)"),
+    ("bulk_density", "<=", "adsorption divides by it (land.py:2186)"),
+    ("kfr", "<=", "adsorption takes log(kfr) (land.py:2199)"),
+    ("nfr", "<=", "adsorption divides by it (land.py:2199)"),
+    ("cohesion", "==", "erosion divides by 0.5 * cohesion (land.py:1965)"),
+    ("thetaupp", "==", "the soil-moisture factor divides by it (land.py:1849)"),
+    ("thetalow", "==", "the soil-moisture factor divides by it (land.py:1852)"),
+    ("hsatINs", "<=", "din_conc + hsatINs can be 0 in denitrification (land.py:2125)"),
+    ("limpar", "<", "a dry soil then divides DI.N by 0 in denitrification (land.py:2109-2125)"),
+    ("field_capacity", "<=", "denitrification divides by field_capacity_m (land.py:2109)"),
+)
+_REFUSED = {"<=": "<= 0", "<": "< 0", "==": "0"}
 
 # land.py:1186-1250, WSIMOD's attributes as written (Python evaluates the expressions), set only
 # in ``__init__`` and reachable through the overrides (``:1376-1410``); and the two constructor
@@ -198,6 +260,42 @@ def _check_structure(values: Mapping, where: str) -> None:
         )
 
 
+def _check_domain(values: Mapping, where: str) -> None:
+    """With ``nitrate``, the parameter domains of :data:`_DOMAIN` (spec, Validation): each
+    refused value is a WSIMOD crash. ``values`` are numbers or batched tensors; any instance
+    outside the domain is refused."""
+    for name, op, why in _DOMAIN:
+        value = _f64(values[name])
+        bad = {"<=": value <= 0, "<": value < 0, "==": value == 0}[op]
+        if bool(bad.any()):
+            raise ValueError(f"{where}: {name} {value.tolist()} is {_REFUSED[op]}: {why}")
+
+
+def _soil_storage(value: object, where: str) -> Mapping | None:
+    """``initial_soil_storage`` (``land.py:1308-1324``, read only with ``nitrate``): falsy (no
+    solid pools) or a mapping with :data:`_SOIL_STORAGE_KEYS`, each a number. A float, which
+    WSIMOD's docstring allows (``:1142``), raises ``TypeError`` at ``:1312`` and is refused (L16,
+    Y37), and so is a missing key (``KeyError``)."""
+    if not value:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"{where}: initial_soil_storage {value!r} is not a mapping of "
+            f"{', '.join(_SOIL_STORAGE_KEYS)} (WSIMOD subscripts it: TypeError at land.py:1312; "
+            "L16, Y37)"
+        )
+    for key in _SOIL_STORAGE_KEYS:
+        if key not in value:
+            raise ValueError(
+                f"{where}: initial_soil_storage lacks {key!r} (land.py:1311-1324 read "
+                f"{', '.join(_SOIL_STORAGE_KEYS)}: KeyError)"
+            )
+        entry = value[key]
+        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            raise ValueError(f"{where}: initial_soil_storage[{key!r}] {entry!r} is not a number")
+    return value
+
+
 def _stages_tensor(top: Tensor) -> Tensor:
     """``[0, 0, top, 0, 0]`` (``land.py:1342-1343``) with ``top`` ``(...)``: ``(..., 5)``."""
     zero = torch.zeros_like(top)
@@ -268,6 +366,53 @@ class GrowingSurface(PerviousSurface):
         self.has_nutrients = runs_nutrients(pollutants.names)  # :1276, as Land.store_paths_of
         self.calendar: list[CalendarDay] = []
         self.inflows.insert(0, self.calc_crop_cover)  # :1275
+        # D14: the pool, only with nitrate (an inert pool has no observable effect, spec); its
+        # parameters are drivers "wsimod.<Class>.nutrient_pool.<p>" with WSIMOD's defaults
+        # (np.py:16-23; L20, Y24, D16)
+        self.nutrient_pool: NutrientPool | None = None
+        if self.has_nutrients:
+            self.nutrient_pool = NutrientPool(site=f"{self.site}.nutrient_pool")
+            for name, pair in NUTRIENT_POOL_PAIRS.items():
+                self.defaults[f"nutrient_pool.{name}"] = _f64(pair)
+            for name, value in NUTRIENT_POOL_SCALARS.items():
+                self.defaults[f"nutrient_pool.{name}"] = _f64(value)
+            self._fill_pool(_soil_storage(structure.get("initial_soil_storage"), where))
+            # :1278-1281 (residue stays unwired, :1281)
+            self.inflows += [self.effective_precipitation_flushing, self.fertiliser, self.manure]
+            # D5: the pool is carried with the crop registers
+            self.carried_fields = (*type(self).carried_fields, "nutrient_pool")
+
+    def _fill_pool(self, soil: Mapping | None) -> None:
+        """``land.py:1293-1324``: the dissolved pools from the tank's storage, then the solid
+        ones from ``initial_soil_storage`` when it is truthy; every other entry stays 0."""
+        storage, column = self.storage, self.p.column
+        pool = torch.zeros(5, 2, dtype=torch.float64)
+        pool[DI, 1] = storage[..., column("phosphate")]
+        pool[DI, 0] = (
+            storage[..., column("nitrate")]
+            + storage[..., column("ammonia")]
+            + storage[..., column("nitrite")]
+        )
+        pool[DO, 1] = storage[..., column("org-phosphorus")]
+        pool[DO, 0] = storage[..., column("org-nitrogen")]
+        if soil:
+            pool[ADS, 1] = _f64(soil["phosphate"])
+            pool[ADS, 0] = _f64(soil["ammonia"]) + _f64(soil["nitrate"]) + _f64(soil["nitrite"])
+            pool[FAST, 0] = _f64(soil["org-nitrogen"])
+            pool[FAST, 1] = _f64(soil["org-phosphorus"])
+        self.nutrient_pool.storage = pool
+
+    # --- the day's context (D14) ----------------------------------------------------------------
+    @property
+    def ctx(self) -> Ctx:
+        return PerviousSurface.ctx.fget(self)
+
+    @ctx.setter
+    def ctx(self, ctx: Ctx) -> None:
+        PerviousSurface.ctx.fset(self, ctx)
+        pool = getattr(self, "nutrient_pool", None)
+        if pool is not None:
+            pool.ctx = ctx
 
     # --- parameters -----------------------------------------------------------------------------
     def _set_derived(self, derived: Mapping[str, Tensor]) -> None:
@@ -280,20 +425,44 @@ class GrowingSurface(PerviousSurface):
 
     @classmethod
     def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
-        """D5: the crop registers and the day's crop factor and ``et0_coefficient``."""
-        return cls.crop_fields
+        """D5: the crop registers and the day's crop factor and ``et0_coefficient``; with
+        ``nutrients`` the pool's ``(5, 2)`` storage too."""
+        return (*cls.crop_fields, "nutrient_pool") if nutrients else cls.crop_fields
+
+    def stores(self) -> dict[str, Tensor]:
+        """:meth:`Surface.stores`, with the pool's storage tensor at ``nutrient_pool``."""
+        out = super().stores()
+        if self.nutrient_pool is not None:
+            out["nutrient_pool"] = self.nutrient_pool.storage
+        return out
+
+    def load_store(self, field: str, value: Tensor) -> None:
+        """``nutrient_pool`` is the pool's storage; anything else is an attribute."""
+        if field == "nutrient_pool" and self.nutrient_pool is not None:
+            self.nutrient_pool.storage = value
+            return
+        super().load_store(field, value)
 
     def driver_columns(self) -> dict[str, tuple | str]:
-        """D16: ``crop_factor_stages`` is padded to the class's longest list (``"stages"``)."""
-        return {"crop_factor_stages": "stages"}
+        """D16: ``crop_factor_stages`` is padded to the class's longest list (``"stages"``); the
+        six pair parameters of the pool have the columns ``("N", "P")``."""
+        columns: dict[str, tuple | str] = {"crop_factor_stages": "stages"}
+        if self.nutrient_pool is not None:
+            columns.update({f"nutrient_pool.{name}": ("N", "P") for name in NUTRIENT_POOL_PAIRS})
+        return columns
 
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
         """The day's parameters, ``crop_factor_stages`` ``(..., S)`` among them, ``S`` at least
         the length ``L`` of ``crop_factor_stage_dates``: the driver of the class is padded to
         its longest list (D16), and an entry beyond ``L`` must be 0 (inert, Y33): another value
         is refused, naming the surface and the index. ``wilting_point`` must stay below
-        ``field_capacity`` (``TAW > 0``, L4)."""
+        ``field_capacity`` (``TAW > 0``, L4). With the pool, every instance must be inside the
+        parameter domains (:data:`_DOMAIN`), and the ``nutrient_pool.<p>`` parameters bind the
+        pool (the pairs brought to the batch shape of all seven)."""
         parameters = dict(parameters)
+        if self.nutrient_pool is not None:
+            values = {**self.defaults, **parameters}
+            _check_domain({name: values[name] for name, _, _ in _DOMAIN}, self.site)
         stages = parameters.pop("crop_factor_stages", None)
         stages = self._stages_default if stages is None else _f64(stages)
         length = len(self.crop_factor_stage_dates)
@@ -321,18 +490,40 @@ class GrowingSurface(PerviousSurface):
                 f"{self.site}: wilting_point is not below field_capacity: TAW <= 0 "
                 "(land.py:1360-1366, L4)"
             )
+        if self.nutrient_pool is not None:
+            pool = {n: self._param(f"nutrient_pool.{n}") for n in NUTRIENT_POOL_PAIRS}
+            scalars = {n: self._param(f"nutrient_pool.{n}") for n in NUTRIENT_POOL_SCALARS}
+            batch = torch.broadcast_shapes(
+                *(v.shape[:-1] for v in pool.values()), *(v.shape for v in scalars.values())
+            )
+            pool = {n: v.expand((*batch, 2)) for n, v in pool.items()}
+            self.nutrient_pool.bind({**pool, **scalars})
 
     @classmethod
     def validate_spec(
         cls, surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
     ) -> list[str]:
         """Refused by name: the structural parameters (:func:`_check_structure`) and, whenever
-        ``nitrate`` is a pollutant of the network (in both modes, Y49), a missing fertiliser or
-        manure variable (``land.py:1649-1710`` reads all six) or a missing first-of-the-month row
-        on a run date. A quantity-only run lists the data as ignored (the caller does)."""
+        ``nitrate`` is a pollutant of the network (in both modes, D18, Y49): a missing one of
+        :data:`NUTRIENT_POLLUTANTS`, a parameter outside its domain (:data:`_DOMAIN`), an
+        ``initial_soil_storage`` that is truthy but no mapping of its six keys (L16, Y37), a
+        missing fertiliser or manure variable (``land.py:1649-1710`` reads all six) or a missing
+        first-of-the-month row on a run date. A quantity-only run lists the data as ignored (the
+        caller does)."""
         values = {**cls.parameter_defaults, **STRUCTURE_DEFAULTS, **surface.parameters}
+        names = network.pollutants.names
+        if "nitrate" in names:
+            for name in NUTRIENT_POLLUTANTS:
+                if name not in names:
+                    raise ValueError(
+                        f"{where}: with 'nitrate' a pollutant a growing surface needs "
+                        f"{', '.join(NUTRIENT_POLLUTANTS)}, and {name!r} is not one "
+                        "(land.py:1294-1307, :1465, :2088, :1822: KeyError; L24)"
+                    )
+            _check_domain(values, where)
+            _soil_storage(values.get("initial_soil_storage"), where)
         _check_structure(values, where)
-        if "nitrate" not in network.pollutants.names:
+        if "nitrate" not in names:
             return []
         variables = {variable for variable, _ in surface.data}
         for variable in SURFACE_INPUTS:
@@ -350,10 +541,7 @@ class GrowingSurface(PerviousSurface):
                         f"{where}: no {variable!r} data on {month:%Y-%m-%d}, the first of the "
                         f"month of {date:%Y-%m-%d} (land.py:1649-1710, via :471)"
                     )
-        # removed by Task 6
-        raise ValueError(
-            f"{where}: a GrowingSurface with nitrate among the pollutants is not supported yet"
-        )
+        return []
 
     # --- the calendar ---------------------------------------------------------------------------
     def set_dates(self, dates: Sequence[datetime], labels: Sequence[str]) -> None:
@@ -499,6 +687,190 @@ class GrowingSurface(PerviousSurface):
         # :1570
         self.et0_coefficient = write(active, stress * self.crop_factor, self.et0_coefficient)
         return ctx.empty(), ctx.empty()
+
+    # --- the pool's inputs and outputs (land.py:1433-1710, :2267-2311) -----------------------
+    def _with_columns(self, vqip: Tensor, values: Mapping[str, Tensor]) -> Tensor:
+        """``vqip`` with ``vqip[name] = value`` for each entry (WSIMOD's dict assignments)."""
+        shape = torch.broadcast_shapes(vqip.shape[:-1], *(_f64(v).shape for v in values.values()))
+        vqip = vqip.expand(shape + vqip.shape[-1:])
+        for name, value in values.items():
+            hot = torch.zeros(1 + self.p.K, dtype=torch.bool)
+            hot[self.p.column(name)] = True
+            vqip = torch.where(hot, _f64(value).expand(shape)[..., None], vqip)
+        return vqip
+
+    def _nutrients(self, vqip: Tensor) -> Tensor:
+        """``deposition = {N: nitrate + ammonia, P: phosphate}`` (``land.py:1671-1672``,
+        ``:2280-2281``, ``:2303-2304``), ``(..., 2)``."""
+        column = self.p.column
+        n = vqip[..., column("nitrate")] + vqip[..., column("ammonia")]
+        return torch.stack([n, vqip[..., column("phosphate")]], dim=-1)
+
+    def pull_storage(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:1433-1493``. Without the pool, :meth:`Tank.pull_storage`. With it, empty when
+        ``V == 0`` (``empty``); otherwise ``reply = v_change_vqip(storage, min(request, V))``
+        (``clip``), ``prop = reply.volume / V``, the pool's ``extract_dissolved(prop)``, and the
+        reply's nutrient columns from what the pool gave: ``nitrate``, ``ammonia`` and
+        ``nitrite`` each ``inorganic.N * storage[x] / din`` with ``din = nitrate + ammonia +
+        nitrite`` of the storage, ``phosphate`` the inorganic P and ``org-phosphorus``,
+        ``org-nitrogen`` the organic P and N; then the reply leaves the storage. The volumes never
+        depend on the pool, but the nutrient columns leave in the pool's proportions.
+
+        ``din = 0`` (``no_din``): WSIMOD raises ``ZeroDivisionError`` (``:1460``); noodl gives
+        the three species 0, the tank having none to give, and records
+        ``"pull_storage_no_din"`` (L5, Y18). The pool has lost its share all the same."""
+        pool = self.nutrient_pool
+        if pool is None:
+            return super().pull_storage(vqip, active=active)
+        p, ctx = self.p, self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("pull_storage")
+        site = f"{self.site}/pull_storage"
+        storage = self.storage
+        # :1446
+        dry = ctx.decide(f"{site}/empty", storage[..., 0], "==", 0.0, active=active, call=call)
+        run = active & ~dry
+        # :1450-1453
+        volume = dmin(ctx, f"{site}/clip", vqip[..., 0], storage[..., 0], active=run, call=call)
+        reply = v_change_vqip(p, storage, volume)
+        # :1457-1458 (V > 0 where it is used)
+        proportion = reply[..., 0] / safe_den(storage[..., 0])
+        inorganic, organic = pool.extract_dissolved(proportion, active=run)
+        # :1459-1485
+        column = p.column
+        din = storage[..., column("nitrate")] + storage[..., column("ammonia")]
+        din = din + storage[..., column("nitrite")]
+        no_din = ctx.decide(f"{site}/no_din", din, "==", 0.0, active=run, call=call)
+        ctx.event("pull_storage_no_din", self.parent.name, run & no_din)
+        den = torch.where(no_din, torch.ones_like(din), din)
+        zero = torch.zeros_like(din)
+        species = {
+            name: torch.where(no_din, zero, inorganic[..., 0] * storage[..., column(name)] / den)
+            for name in ("nitrate", "ammonia", "nitrite")
+        }
+        reply = self._with_columns(
+            reply,
+            {
+                **species,
+                "phosphate": inorganic[..., 1],
+                "org-phosphorus": organic[..., 1],
+                "org-nitrogen": organic[..., 0],
+            },
+        )
+        # :1491
+        self.storage = write(run, extract_vqip(p, storage, reply), storage)
+        return torch.where(dry[..., None], ctx.empty(), reply)
+
+    def adjust_vqip_to_liquid(
+        self, vqip: Tensor, dep: Tensor, in_: Tensor, *, active: Tensor
+    ) -> Tensor:
+        """``land.py:1574-1603``: with ``dep.N > 0`` (decision ``N``) ``nitrate``, ``ammonia`` and
+        ``org-nitrogen`` become ``x * (in_.N / dep.N)``; with ``dep.P > 0`` (``P``)
+        ``phosphate`` and ``org-phosphorus`` become ``x * (in_.P / dep.P)``. The ratio is
+        evaluated even where it is exactly 1 (fertiliser, wet deposition). A non-positive
+        ``dep`` (negative data, Review Focus 3) leaves ``vqip`` as it is. Without the pool
+        nothing changes (``:1594``)."""
+        if self.nutrient_pool is None:
+            return vqip
+        ctx = self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("adjust_vqip_to_liquid")
+        site = f"{self.site}/adjust_vqip_to_liquid"
+        for j, nutrient, names in (
+            (0, "N", ("nitrate", "ammonia", "org-nitrogen")),
+            (1, "P", ("phosphate", "org-phosphorus")),
+        ):
+            positive = ctx.decide(
+                f"{site}/{nutrient}", dep[..., j], ">", 0.0, active=active, call=call
+            )
+            ratio = in_[..., j] / safe_den(dep[..., j])  # dep > 0 where it is used
+            scaled = self._with_columns(
+                vqip, {name: vqip[..., self.p.column(name)] * ratio for name in names}
+            )
+            vqip = torch.where((active & positive)[..., None], scaled, vqip)
+        return vqip
+
+    def dry_deposition_to_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:2267-2288``: ``dep = {N: nitrate + ammonia, P: phosphate}`` to the pool's
+        ``allocate_dry_deposition`` (the N split between the fast and dissolved inorganic pools,
+        all the P to the adsorbed pool), the tank's share scaled by
+        :meth:`adjust_vqip_to_liquid` (its phosphate ``x * (0 / P) = 0``) and forced in. Without
+        the pool, :class:`~noodl.apps.wsimod.land.Surface`'s: the whole deposition enters."""
+        if self.nutrient_pool is None:
+            return super().dry_deposition_to_tank(vqip, active=active)
+        dep = self._nutrients(vqip)
+        in_ = self.nutrient_pool.allocate_dry_deposition(dep, active=active)
+        vqip = self.adjust_vqip_to_liquid(vqip, dep, in_, active=active)
+        self.push_storage(vqip, force=True, active=active)
+        return vqip
+
+    def wet_deposition_to_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:2290-2311``: as the dry one, with ``allocate_wet_deposition`` (all into the
+        dissolved inorganic pool, so the ratios are 1)."""
+        if self.nutrient_pool is None:
+            return super().wet_deposition_to_tank(vqip, active=active)
+        dep = self._nutrients(vqip)
+        in_ = self.nutrient_pool.allocate_wet_deposition(dep, active=active)
+        vqip = self.adjust_vqip_to_liquid(vqip, dep, in_, active=active)
+        self.push_storage(vqip, force=True, active=active)
+        return vqip
+
+    def effective_precipitation_flushing(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1605-1647``: the inorganic N and P of the day's subsurface flow,
+        percolation and infiltration excess (in WSIMOD's order of terms) are extracted from the
+        dissolved inorganic pool, then their organic N and P from the dissolved organic pool.
+
+        ``pull_storage`` has already extracted the subsurface flow's and the percolation's from
+        the same pools (``:1458``), so the pools lose them twice (L8): reproduced, with no switch
+        (Y16, Y45). Nothing enters or leaves the tank."""
+        pool, column = self.nutrient_pool, self.p.column
+        ss, perc, ie = self.subsurface_flow, self.percolation, self.infiltration_excess
+
+        def terms(names: tuple[str, ...]) -> Tensor:
+            total = None
+            for flow in (ss, perc, ie):
+                for name in names:
+                    value = flow[..., column(name)]
+                    total = value if total is None else total + value
+            return total
+
+        # :1615-1631
+        inorganic = torch.stack(
+            torch.broadcast_tensors(
+                terms(("ammonia", "nitrite", "nitrate")), terms(("phosphate",))
+            ),
+            dim=-1,
+        )
+        pool.extract(DI, inorganic, active=active)
+        # :1635-1645
+        organic = torch.stack(
+            torch.broadcast_tensors(terms(("org-nitrogen",)), terms(("org-phosphorus",))), dim=-1
+        )
+        pool.extract(DO, organic, active=active)
+        return self.ctx.empty(), self.ctx.empty()
+
+    def _applied(self, kind: str, allocate, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``fertiliser`` and ``manure`` (``land.py:1649-1710``): the day's month's ``nhx``,
+        ``noy`` and ``srp`` data times the area as ``ammonia``, ``nitrate`` and ``phosphate``,
+        ``dep = {N: nitrate + ammonia, P: phosphate}`` into the pool by ``allocate``, the tank's
+        share scaled by :meth:`adjust_vqip_to_liquid` and forced in."""
+        vqip = self._deposition(kind)
+        dep = self._nutrients(vqip)
+        in_ = allocate(dep, active=active)
+        vqip = self.adjust_vqip_to_liquid(vqip, dep, in_, active=active)
+        self.push_storage(vqip, force=True, active=active)
+        return vqip, self.ctx.empty()
+
+    def fertiliser(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1649-1679``: all into the dissolved inorganic pool
+        (``allocate_fertiliser``, ``np.py:314-328``), so the ratios are 1."""
+        return self._applied("fertiliser", self.nutrient_pool.allocate_fertiliser, active=active)
+
+    def manure(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1681-1710``: ``fraction_manure_to_dissolved_inorganic`` of each nutrient
+        into the dissolved inorganic pool and the rest into the fast pool (``allocate_manure``,
+        ``np.py:267-290``); the tank gets the dissolved share."""
+        return self._applied("manure", self.nutrient_pool.allocate_manure, active=active)
 
 
 SURFACE_CLASSES["GrowingSurface"] = GrowingSurface

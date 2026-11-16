@@ -87,7 +87,13 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   unstressed,stress_floor,stress_zero_denominator}`` (``:1531``, ``:1550``, ``:1560``, ``:1561``,
   ``:1564``; the last is noodl's guard for ``(1 - ET_depletion_factor) * TAW == 0``, whose event is
   ``"crop_water_stress_zero_denominator"``, Y17); its sowing, harvest and leap tests are
-  structural and record nothing (:meth:`GrowingSurface.set_dates`).
+  structural and record nothing (:meth:`GrowingSurface.set_dates`). With ``nitrate`` among
+  the pollutants it adds ``node:N/surfaces.<name>/pull_storage/{empty,clip,no_din}``
+  (``:1446``, ``:1450``; ``no_din`` is noodl's guard for the tank's ``nitrate + ammonia +
+  nitrite == 0``, whose event is ``"pull_storage_no_din"``, L5, Y18) in place of the tank's
+  ``pull_storage`` sites, and ``node:N/surfaces.<name>/adjust_vqip_to_liquid/{N,P}`` (``:1595``,
+  ``:1599``; ``call`` counts the dry deposition, wet deposition, fertiliser and manure calls in
+  that order).
   Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's

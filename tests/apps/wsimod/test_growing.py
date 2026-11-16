@@ -18,16 +18,18 @@ import torch
 import noodl.apps.wsimod.growing  # noqa: F401  (registers the class)
 from noodl.apps.wsimod.classes import SURFACE_SCHEMAS
 from noodl.apps.wsimod.config import NodeSpec, SurfaceSpec, read_wsimod_config
-from noodl.apps.wsimod.constants import SURFACE_INPUTS
+from noodl.apps.wsimod.constants import SURFACE_DEPOSITION, SURFACE_INPUTS
 from noodl.apps.wsimod.engine import Ctx, make_node
 from noodl.apps.wsimod.growing import (
     GROWING_DEFAULTS,
+    NUTRIENT_POLLUTANTS,
     STRUCTURE_DEFAULTS,
     GrowingSurface,
     quick_interp,
 )
-from noodl.apps.wsimod.land import SURFACE_CLASSES, Land, surface_derived
-from noodl.apps.wsimod.vqip import QUANTITY_ONLY
+from noodl.apps.wsimod.land import SURFACE_CLASSES, Land, month_start, surface_derived
+from noodl.apps.wsimod.nutrient_pool import ADS, DI, DO, FAST, POOLS
+from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 
 P = QUANTITY_ONLY
 FA = 1e-11
@@ -487,9 +489,10 @@ def _forcing_data():
     return {(v, d): 0.001 for v in ("precipitation", "et0", "temperature") for d in _DATES}
 
 
+# the eight pollutants a growing surface needs with nitrate (NUTRIENT_POLLUTANTS), and one more
 _NITRATE = {
-    "pollutants": ["nitrate", "temperature"],
-    "additive_pollutants": ["nitrate"],
+    "pollutants": [*NUTRIENT_POLLUTANTS, "cod"],
+    "additive_pollutants": [n for n in (*NUTRIENT_POLLUTANTS, "cod") if n != "temperature"],
     "non_additive_pollutants": ["temperature"],
 }
 
@@ -506,10 +509,9 @@ def test_fertiliser_and_manure_data_are_needed_with_nitrate(pollutants):
             _mapping([_growing(data_input_dict=partial)], lists=_NITRATE), pollutants=pollutants
         )
     complete = _mapping([_growing(data_input_dict=_data(SURFACE_INPUTS))], lists=_NITRATE)
-    # with the data the interim refusal applies (removed by Task 6, which restores the
-    # assertion that a quantity-only run lists the data as ignored)
-    with pytest.raises(ValueError, match="not supported yet"):
-        _validate(complete, pollutants=pollutants)
+    ignored = _ignored(complete, pollutants=pollutants)
+    # with them, a quantity-only run lists the data as ignored
+    assert ignored == ([] if pollutants else ["surfaces.g.data_input_dict"])
 
 
 def test_a_missing_month_of_fertiliser_data_is_refused():
@@ -697,20 +699,12 @@ def test_a_batch_of_instances_runs_calc_crop_cover_under_a_mask():
     assert surface.crop_factor.tolist() == [1.0, 0.0, 1.0]
 
 
-def test_nitrate_with_a_growing_surface_is_not_supported_yet():
-    """Interim refusal (removed by Task 6, with this test)."""
-    mapping = _mapping([_growing(data_input_dict=_data(SURFACE_INPUTS))], lists=_NITRATE)
-    for pollutants in (True, False):
-        with pytest.raises(ValueError, match="GrowingSurface with nitrate.*not supported yet"):
-            _validate(mapping, pollutants=pollutants)
-
-
 def test_every_surface_function_has_a_part_or_none():
     """``Surface.run`` raises ``KeyError`` for a function in neither table (D11)."""
     from noodl.apps.wsimod.land import NO_PART, PART_NAMES
 
     land = make_land()
-    for surface in make_land().surfaces + land.surfaces:
+    for surface in make_land().surfaces + land.surfaces + _nutrient_land().surfaces:
         for f in surface.inflows + surface.processes + surface.outflows:
             assert f.__name__ in PART_NAMES or f.__name__ in NO_PART, f.__name__
     assert not NO_PART & set(PART_NAMES)
@@ -918,3 +912,514 @@ def test_store_paths_of_registers_the_growing_class_in_a_fresh_interpreter():
         env={**os.environ, "PYTHONPATH": path},
     )
     assert done.returncode == 0, done.stderr
+
+
+# --- the nutrient pool on the surface (Task 6) ---------------------------------------------------
+NUT = Pollutants(
+    tuple(_NITRATE["pollutants"]),
+    tuple(_NITRATE["additive_pollutants"]),
+    tuple(_NITRATE["non_additive_pollutants"]),
+)
+_KEYS = ("volume", *NUT.names)
+_SOIL = {
+    "phosphate": 1.5,
+    "ammonia": 0.2,
+    "nitrate": 0.7,
+    "nitrite": 0.05,
+    "org-nitrogen": 3.0,
+    "org-phosphorus": 0.4,
+}
+
+
+def _nutrient_land(*, data=None, **parameters) -> Land:
+    data = dict(data or {})
+    spec = SurfaceSpec(
+        "g",
+        "GrowingSurface",
+        parameters,
+        data,
+        constructed_variables=frozenset(v for v, _ in data),
+        constructed_load=(),
+    )
+    return make_node(NodeSpec("land", "Land", "Land", {}, {}, [spec]), None, NUT)
+
+
+def _nut_ctx(land, *, day: int = 0) -> Ctx:
+    ctx = Ctx(NUT, FA, torch.Size(()), day=day, node_names=["land"], record_decisions=True)
+    land.ctx = ctx
+    return ctx
+
+
+def _wsimod_nutrient(storage, *, data=None, area=1.0, **kwargs):
+    """WSIMOD's ``GrowingSurface`` with ``nitrate`` among its pollutants (``NUT``)."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes.land import GrowingSurface as WsimodGrowing
+    from wsimod.orchestration.model import to_datetime
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    reset_wsimod_globals()
+    constants.POLLUTANTS = list(NUT.names)
+    constants.ADDITIVE_POLLUTANTS = list(NUT.additive)
+    constants.NON_ADDITIVE_POLLUTANTS = list(NUT.non_additive)
+    keyed = {(v, to_datetime(d.strftime("%Y-%m-%d"))): x for (v, d), x in (data or {}).items()}
+    return WsimodGrowing(
+        parent=SimpleNamespace(),
+        surface="g",
+        area=area,
+        pollutant_load={},
+        data_input_dict=keyed,
+        initial_storage={**dict.fromkeys(_KEYS, 0.0), **storage},
+        **kwargs,
+    )
+
+
+def _vector(vqip) -> torch.Tensor:
+    return torch.tensor([float(vqip[k]) for k in _KEYS], dtype=F64)
+
+
+def _their_pools(theirs) -> torch.Tensor:
+    return torch.tensor(
+        [[float(pool.storage[n]) for n in "NP"] for pool in theirs.nutrient_pool.pools], dtype=F64
+    )
+
+
+def _set_their_pools(theirs, pools) -> None:
+    for pool, (n, p) in zip(theirs.nutrient_pool.pools, pools, strict=True):
+        pool.storage = {"N": n, "P": p}
+
+
+def _n(vqip) -> float:
+    return float(vqip[NUT.column("ammonia")] + vqip[NUT.column("nitrite")]) + float(
+        vqip[NUT.column("nitrate")]
+    )
+
+
+def test_pull_storage_equals_wsimods():
+    """``land.py:1433-1493``, bitwise, on 300 random tanks and pools: an empty tank (an empty
+    reply), requests above ``V`` (capped at ``V``) and pools larger than the tank's columns
+    (whose columns then go negative). The reply, the storage and the pools are WSIMOD's."""
+    theirs = _wsimod_nutrient({"volume": 1.0})
+    land = _nutrient_land()
+    ours = land.surfaces[0]
+    rng = random.Random(11)
+    empty = capped = larger = 0
+    for k in range(300):
+        volume = 0.0 if k % 25 == 0 else rng.uniform(0.01, 2.0)
+        storage = {n: rng.uniform(0.0, 0.5) for n in NUT.additive}
+        storage.update(volume=volume, nitrate=rng.uniform(1e-3, 0.5), temperature=12.5)
+        pools = [[rng.uniform(0.0, 1.0), rng.uniform(0.0, 1.0)] for _ in POOLS]
+        request = volume * rng.uniform(0.0, 1.5) if volume else rng.uniform(0.0, 1.0)
+        empty += volume == 0
+        capped += request > volume > 0
+        larger += pools[DI][0] > storage["nitrate"] + storage["ammonia"] + storage["nitrite"]
+        theirs.storage = dict(storage)
+        _set_their_pools(theirs, pools)
+        ours.storage = NUT.to_vqip(storage)
+        ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+        _nut_ctx(land)
+        reply = ours.pull_storage(NUT.to_vqip({"volume": request}), active=TRUE)
+        their = theirs.pull_storage({"volume": request})
+        assert torch.equal(reply, _vector(their)), k
+        assert torch.equal(ours.storage, _vector(theirs.storage)), k
+        assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs)), k
+    assert empty and capped and larger
+
+
+def test_pull_storage_without_din_gives_no_species():
+    """L5, Y18: a tank with no inorganic N and ``V > 0``. WSIMOD raises ``ZeroDivisionError``
+    at ``land.py:1460``; noodl gives the three species 0, the pool has still lost
+    ``DI.N * prop``, and ``"pull_storage_no_din"`` is true."""
+    import traceback
+
+    storage = {"volume": 1.0, "phosphate": 0.2, "org-nitrogen": 0.1, "org-phosphorus": 0.05}
+    storage.update(solids=0.3, temperature=10.0)
+    pools = [[0.0, 0.0], [0.0, 0.0], [0.4, 0.2], [0.1, 0.05], [0.0, 0.0]]
+    theirs = _wsimod_nutrient(storage)
+    _set_their_pools(theirs, pools)
+    with pytest.raises(ZeroDivisionError) as raised:
+        theirs.pull_storage({"volume": 0.25})
+    frame = traceback.extract_tb(raised.value.__traceback__)[-1]
+    assert frame.filename.endswith("land.py") and frame.lineno == 1460
+    land = _nutrient_land(initial_storage=storage)
+    ours = land.surfaces[0]
+    ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+    ctx = _nut_ctx(land)
+    reply = ours.pull_storage(NUT.to_vqip({"volume": 0.25}), active=TRUE)
+    proportion = 0.25 / 1.0
+    for name in ("nitrate", "ammonia", "nitrite"):
+        assert float(reply[NUT.column(name)]) == 0.0
+    assert float(reply[NUT.column("phosphate")]) == 0.2 * proportion
+    assert float(ours.nutrient_pool.storage[DI, 0]) == 0.4 - 0.4 * proportion
+    assert bool(ctx.events["pull_storage_no_din"]["land"])
+    (decision,) = [d for d in ctx.decisions if d.site.endswith("/pull_storage/no_din")]
+    assert decision.site == "node:land/surfaces.g/pull_storage/no_din" and bool(decision.outcome)
+    # with inorganic N in the tank the guard is not taken
+    ours.storage = NUT.to_vqip({**storage, "nitrate": 0.01})
+    ctx = _nut_ctx(land)
+    ours.pull_storage(NUT.to_vqip({"volume": 0.25}), active=TRUE)
+    assert not bool(ctx.events["pull_storage_no_din"]["land"])
+
+
+def _month(k: int) -> datetime:
+    return datetime(2003 + (9 + k) // 12, (9 + k) % 12 + 1, 1)
+
+
+def _land_data(*, months=15, negative=None, zero=()) -> dict:
+    """``{(variable, first of month): value}`` of the 12 surface variables from 2003-10,
+    distinct per variable and month; the month ``negative`` holds negative values (Review
+    Focus 3) and the variables in ``zero`` are 0."""
+    data = {}
+    for i, variable in enumerate((*SURFACE_DEPOSITION, *SURFACE_INPUTS)):
+        for k in range(months):
+            value = (i + 1) * 1e-6 + k * 1.7e-7
+            if k == negative:
+                value = -value
+            data[(variable, _month(k))] = 0.0 if variable in zero else value
+    return data
+
+
+def _bind_month(land, data, date) -> None:
+    month = month_start(date)
+    land.bind(
+        {
+            "precipitation": torch.tensor(0.0, dtype=F64),
+            "et0": torch.tensor(0.0, dtype=F64),
+            "temperature": torch.tensor(10.0, dtype=F64),
+            **{
+                f"surfaces.g.{v}": torch.tensor(x, dtype=F64)
+                for (v, m), x in data.items()
+                if m == month
+            },
+        }
+    )
+
+
+_INPUTS = ("atmospheric_deposition", "precipitation_deposition", "fertiliser", "manure")
+_START = {"volume": 3.0, "ammonia": 0.01, "nitrate": 0.02, "phosphate": 0.1, "temperature": 11.0}
+
+
+def test_fertiliser_manure_and_deposition_equal_wsimods():
+    """``land.py:1574-1710``, ``:2267-2311`` and ``np.py:226-328`` against live WSIMOD over 400
+    days from 2003-10-01, with 15 months of the 12 variables, one month negative (Review
+    Focus 3): the storage, the pools and each ``(in_, out_)`` are bitwise WSIMOD's and finite.
+    The manure goes ``fmdi`` to the dissolved inorganic pool and ``1 - fmdi`` to the fast one;
+    the dry phosphate goes to the adsorbed pool and the tank gets ``x * (0 / P) = 0``."""
+    pytest.importorskip("wsimod")
+    from wsimod.orchestration.model import to_datetime
+
+    data = _land_data(negative=5)
+    theirs = _wsimod_nutrient(_START, data=data, area=3.0)
+    land = _nutrient_land(data=data, area=3.0, initial_storage=_START)
+    ours = land.surfaces[0]
+    pool = ours.nutrient_pool
+    assert [f.__name__ for f in theirs.inflows] == [f.__name__ for f in ours.inflows]
+    assert torch.equal(pool.storage, _their_pools(theirs))
+    negative = 0
+    for k in range(400):
+        date = datetime(2003, 10, 1) + timedelta(days=k)
+        _nut_ctx(land)
+        _bind_month(land, data, date)
+        theirs.parent.monthyear = to_datetime(f"{date.year}-{date.month:02d}")
+        for name in _INPUTS:
+            before = pool.storage.clone()
+            their_in, their_out = getattr(theirs, name)()
+            in_, out_ = getattr(ours, name)(active=TRUE)
+            assert torch.equal(in_, _vector(their_in)), (k, name)
+            assert torch.equal(out_, _vector(their_out)), (k, name)
+            assert torch.equal(ours.storage, _vector(theirs.storage)), (k, name)
+            assert torch.equal(pool.storage, _their_pools(theirs)), (k, name)
+            assert not (torch.isnan(in_).any() or torch.isnan(pool.storage).any())
+            negative += bool((in_ < 0).any())
+            if name == "manure":
+                nhx, noy, srp = (ours.forcing[f"{v}-manure"] * 3.0 for v in ("nhx", "noy", "srp"))
+                dep = torch.stack([noy + nhx, srp])
+                fmdi = pool.fraction_manure_to_dissolved_inorganic
+                assert torch.equal(pool.storage[DI], before[DI] + dep * fmdi)
+                assert torch.equal(pool.storage[FAST], before[FAST] + dep * (1 - fmdi))
+            if name == "atmospheric_deposition" and float(ours.forcing["srp-dry"]) > 0:
+                srp_dry = ours.forcing["srp-dry"] * 3.0
+                assert float(in_[NUT.column("phosphate")]) == 0.0
+                assert torch.equal(pool.storage[ADS, 1], before[ADS, 1] + srp_dry)
+    assert negative  # the negative month enters, unscaled
+
+
+def test_the_liquid_ratio_is_evaluated():
+    """``land.py:1595-1602``: with fertiliser, the tank's nitrate is ``noy * area * (in_.N /
+    dep.N)``, the ratio exactly 1.0; with ``dep.N = 0`` the line is skipped. The decisions
+    ``adjust_vqip_to_liquid/N|P`` carry ``call`` 0 to 3 in the order dry, wet, fertiliser,
+    manure."""
+    date = datetime(2003, 10, 1)
+    for zero in ((), ("nhx-fertiliser", "noy-fertiliser")):
+        data = _land_data(months=1, zero=zero)
+        land = _nutrient_land(data=data, area=3.0, initial_storage=_START)
+        ours = land.surfaces[0]
+        ctx = _nut_ctx(land)
+        _bind_month(land, data, date)
+        replies = {name: getattr(ours, name)(active=TRUE)[0] for name in _INPUTS}
+        noy = ours.forcing["noy-fertiliser"] * 3.0
+        dep_n = noy + ours.forcing["nhx-fertiliser"] * 3.0
+        for nutrient in ("N", "P"):
+            site = f"node:land/surfaces.g/adjust_vqip_to_liquid/{nutrient}"
+            decisions = [d for d in ctx.decisions if d.site == site]
+            assert [d.call for d in decisions] == [0, 1, 2, 3]
+        fertiliser_n = [d for d in ctx.decisions if d.site.endswith("liquid/N") and d.call == 2][0]
+        assert bool(fertiliser_n.outcome) == (not zero)
+        nitrate = replies["fertiliser"][NUT.column("nitrate")]
+        if not zero:
+            assert float(dep_n / dep_n) == 1.0
+            assert torch.equal(nitrate, noy * (dep_n / dep_n))
+        else:
+            assert float(nitrate) == 0.0
+
+
+def test_flushing_extracts_the_outflows_again():
+    """L8 (``land.py:1605-1647``, reproduced: Y16, Y45): after two ``pull_storage`` calls (the
+    subsurface flow and the percolation) and ``effective_precipitation_flushing``, the dissolved
+    pools are WSIMOD's: smaller than ``DI0 - (ss + perc)`` by the second extraction."""
+    storage = {"volume": 2.0, "nitrate": 0.3, "ammonia": 0.1, "nitrite": 0.02, "phosphate": 0.05}
+    storage.update({"org-nitrogen": 0.2, "org-phosphorus": 0.03, "solids": 1.0, "temperature": 9.0})
+    theirs = _wsimod_nutrient(storage)
+    land = _nutrient_land(initial_storage=storage)
+    ours = land.surfaces[0]
+    ctx = _nut_ctx(land)
+    assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs))
+    start = ours.nutrient_pool.storage.clone()
+    their_ss = theirs.pull_storage({"volume": 0.2})
+    their_perc = theirs.pull_storage({"volume": 0.3})
+    theirs.subsurface_flow, theirs.percolation = their_ss, their_perc
+    theirs.infiltration_excess = theirs.empty_vqip()
+    ss = ours.pull_storage(NUT.to_vqip({"volume": 0.2}), active=TRUE)
+    perc = ours.pull_storage(NUT.to_vqip({"volume": 0.3}), active=TRUE)
+    ours.subsurface_flow, ours.percolation, ours.infiltration_excess = ss, perc, ctx.empty()
+    once = ours.nutrient_pool.storage.clone()
+    assert theirs.effective_precipitation_flushing() == (theirs.empty_vqip(),) * 2
+    in_, out_ = ours.effective_precipitation_flushing(active=TRUE)
+    assert not in_.any() and not out_.any()
+    assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs))
+    assert torch.equal(ours.storage, _vector(theirs.storage))
+    flowed = _n(ss) + _n(perc)
+    di_n = float(ours.nutrient_pool.storage[DI, 0])
+    assert di_n < float(start[DI, 0]) - flowed
+    assert di_n == pytest.approx(float(once[DI, 0]) - flowed, rel=1e-12)
+    assert di_n == pytest.approx(float(start[DI, 0]) - 2 * flowed, rel=1e-12)
+
+
+def test_the_initial_pool_comes_from_the_storage_and_initial_soil_storage():
+    """``land.py:1293-1324``: ``DI = (nitrate + ammonia + nitrite, phosphate)`` and ``DO =
+    (org-nitrogen, org-phosphorus)`` of the tank; ``ads = (ammonia + nitrate + nitrite,
+    phosphate)`` and ``fast = (org-nitrogen, org-phosphorus)`` of ``initial_soil_storage``,
+    in WSIMOD's order of terms; the humus pool stays 0."""
+    storage = {"volume": 2.0, "nitrate": 0.3, "ammonia": 0.1, "nitrite": 0.01, "phosphate": 0.05}
+    storage.update({"org-nitrogen": 0.2, "org-phosphorus": 0.03, "solids": 1.0, "temperature": 9.0})
+    for soil in (_SOIL, None, 0, {}):
+        theirs = _wsimod_nutrient(storage, initial_soil_storage=soil)
+        pool = _nutrient_land(initial_storage=storage, initial_soil_storage=soil).surfaces[0]
+        pool = pool.nutrient_pool.storage
+        assert torch.equal(pool, _their_pools(theirs)), soil
+        assert pool[DI].tolist() == [0.3 + 0.1 + 0.01, 0.05]
+        assert pool[DO].tolist() == [0.2, 0.03]
+        if soil:
+            assert pool[ADS].tolist() == [0.2 + 0.7 + 0.05, 1.5]
+            assert pool[FAST].tolist() == [3.0, 0.4]
+        else:
+            assert not pool[ADS].any() and not pool[FAST].any()
+        assert not pool[POOLS.index("humus_pool")].any()
+
+
+def _complete(**values):
+    return _growing(data_input_dict=_data(SURFACE_INPUTS), **values)
+
+
+def test_initial_soil_storage_refusals():
+    """L16, Y37: a float, which WSIMOD's docstring allows, raises ``TypeError`` at
+    ``land.py:1312`` and is refused; so is a mapping lacking a key. ``0`` and ``None`` are
+    falsy and accepted. Without ``nitrate`` it is never read."""
+    with pytest.raises(TypeError):
+        _wsimod_nutrient({"volume": 1.0}, initial_soil_storage=0.5)
+    with pytest.raises(ValueError, match="initial_soil_storage"):
+        _validate(_mapping([_complete(initial_soil_storage=0.5)], lists=_NITRATE))
+    lacking = {k: v for k, v in _SOIL.items() if k != "org-phosphorus"}
+    with pytest.raises(ValueError, match="org-phosphorus"):
+        _validate(_mapping([_complete(initial_soil_storage=lacking)], lists=_NITRATE))
+    with pytest.raises(ValueError, match="org-phosphorus"):
+        _nutrient_land(initial_soil_storage=lacking)
+    for falsy in (0, None):
+        mapping = _mapping([_complete(initial_soil_storage=falsy)], lists=_NITRATE)
+        assert _validate(mapping, pollutants=True) == []
+    quiet = _mapping([_growing(initial_soil_storage=0.5)], lists=_LISTS)
+    assert _validate(quiet, pollutants=True) == []
+
+
+@pytest.mark.parametrize("name", [n for n in NUTRIENT_POLLUTANTS if n != "nitrate"])
+def test_nitrate_needs_the_eight_pollutants(name):
+    """With ``nitrate``, the seven other names of :data:`NUTRIENT_POLLUTANTS` are needed in either
+    mode (``land.py:1294-1307``, ``:1465``, ``:2088``, ``:1822``; ``solids`` is L24)."""
+    lists = {key: [n for n in names if n != name] for key, names in _NITRATE.items()}
+    mapping = _mapping([_complete()], lists=lists)
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match=name):
+            _validate(mapping, pollutants=pollutants)
+
+
+_DOMAINS = [
+    ("rooting_depth", 0.0),
+    ("bulk_density", 0.0),
+    ("kfr", -1.0),
+    ("nfr", 0.0),
+    ("cohesion", 0.0),
+    ("thetaupp", 0.0),
+    ("thetalow", 0.0),
+    ("hsatINs", 0.0),
+    ("limpar", -0.1),
+    ("field_capacity", 0.0),
+]
+
+
+@pytest.mark.parametrize(("name", "value"), _DOMAINS)
+def test_the_domain_refusals(name, value):
+    """Spec, Validation: with ``nitrate`` each of these is a WSIMOD crash, refused at build (the
+    merged parameters) and at bind (any batched instance). Without ``nitrate`` the build
+    accepts what it reads nothing from."""
+    mapping = _mapping([_complete()], overrides={"g": {name: value}}, lists=_NITRATE)
+    with pytest.raises(ValueError, match=name):
+        _validate(mapping, pollutants=True)
+    surface = _nutrient_land(initial_storage=_START).surfaces[0]
+    good = float(surface.defaults[name])
+    with pytest.raises(ValueError, match=name):
+        surface.bind({name: torch.tensor([good, value], dtype=F64)})
+    surface.bind({name: torch.tensor([good, good], dtype=F64)})
+    if name not in ("rooting_depth", "field_capacity"):
+        quiet = _mapping([_growing()], overrides={"g": {name: value}}, lists=_LISTS)
+        assert _validate(quiet, pollutants=True) == []
+
+
+def _nitrate_mapping(**surface) -> dict:
+    data = {(v, d): 0.001 for v in ("precipitation", "et0", "temperature") for d in _DATES}
+    start = {"volume": 0.2, "nitrate": 0.01, "ammonia": 0.002, "phosphate": 0.001}
+    growing = _complete(initial_storage=start, initial_soil_storage=_SOIL, **surface)
+    return _mapping([growing], data=data, lists=_NITRATE)
+
+
+def test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults():
+    """L20, Y24: the pool's parameters are drivers ``"wsimod.<Class>.nutrient_pool.<p>"`` with
+    WSIMOD's defaults (``np.py:16-23``), pairs ``(n, 2)`` with the columns ``("N", "P")``; a
+    driver reaches the pool. A surface key or an override naming one is refused, naming
+    ``NutrientPool``."""
+    from noodl.apps.wsimod import build_model, initial_drivers
+    from noodl.apps.wsimod.nutrient_pool import NUTRIENT_POOL_PAIRS, NUTRIENT_POOL_SCALARS
+
+    model, state, _ = build_model(read_wsimod_config(_nitrate_mapping()))
+    layout = model.wsimod_day.drivers
+    key = "wsimod.GrowingSurface.nutrient_pool.degrhpar"
+    assert layout[key].template.tolist() == [[7 * 1e-5, 7 * 1e-6]]
+    assert layout[key].columns == ("N", "P")
+    assert layout[key].labels == [("land", "g")]
+    for name, pair in NUTRIENT_POOL_PAIRS.items():
+        d = layout[f"wsimod.GrowingSurface.nutrient_pool.{name}"]
+        assert d.template.tolist() == [list(pair)] and d.unit == "-"
+    for name, value in NUTRIENT_POOL_SCALARS.items():
+        d = layout[f"wsimod.GrowingSurface.nutrient_pool.{name}"]
+        assert d.template.tolist() == [value] and d.columns is None
+    fmdi = "wsimod.GrowingSurface.nutrient_pool.fraction_manure_to_dissolved_inorganic"
+    drivers = initial_drivers(model, values={fmdi: torch.tensor([[0.25, 0.75]], dtype=F64)})
+    _, _, engine = next(model.wsimod_day.run_days(state, drivers, days=1))
+    pool = engine.nodes["land"].surfaces[0].nutrient_pool
+    assert pool.fraction_manure_to_dissolved_inorganic.tolist() == [0.25, 0.75]
+    assert pool.fraction_manure_to_fast.tolist() == [0.75, 0.25]
+    with pytest.raises(ValueError, match="degrhpar.*NutrientPool"):
+        read_wsimod_config(_nitrate_mapping(degrhpar={"N": 1e-4, "P": 1e-5}))
+    mapping = _nitrate_mapping()
+    mapping["overrides"] = {
+        "nodes": {"land": {"type_": "Land", "name": "land", "surfaces": {"g": {"degrhpar": {}}}}}
+    }
+    with pytest.raises(ValueError, match="degrhpar.*NutrientPool"):
+        read_wsimod_config(mapping)
+
+
+def test_without_nitrate_there_is_no_pool():
+    """D14, D16: without ``nitrate`` (or in a quantity-only run) there are no
+    ``"wsimod.nutrient_pool"`` rows and no pool drivers, and the dry deposition enters the tank
+    whole (``Surface``'s ``dry_deposition_to_tank``)."""
+    from noodl.apps.wsimod import build_model
+
+    for mapping, pollutants in (
+        (_mapping([_growing()], lists=_LISTS), True),
+        (_nitrate_mapping(), False),
+    ):
+        model, state, _ = build_model(read_wsimod_config(mapping), pollutants=pollutants)
+        day = model.wsimod_day
+        assert day.state_labels("wsimod.nutrient_pool") == []
+        assert state["wsimod.nutrient_pool"].shape == (0,)
+        assert not [k for k in day.drivers if "nutrient_pool" in k]
+        assert day.engine.nodes["land"].surfaces[0].nutrient_pool is None
+    dep = Pollutants(
+        ("ammonia", "phosphate", "temperature"), ("ammonia", "phosphate"), ("temperature",)
+    )
+    data = _land_data(months=1)
+    spec = SurfaceSpec(
+        "g",
+        "GrowingSurface",
+        {"area": 2.0},
+        data,
+        constructed_variables=frozenset(v for v, _ in data),
+    )
+    land = make_node(NodeSpec("land", "Land", "Land", {}, {}, [spec]), None, dep)
+    ours = land.surfaces[0]
+    assert ours.nutrient_pool is None
+    land.ctx = Ctx(dep, FA, torch.Size(()), day=0, node_names=["land"])
+    month = _month(0)
+    land.bind(
+        {
+            "precipitation": torch.tensor(0.0, dtype=F64),
+            "et0": torch.tensor(0.0, dtype=F64),
+            "temperature": torch.tensor(10.0, dtype=F64),
+            **{
+                f"surfaces.g.{v}": torch.tensor(x, dtype=F64)
+                for (v, m), x in data.items()
+                if m == month
+            },
+        }
+    )
+    before = ours.storage.clone()
+    in_, _ = ours.atmospheric_deposition(active=TRUE)
+    assert float(in_[dep.column("ammonia")]) == data[("nhx-dry", month)] * 2.0
+    assert float(in_[dep.column("phosphate")]) == data[("srp-dry", month)] * 2.0
+    assert torch.equal(ours.storage[1:3], before[1:3] + in_[1:3])
+
+
+def test_the_pool_state_has_ten_labelled_rows():
+    """D4: ``"wsimod.nutrient_pool"`` is flat, ten rows ``(land, "surfaces.<s>.nutrient_pool",
+    <pool>, <N|P>)`` per growing surface, kg, not water held; it starts at the constructor's
+    pools, and a load then dump reproduces the engine's ``(5, 2)`` tensor exactly. One day runs
+    and the balance closes."""
+    from noodl.apps.wsimod import build_model, initial_state, wsimod_run
+
+    model, state, drivers = build_model(read_wsimod_config(_nitrate_mapping()))
+    day = model.wsimod_day
+    labels = day.state_labels("wsimod.nutrient_pool")
+    assert len(labels) == 10
+    assert labels[0] == ("land", "surfaces.g.nutrient_pool", "fast_pool", "N")
+    assert labels[9] == ("land", "surfaces.g.nutrient_pool", "adsorbed_inorganic_pool", "P")
+    assert day.key_labels["wsimod.nutrient_pool"].unit == "kg"
+    land = day.engine.nodes["land"]
+    assert "surfaces.g.nutrient_pool" in land.carried_paths
+    assert land.store_paths == Land.store_paths_of([("GrowingSurface", "g")], nutrients=True)
+    assert "surfaces.g.nutrient_pool" not in Land.store_paths_of([("GrowingSurface", "g")])
+    expected = torch.tensor(
+        [[3.0, 0.4], [0.0, 0.0], [0.01 + 0.002 + 0.0, 0.001], [0.0, 0.0], [0.2 + 0.7 + 0.05, 1.5]],
+        dtype=F64,
+    )
+    assert torch.equal(state["wsimod.nutrient_pool"].reshape(5, 2), expected)
+    values = {label: 0.1 * (i + 1) for i, label in enumerate(labels)}
+    given = initial_state(model, values={"wsimod.nutrient_pool": values})
+    day._load(given, torch.Size(()))
+    pool = land.surfaces[0].nutrient_pool.storage
+    assert pool.shape == (5, 2)
+    assert torch.equal(pool.reshape(10), given["wsimod.nutrient_pool"])
+    assert torch.equal(
+        day._dump(torch.Size(()))["wsimod.nutrient_pool"], given["wsimod.nutrient_pool"]
+    )
+    results = wsimod_run(model, given, drivers, days=2)
+    assert float(results.mass_balance.residual.abs().max()) <= 1e-12

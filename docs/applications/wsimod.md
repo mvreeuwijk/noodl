@@ -262,9 +262,10 @@ name (WSIMOD raises `TypeError`, or prints an error and ignores it); `rooting_de
 override. Its constructor keywords are `rooting_depth`, `ET_depletion_factor`,
 `crop_factor_stages`, `crop_factor_stage_dates`, `sowing_day`, `harvest_day` and
 `initial_soil_storage`; the 25 attributes WSIMOD sets in `__init__` (`land.py:1186-1250`) are
-reachable through overrides only, 31 names with `rooting_depth` (`:1376-1431`). The nutrient
-processes of a growing surface (the soil pools, fertiliser, uptake, erosion and the rest) are
-the next tasks of sub-project 3c: here the surface runs the crop calendar and the cover only.
+reachable through overrides only, 31 names with `rooting_depth` (`:1376-1431`). With `nitrate`
+among the pollutants the surface also keeps a nutrient pool, fed by deposition, fertiliser and
+manure and drained by its outflows (below). The soil processes of the pool (the transformation,
+crop uptake, erosion, denitrification and adsorption) are the next tasks of sub-project 3c.
 
 `calc_crop_cover` (`land.py:1514-1572`) runs first on the surface each day. It sows on
 `sowing_day` and harvests on `harvest_day` (the raw day of the year), interpolates the crop
@@ -328,6 +329,71 @@ that is not impervious: a `PerviousSurface`'s is its parameter).
 `S` the longest list among the class's surfaces; a shorter surface's row is padded with 0, and a
 padding entry other than 0 is refused when the day is bound, naming the surface and the index.
 The stage dates, the sowing and harvest days are structure and are not drivers.
+
+**The nutrient pool.** With `nitrate` among the pollutants (in a run with pollutants on), a
+growing surface owns WSIMOD's `NutrientPool` (`nutrient_pool.py`): five stores of nitrogen and
+phosphorus, the `fast_pool`, `humus_pool`, `dissolved_inorganic_pool`, `dissolved_organic_pool`
+and `adsorbed_inorganic_pool`. It starts from the tank (`land.py:1293-1324`): the dissolved
+inorganic pool holds the tank's `nitrate + ammonia + nitrite` and `phosphate`, the dissolved
+organic pool its `org-nitrogen` and `org-phosphorus`. A truthy `initial_soil_storage` fills the
+adsorbed pool (`ammonia + nitrate + nitrite`, `phosphate`) and the fast pool (`org-nitrogen`,
+`org-phosphorus`). It must then be a mapping with those six keys: a float, which WSIMOD's docstring
+allows, raises `TypeError` in WSIMOD and is refused (L16), and so is a missing key. The pool is
+carried in the state key `"wsimod.nutrient_pool"` (kg), ten rows per growing surface,
+`(land, "surfaces.<name>.nutrient_pool", <pool>, <N|P>)`, the pools in the order above, each `N`
+then `P`. It is not water, so the mass balance leaves it out: the boundary is WSIMOD's, the tanks.
+
+The pool's inputs and outputs, in WSIMOD's call order:
+
+- **Deposition** (`:2267-2311`). Dry deposition sends `fraction_dry_n_to_dissolved_inorganic`
+  (0.9) of its nitrogen to the dissolved inorganic pool and the rest to the fast pool, and all its
+  phosphorus to the adsorbed pool. Wet deposition goes to the dissolved inorganic pool.
+- **`pull_storage`** (`:1433-1493`), twice in `ihacres` (the subsurface flow, then the
+  percolation). The volume is the tank's, but the nutrient columns leave in the **pool's**
+  proportions: the reply takes `prop = volume / V` of each dissolved pool, splitting the
+  inorganic nitrogen over `nitrate`, `ammonia` and `nitrite` in the tank's proportions. Where the
+  pool holds more than the tank, a tank column can go negative. A tank with no inorganic nitrogen
+  makes WSIMOD divide by zero (`ZeroDivisionError` at `:1460`); noodl gives the three species 0,
+  since the tank has none to give, and records the event `"pull_storage_no_din"` (L5). WSIMOD
+  therefore needs initial inorganic N in the tank, or a non-zero input in the first month: the
+  trigger is ordinary, a growing surface started from a tank with no inorganic N, with zero
+  fertiliser, manure and deposition in its first month (a winter start), crashes WSIMOD on the
+  first day that water passes through the soil (deposition, which enters before `ihacres`, masks
+  it; fertiliser enters after).
+- **`effective_precipitation_flushing`** (`:1605-1647`), right after `ihacres`, extracts the
+  nutrients of the day's subsurface flow, percolation and infiltration excess from the dissolved
+  pools **again** (L8): the pools lose the outflows' nutrients twice, so the tank and the pool
+  drift apart (in a WSIMOD run of 120 days, tank phosphate 1.158 kg against 0.052 in the pool).
+  Reproduced, without a switch: every growing-surface value depends on it, and the two possible
+  fixes give different results.
+- **`fertiliser`** and **`manure`** (`:1649-1710`), from the monthly `nhx`, `noy` and `srp` data
+  times the area. Fertiliser goes to the dissolved inorganic pool; manure sends
+  `fraction_manure_to_dissolved_inorganic` (0.5 for N, 0.1 for P) there and the rest to the
+  fast pool.
+
+Each input enters the tank as WSIMOD's `adjust_vqip_to_liquid` scales it (`:1574-1603`): the
+tank's `nitrate`, `ammonia` and `org-nitrogen` by `in_.N / dep.N`, its `phosphate` and
+`org-phosphorus` by `in_.P / dep.P`, where `dep` is what reached the pool and `in_` its dissolved
+part (so dry phosphate reaches the tank as `0`). A non-positive `dep` (negative data) is not
+scaled: the pool and the tank both receive the negative mass, as in WSIMOD. The mass balance
+parts are `"GrowingSurface.fertiliser"` and `"GrowingSurface.manure"`; the deposition parts are
+the dissolved share.
+
+The pool's seven parameters are drivers with WSIMOD's defaults (`np.py:16-23`):
+`"wsimod.GrowingSurface.nutrient_pool.<p>"` `(..., n, 2)`, columns `("N", "P")`, for `degrhpar`,
+`dishpar`, `minfpar`, `disfpar`, `immobdpar` and `fraction_manure_to_dissolved_inorganic`, and
+`"wsimod.GrowingSurface.nutrient_pool.fraction_dry_n_to_dissolved_inorganic"` `(..., n)`. WSIMOD
+cannot configure them (it builds the pool with its defaults and never calls its
+`apply_overrides`, L20), so a surface key or an override naming one is refused, naming
+`NutrientPool`. Without `nitrate`, and in a quantity-only run, there is no pool, no pool state
+and no pool driver, and the deposition enters the tank whole.
+
+With `nitrate`, these are refused by name, in either mode: a missing one of `ammonia`,
+`nitrite`, `phosphate`, `org-nitrogen`, `org-phosphorus`, `solids` (which erosion reads, though
+WSIMOD's docstring omits it, L24) and `temperature`; and, at build and for every batched
+instance at bind, `rooting_depth`, `bulk_density`, `kfr` or `nfr` at or below 0, `cohesion`,
+`thetaupp` or `thetalow` of 0, `hsatINs` at or below 0, `limpar` below 0 and `field_capacity` at
+or below 0, each a division by zero or a logarithm of a non-positive number in WSIMOD.
 
 ### The soil temperature
 
@@ -537,7 +603,7 @@ print(round(float(balance.inflow[0, 0]), 4), round(float(balance.storage_change[
 [('river', 'tank')] [0.1389, 0.1275, 0.1101, 0.1043, 0.2316]
 ['Catchment.flow', 'Catchment.unrouted', 'Waste.total_in', 'dropped']
 True
-['decay_arc_order_unknown', 'demand_deficit', 'demand_not_able_to_push'] (5, 3)
+['crop_water_stress_zero_denominator', 'decay_arc_order_unknown', 'demand_deficit'] (5, 3)
 120.0 0.1389
 ```
 
@@ -578,7 +644,9 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   `"decay_arc_order_unknown"` (an end of day of a `DecayArc` found due-and-waiting rows in both
   directions, so its decayed term's order of addition may differ from WSIMOD's in the last
   bit, D21) and `"river_nitrogen_lost"` (a River's mineralisation with no dissolved nitrogen
-  destroyed nitrogen, X15). The arc-keyed event, `"decay_arc_order_unknown"`, is keyed by arc,
+  destroyed nitrogen, X15), `"crop_water_stress_zero_denominator"` (a growing surface's stress
+  coefficient divided by zero, L3) and `"pull_storage_no_din"` (a growing surface's tank had no
+  inorganic nitrogen to split a pull over, L5). The arc-keyed event, `"decay_arc_order_unknown"`, is keyed by arc,
   `(..., T, n_arcs)`, and `WsimodDay.event_columns(condition)` names the columns (X48);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
   that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
@@ -632,6 +700,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.liquor"`, `"wsimod.previous_pulled"`, `"wsimod.treated"` | node | the treatment works' liquor, an `FWTW`'s previous day's pull, a `WWTW`'s treated water |
 | `"wsimod.river_temperature_lag"`, `"wsimod.river_phosphorus_lag"` | `(river, i)` | the two registers of every River with biochemistry, `max_temp_lag + 1` and `max_phosphorus_lag + 1` slots (degC, kg) |
 | `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
+| `"wsimod.nutrient_pool"` | `(node, "surfaces.<name>.nutrient_pool", pool, nutrient)` | every growing surface's five nutrient pools, `N` then `P` of each (kg), `(..., 10 n_growing)`, with `nitrate` a pollutant and pollutants on |
 | `"wsimod.days_after_sow"`, `"wsimod.crop_cover"`, `"wsimod.ground_cover"` | `(node, "surfaces.<name>")` | every growing surface's days since sowing (`-1` before sowing: WSIMOD's `None`; d) and its crop and ground cover (-), `(..., n_growing)`, in both modes |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
@@ -656,7 +725,7 @@ pollutant entries, every `decays` value (nodes, surfaces and user decay arcs; th
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
 and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) the same configuration is
 refused if a process that is not ported yet would change the pollutants (the
-land's nutrient pools, 3c): until then, such configurations need `pollutants=False`. A surface's
+irrigation, garden and variable-area surfaces, 3c): until then, such configurations need `pollutants=False`. A surface's
 `pollutant_load` is live (`Surface.simple_deposition`); a key that is not a run pollutant is listed in
 `model.unread`, as `<land>.surfaces.<surface>.pollutant_load.<key>`.
 
@@ -739,6 +808,11 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface`: `TAW < 0` only prints, `TAW = 0` divides by zero (L4) | `wilting_point >= field_capacity` refused | `test_growing_refusals` |
 | `GrowingSurface`: `quick_interp` wraps to the last entry for a day at or before the first, and raises past the last (L23) | the wrap reproduced; a raising date refused with its name | `test_quick_interp_equals_wsimods`; `test_calendar_refusals` |
 | `GrowingSurface`: the configured `et0_coefficient` is overwritten (L22) | listed in `model.unread` | `test_a_growing_et0_coefficient_is_unread` |
+| `GrowingSurface.pull_storage` divides by the tank's inorganic nitrogen (L5) | the three species 0, event `"pull_storage_no_din"` | `test_pull_storage_without_din_gives_no_species` |
+| `GrowingSurface`: `effective_precipitation_flushing` extracts the outflows' nutrients from the pools that `pull_storage` already extracted them from (L8) | reproduced, documented | `test_flushing_extracts_the_outflows_again` |
+| `GrowingSurface`: a float `initial_soil_storage`, which the docstring allows, raises `TypeError` (L16) | refused | `test_initial_soil_storage_refusals` |
+| `NutrientPool`: its parameters cannot be configured (L20) | drivers with WSIMOD's defaults; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` |
+| `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]` |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
 | `UnlimitedDistribution` loses its leakage | refused | `test_leakage_refusals` |

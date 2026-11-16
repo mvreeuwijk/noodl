@@ -38,6 +38,7 @@ from noodl.apps.wsimod.constants import (
     UNBOUNDED_CAPACITY,
 )
 from noodl.apps.wsimod.decay import DecaySpec, read_decays
+from noodl.apps.wsimod.nutrient_pool import NUTRIENT_POOL_PAIRS, NUTRIENT_POOL_SCALARS
 from noodl.apps.wsimod.vqip import Pollutants
 
 __all__ = [
@@ -323,6 +324,19 @@ _TEMPERATURE_STORAGE = (
 )
 
 
+# np.py:14-23: a GrowingSurface's NutrientPool parameters, which WSIMOD cannot configure (L20)
+_POOL_PARAMETERS = (*NUTRIENT_POOL_PAIRS, *NUTRIENT_POOL_SCALARS)
+
+
+def _pool_parameter(key: str, where: str, what: str) -> str:
+    """The refusal of a ``NutrientPool`` parameter as configuration (L20, Y24)."""
+    return (
+        f"{where}: {key!r} is a NutrientPool parameter, not {what}: WSIMOD builds the pool with "
+        "its defaults (land.py:1273) and never calls its apply_overrides (np.py:155-181; L20). "
+        f"Set the driver 'wsimod.<Class>.nutrient_pool.{key}' instead (Y24)"
+    )
+
+
 # --- overrides -------------------------------------------------------------------------------
 def _apply_overrides(
     parameters: dict[str, object],
@@ -343,6 +357,8 @@ def _apply_overrides(
                 f"{where}: an override of {key!r} is not supported (surface and "
                 "data_input_dict forcing overrides are sub-project 3c, land.py:413-421)"
             )
+        if surface and key in _POOL_PARAMETERS:
+            raise ValueError(_pool_parameter(key, where, "an override"))
         if key not in schema.override_keys:
             raise ValueError(f"{where}: {key!r} is not an override of {schema.name}")
     for key, value in overrides.items():
@@ -519,6 +535,9 @@ def _read_surface(
     name = entry.pop("surface", schema.parameters["surface"])
     where = f"{owner}, surface {name!r}"
     data = _forcing(entry, base, where)
+    for key in entry:
+        if key in _POOL_PARAMETERS:
+            raise ValueError(_pool_parameter(key, where, "a surface keyword"))
     parameters = _checked_parameters(entry, schema, where)
     read_decays(where, parameters["decays"], pollutants)  # land.py:303-581: a DecayTank
     load = parameters.get("pollutant_load") or {}

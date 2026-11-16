@@ -253,6 +253,10 @@ class StoreNode(Node):
 _RIVER_REGISTERS = ("lagged_temperatures", "lagged_total_phosphorus")
 
 
+def _is_pool(path: str) -> bool:
+    return path.startswith("surfaces.") and path.endswith(".nutrient_pool")
+
+
 def _is_register(path: str) -> bool:
     return path.endswith("internal_arc.register")
 
@@ -274,9 +278,12 @@ def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
     """A captured store as the noodl tensor ``Node.load_stores`` takes. A ``QueueTank``'s queue
     is WSIMOD's ``{time: vqip}`` dict, captured under the ``register`` path, and its key list
     under the ``present`` path; a River's lag list is padded to its register
-    (:func:`pad_register`, X17); a store that is a number is a scalar."""
+    (:func:`pad_register`, X17); a growing surface's ``nutrient_pool`` is its ``(5, 2)`` list
+    of pools by nutrient (D4); a store that is a number is a scalar."""
     if path in _RIVER_REGISTERS:
         return pad_register(value, node.lag_sizes[_RIVER_REGISTERS.index(path)])
+    if _is_pool(path):  # a growing surface's five pools, N then P (D4)
+        return torch.tensor(value, dtype=torch.float64)
     if _is_register(path) or _is_present(path):
         length = _internal_arc(node, path).length
     if _is_register(path):
@@ -295,7 +302,13 @@ def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
 
 def compare_store(compare: _Comparer, label: str, path: str, ours: Tensor, theirs) -> None:
     """``ours`` against the captured store ``theirs`` (see :func:`load_value`); an absent queue
-    key is an empty row; a River's lag list is compared slot by slot with the padding (X17)."""
+    key is an empty row; a River's lag list is compared slot by slot with the padding (X17), and a
+    nutrient pool entry by entry."""
+    if _is_pool(path):
+        for i, row in enumerate(theirs):
+            for j, value in enumerate(row):
+                compare.value(f"{label}[{i}, {j}]", ours[..., i, j], value)
+        return
     if path in _RIVER_REGISTERS:
         expected = pad_register(theirs, ours.shape[-1])
         for slot in range(ours.shape[-1]):

@@ -20,8 +20,9 @@ from __future__ import annotations
 from noodl.apps.wsimod.arcs import ARC_CLASSES, DECAY_ARCS
 from noodl.apps.wsimod.classes import NODE_SCHEMAS
 from noodl.apps.wsimod.config import WsimodNetwork
-from noodl.apps.wsimod.constants import SURFACE_DEPOSITION
+from noodl.apps.wsimod.constants import SURFACE_DEPOSITION, SURFACE_INPUTS
 from noodl.apps.wsimod.engine import _register_all
+from noodl.apps.wsimod.land import SURFACE_CLASSES
 
 __all__ = [
     "check_network",
@@ -342,13 +343,18 @@ def surface_forcing_readers(network: WsimodNetwork) -> dict[str, list[tuple[str,
     A surface reads the six deposition variables when its constructor data had ``nhx-dry``
     (``land.py:375-382``, ``:540-576``); without it, or in a quantity-only run, the values are
     unread, but the readers are listed all the same: the forcing check applies in both modes
-    (D9). A variable no surface reads is absent.
+    (D9). A growing surface reads the six fertiliser and manure variables whenever ``nitrate`` is
+    among the network's pollutants (``land.py:1649-1710``; in both modes, Y49). A variable no
+    surface reads is absent.
     """
+    _register_all()  # the classes that register themselves (growing)
+    nutrients = "nitrate" in network.pollutants.names
     readers: dict[str, list[tuple[str, str]]] = {}
     for spec in network.nodes:
         for surface in spec.surfaces:
-            if "nhx-dry" not in surface.constructed_variables:
-                continue
-            for variable in SURFACE_DEPOSITION:
+            read = SURFACE_DEPOSITION if "nhx-dry" in surface.constructed_variables else ()
+            if nutrients and SURFACE_CLASSES[surface.cls].is_growing:
+                read = (*read, *SURFACE_INPUTS)
+            for variable in read:
                 readers.setdefault(variable, []).append((spec.name, surface.name))
     return readers

@@ -456,6 +456,22 @@ def pad_register(values: Sequence[float], size: int) -> torch.Tensor:
 
 
 DEPOSITION_VARIABLES = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
+# a growing surface's fertiliser and manure, read with nitrate (land.py:1649-1710)
+INPUT_VARIABLES = (
+    "nhx-fertiliser",
+    "noy-fertiliser",
+    "srp-fertiliser",
+    "nhx-manure",
+    "noy-manure",
+    "srp-manure",
+)
+
+
+def _runs_nutrients() -> bool:
+    """WSIMOD's nutrient switch, ``"nitrate" in constants.POLLUTANTS`` (``land.py:1276``)."""
+    from wsimod.core import constants
+
+    return "nitrate" in constants.POLLUTANTS
 
 
 def _runs_biochemistry(node) -> bool:
@@ -505,10 +521,14 @@ def _wsimod_store(node, path: str):
     """The WSIMOD value of a noodl store path: an attribute, except that noodl's dense queue
     (``<tank>.internal_arc.register``/``.present``) is WSIMOD's ``queue`` dict (the rows, by
     time) and its key set (``tanks.py:481-486``, ``arcs.py:567``), and a growing surface's
-    ``days_after_sow`` of ``None`` (unsown) is noodl's ``-1`` (D6)."""
+    ``days_after_sow`` of ``None`` (unsown) is noodl's ``-1`` (D6), and its ``nutrient_pool`` is
+    the ``(5, 2)`` list of its five stores' ``N`` and ``P`` (D4)."""
     if path.endswith(".days_after_sow"):
         value = _attribute(node, path)
         return -1 if value is None else value
+    if path.endswith(".nutrient_pool"):  # the five stores, (5, 2): pools in order, N then P
+        pools = _attribute(node, path).pools
+        return [[pool.storage[n] for n in "NP"] for pool in pools]
     for suffix, make in (
         (".internal_arc.register", lambda queue: queue),
         (".internal_arc.present", lambda queue: sorted(queue)),
@@ -542,8 +562,10 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     dicts; :func:`pad_register` makes a register of a list), and the day's
     ``data_input_dict[("temperature", t)]`` as ``pre["forcing.temperature"]``, so the replay
     can check it binds the temperature WSIMOD read (``storage.py:750``). A ``Land``'s ``monthyear``
-    and each deposition surface's ``(variable, monthyear)`` values are ``pre["forcing.monthyear"]``
-    and ``pre["forcing.surfaces.<surface>.<variable>"]``, which the replay checks the same way.
+    and each deposition surface's ``(variable, monthyear)`` values (with ``nitrate``, a growing
+    surface's fertiliser and manure too) are ``pre["forcing.monthyear"]`` and
+    ``pre["forcing.surfaces.<surface>.<variable>"]``, which the replay checks the same way. A
+    growing surface's ``nutrient_pool`` store is its five pools' ``(5, 2)`` ``N`` and ``P``.
     A call into a target that is already in a captured call is refused (D22); the error is
     raised again at exit, because WSIMOD's ``query_handler`` swallows exceptions and retries
     (``nodes.py:335-343``).
@@ -573,10 +595,14 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
             # (get_data_input_surface, land.py:462-471)
             out: dict[str, object] = {"forcing.monthyear": str(node.monthyear)}
             for surface in node.surfaces:
+                read = ()
                 if "nhx-dry" in {variable for variable, _ in surface.data_input_dict}:
-                    for variable in DEPOSITION_VARIABLES:
-                        value = surface.data_input_dict[(variable, node.monthyear)]
-                        out[f"forcing.surfaces.{surface.surface}.{variable}"] = value
+                    read = DEPOSITION_VARIABLES
+                if _runs_nutrients() and hasattr(surface, "nutrient_pool"):
+                    read = (*read, *INPUT_VARIABLES)
+                for variable in read:
+                    value = surface.data_input_dict[(variable, node.monthyear)]
+                    out[f"forcing.surfaces.{surface.surface}.{variable}"] = value
             return out
         return {}
 

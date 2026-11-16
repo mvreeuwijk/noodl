@@ -87,10 +87,12 @@ PART_NAMES = {
     "ihacres": "PerviousSurface.ihacres",
     "calculate_soil_temperature": "PerviousSurface.calculate_soil_temperature",
     "route": "PerviousSurface.route",
+    "fertiliser": "GrowingSurface.fertiliser",
+    "manure": "GrowingSurface.manure",
 }
 NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"
 # the surface functions that return empty VQIPs and so have no part (D11)
-NO_PART = frozenset({"calc_crop_cover"})
+NO_PART = frozenset({"calc_crop_cover", "effective_precipitation_flushing"})
 
 # land.py:208: where percolation goes; :221: where runoff goes; :711: where ponding goes
 PERCOLATION_TYPES = ("Groundwater",)
@@ -114,7 +116,7 @@ def _f64(x) -> Tensor:
 def runs_nutrients(pollutants: Sequence[str]) -> bool:
     """WSIMOD's nutrient switch, ``"nitrate" in constants.POLLUTANTS`` (``land.py:1276``): the one
     source of a growing surface's ``has_nutrients`` and of ``Land.store_paths_of``'s
-    ``nutrients`` (D5). Task 6's pool stores rely on both deriving from it."""
+    ``nutrients`` (D5): the pool's stores (``nutrient_pool``) rely on both deriving from it."""
     return "nitrate" in pollutants
 
 
@@ -344,6 +346,10 @@ class Surface(DecayTank):
             **{f: getattr(self, f) for f in self.state_fields(nutrients=nutrients)},
             "total_decayed": self.total_decayed,
         }
+
+    def load_store(self, field: str, value: Tensor) -> None:
+        """Set the store ``field`` (a path of :meth:`stores`) from ``value``."""
+        setattr(self, field, value)
 
     def _with_temperature(self, vqip: Tensor, temperature: Tensor) -> Tensor:
         """``vqip["temperature"] = temperature`` (``land.py:685``, ``:991``, ``:1028``); WSIMOD
@@ -871,11 +877,15 @@ class Land(Node):
         out = {v: torch.tensor(data[(v, date)], dtype=torch.float64) for v in LAND_FORCING}
         month = month_start(date)
         for surface in self.surfaces:
-            if surface.has_deposition:
-                for v in SURFACE_DEPOSITION:
-                    out[f"surfaces.{surface.name}.{v}"] = torch.tensor(
-                        surface.spec.data[(v, month)], dtype=torch.float64
-                    )
+            # the deposition data (land.py:375-382) and, on a growing surface with nitrate, the
+            # fertiliser and manure (:1649-1710)
+            read = SURFACE_DEPOSITION if surface.has_deposition else ()
+            if getattr(surface, "has_nutrients", False):
+                read = (*read, *SURFACE_INPUTS)
+            for v in read:
+                out[f"surfaces.{surface.name}.{v}"] = torch.tensor(
+                    surface.spec.data[(v, month)], dtype=torch.float64
+                )
         return out
 
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
@@ -929,7 +939,7 @@ class Land(Node):
             value = _f64(value)
             if path.startswith("surfaces."):
                 _, name, field = path.split(".", 2)
-                setattr(self._surface(name), field, value)
+                self._surface(name).load_store(field, value)
             elif "." in path:
                 tank, field = path.split(".")
                 setattr(getattr(self, tank), field, value)
@@ -1154,10 +1164,11 @@ def _validate_surface(
                 "(land.py:942, :950 divide by depth * (total_porosity - it))"
             )
     derived = surface_derived(surface)
+    depth = "rooting_depth" if "rooting_depth" in values else "depth"
     for name in ("field_capacity_m", "wilting_point_m"):
         if not derived["depth"] - derived[name] > 0:
             raise ValueError(
-                f"{where}: the simulated depth less {name} is not positive (depth "
+                f"{where}: the simulated depth less {name} is not positive ({depth} "
                 f"{values['depth']}, total_porosity {porosity}; land.py:942, :950 divide by it)"
             )
     if float(values["area"]) == 0:

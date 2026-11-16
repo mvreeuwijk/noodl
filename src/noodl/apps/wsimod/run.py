@@ -83,6 +83,7 @@ EVENT_NAMES = (
     "decay_arc_order_unknown",
     "river_nitrogen_lost",
     "crop_water_stress_zero_denominator",
+    "pull_storage_no_din",
 )
 """The warning conditions a run reports (D13): WSIMOD's prints and noodl's own."""
 

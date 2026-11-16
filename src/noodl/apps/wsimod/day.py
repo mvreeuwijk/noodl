@@ -75,9 +75,10 @@ from torch import Tensor
 
 from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, DecayArcAlt, QueueArc
 from noodl.apps.wsimod.config import WsimodNetwork
-from noodl.apps.wsimod.constants import SURFACE_DEPOSITION
+from noodl.apps.wsimod.constants import SURFACE_DEPOSITION, SURFACE_INPUTS
 from noodl.apps.wsimod.engine import Ctx, Engine
 from noodl.apps.wsimod.land import PerviousSurface, month_start
+from noodl.apps.wsimod.nutrient_pool import NUTRIENTS, POOLS
 from noodl.apps.wsimod.structure import (
     check_network,
     forcing_readers,
@@ -112,6 +113,7 @@ STATE_KEYS = (
     "wsimod.total_decayed",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.nutrient_pool",
     "wsimod.days_after_sow",
     "wsimod.crop_cover",
     "wsimod.ground_cover",
@@ -124,13 +126,15 @@ STATE_KEYS = (
 # through the next day's carry-over (land.py:427-439), and a DecayQueueTank's is decay its
 # storage has not lost yet (tanks.py:694), so neither is held
 # a River's lag registers hold temperatures and phosphorus masses already in its storage
-# a growing surface's crop registers hold no water at all (Y11)
+# a growing surface's crop registers hold no water at all, and its nutrient pools are outside
+# WSIMOD's balance boundary (Y11)
 _NOT_HELD = (
     "wsimod.active_storage",
     "wsimod.previous_pulled",
     "wsimod.total_decayed",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.nutrient_pool",
     "wsimod.days_after_sow",
     "wsimod.crop_cover",
     "wsimod.ground_cover",
@@ -141,6 +145,7 @@ _FLAT_KEYS = (
     "wsimod.arc_queue_since",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.nutrient_pool",
     "wsimod.days_after_sow",
     "wsimod.crop_cover",
     "wsimod.ground_cover",
@@ -150,6 +155,7 @@ _STATE_UNITS = {
     "wsimod.arc_queue_since": "d",
     "wsimod.river_temperature_lag": "degC",
     "wsimod.river_phosphorus_lag": "kg",
+    "wsimod.nutrient_pool": "kg",
     "wsimod.days_after_sow": "d",
     "wsimod.crop_cover": "-",
     "wsimod.ground_cover": "-",
@@ -186,6 +192,10 @@ _STATE_TEXT = {
     "wsimod.river_phosphorus_lag": (
         "every biochemistry River's lagged_total_phosphorus register, max_phosphorus_lag + 1 "
         "slots, slot 0 the oldest, zero-padded at the front (X17)"
+    ),
+    "wsimod.nutrient_pool": (
+        "every growing surface's five nutrient pools (np.py:125-136), with nitrate a pollutant: "
+        "10 rows (pool, nutrient) per surface, the pools in POOLS order, each N then P"
     ),
     "wsimod.days_after_sow": (
         "every growing surface's days since sowing (land.py:1531-1544), -1 for WSIMOD's None "
@@ -294,6 +304,14 @@ _PARAMETER_UNITS = {
     "nfr": "-",
     "kadsdes": "1/d",
     "bulk_density": "kg/m3",
+    # a growing surface's NutrientPool, "wsimod.<Class>.nutrient_pool.<p>" (np.py:94-97: "-")
+    "degrhpar": "-",
+    "dishpar": "-",
+    "minfpar": "-",
+    "disfpar": "-",
+    "immobdpar": "-",
+    "fraction_manure_to_dissolved_inorganic": "-",
+    "fraction_dry_n_to_dissolved_inorganic": "-",
 }
 _FORCING_UNITS = {
     "precipitation": "m/d",
@@ -302,6 +320,8 @@ _FORCING_UNITS = {
     "flow": "m3/d",
     # a surface's monthly deposition data (land.py:354-359, "kg/m2/timestep"; D8)
     **dict.fromkeys(SURFACE_DEPOSITION, "kg/m2/d"),
+    # a growing surface's monthly fertiliser and manure (land.py:1167-1172; with nitrate)
+    **dict.fromkeys(SURFACE_INPUTS, "kg/m2/d"),
 }
 # record_all's surface fields (model.py:1135-1170) -> the surface attribute
 _SURFACE_FIELDS = {
@@ -819,6 +839,10 @@ class WsimodDay:
                     size = stores[path].shape[-1]
                     rows = [(spec.name, i) for i in range(size)]
                     put(_RIVER_REGISTERS[path], node, path, rows, (size,))
+                elif path.startswith("surfaces.") and last == "nutrient_pool":
+                    # D4: flat, 10 rows (pool, nutrient) per growing surface; (5, 2) in the engine
+                    rows = [(spec.name, path, pool, n) for pool in POOLS for n in NUTRIENTS]
+                    put("wsimod.nutrient_pool", node, path, rows, (len(POOLS), len(NUTRIENTS)))
                 elif path.startswith("surfaces.") and last in _CROP_REGISTERS:
                     # D4: flat, one row per growing surface
                     surface = path.split(".")[1]
