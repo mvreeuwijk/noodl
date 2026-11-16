@@ -225,6 +225,33 @@ def test_the_replay_notices_a_difference():
         replay(network, "junction", calls, scale=spec.scale)
 
 
+@pytest.mark.parametrize("what", ["temperature_dependence_factor", "nutrient_pool", "crop_factor"])
+def test_the_growing_replay_compares_the_pool_its_factors_and_the_crop_factor(what):
+    """The land replay of a nitrate growing case (``growing_spring``) loads and compares the
+    pool (D4), its two factors (``pool_factors``, set every day, ``land.py:1813-1856``) and the
+    crop factor: the capture holds the factors with more than one value each, and a one-ulp
+    change to one of them in one call's ``post`` fails the replay."""
+    spec = CASES["growing_spring"]
+    calls = captured("growing_spring")["land"]
+    prefix = "factors.surfaces.wheat."
+    for factor in ("temperature_dependence_factor", "soil_moisture_dependence_factor"):
+        assert len({c.post[prefix + factor] for c in calls}) > 10, factor
+    network = read_wsimod_config(spec.build())
+    day = [copy.deepcopy(c) for c in calls if c.day == 250]
+    run = next(c for c in day if c.method == "run")
+    assert replay(network, "land", day, scale=spec.scale) == 0.0
+    if what == "nutrient_pool":
+        pool = run.post["surfaces.wheat.nutrient_pool"]
+        pool[2][0] = math.nextafter(pool[2][0], math.inf)  # DI.N
+    elif what == "crop_factor":
+        key = "surfaces.wheat.crop_factor"
+        run.post[key] = math.nextafter(run.post[key], math.inf)
+    else:
+        run.post[prefix + what] = math.nextafter(run.post[prefix + what], math.inf)
+    with pytest.raises(Mismatch, match=r"day 250, run"):
+        replay(network, "land", day, scale=spec.scale)
+
+
 def test_maxiter_pull_reaches_maxiter_and_noodl_says_so_on_the_same_days():
     """W38: the pull path and the ``MAXITER`` exit, live. WSIMOD's ``pull_distributed`` into the
     reservoir ends at ``MAXITER`` every day (it prints "Maxiter reached"); noodl's

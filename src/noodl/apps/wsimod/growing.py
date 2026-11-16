@@ -539,9 +539,16 @@ class GrowingSurface(PerviousSurface):
         return out
 
     def load_store(self, field: str, value: Tensor) -> None:
-        """``nutrient_pool`` is the pool's storage; anything else is an attribute."""
+        """``nutrient_pool`` is the pool's storage; anything else is an attribute.
+
+        Loading the pool (once a day, from the state) also resets its two factors to a scalar
+        0: each day sets them before any reader (``land.py:1813-1856``, before ``:1744`` and
+        ``:2096``), so their value never carries over, but a factor written under a batched
+        mask would carry yesterday's batch shape into a day of another shape."""
         if field == "nutrient_pool" and self.nutrient_pool is not None:
             self.nutrient_pool.storage = value
+            self.nutrient_pool.temperature_dependence_factor = _f64(0.0)
+            self.nutrient_pool.soil_moisture_dependence_factor = _f64(0.0)
             return
         super().load_store(field, value)
 

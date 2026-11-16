@@ -16,12 +16,18 @@ WSIMOD cannot run (``wtw_zero_input``, ``nonresidential_demand``) or runs only u
 crash (``land_sewer_ponding`` with a lowered sewer capacity) are tested for the crash and for
 noodl's evident-intent run (W4). ``river_double_discharge`` is the named exception to the print
 check (D17, X32): WSIMOD's River balance is wrong by construction there and prints every day.
+The growing cases with a nutrient pool (3c: ``growing_spring``, 540 days by default and its three
+years under ``slow``, ``growing_autumn``, ``growing_decay``) are bitwise on every series, but
+WSIMOD prints round-off "mass balance error" lines for an additive pollutant at their land; until
+Task 9b admits them (Y41, D12) their parity items are strict xfails that first assert the values
+with those lines set aside (``Y41_ROUND_OFF``).
 """
 
 from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import functools
 import io
 import re
@@ -40,8 +46,11 @@ from noodl.apps.wsimod import (  # noqa: E402
     read_wsimod_config,
     wsimod_run,
 )
+from noodl.apps.wsimod.day import WsimodDay  # noqa: E402
 from noodl.apps.wsimod.engine import Decision  # noqa: E402
+from noodl.apps.wsimod.nutrient_pool import DI, DO  # noqa: E402
 from noodl.apps.wsimod.structure import river_order  # noqa: E402
+from tests.apps.wsimod._replay import replay  # noqa: E402
 from tests.verification._wsimod_cases import (  # noqa: E402
     CASES,
     _decay_groundwater,
@@ -55,7 +64,12 @@ from tests.verification._wsimod_parity import (  # noqa: E402
     wsimod_reference_by_day,
     wsimod_until_crash_by_day,
 )
-from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
+from tests.verification._wsimod_reference import (  # noqa: E402
+    capture_node_calls,
+    record_wsimod_run,
+    wsimod_model,
+    wsimod_reference,
+)
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "wsimod"
 CONFIG = {"quantity": "config.yml", "pollutants": "config.yml"}
@@ -340,18 +354,28 @@ def test_a_print_noodl_does_not_record_is_refused():
 
 # --- the purpose-built cases ---------------------------------------------------------------------
 MODES = {"quantity": False, "pollutants": True}
+# D12: the growing cases whose WSIMOD run prints its round-off "mass balance error for <additive>
+# of x in land" lines (Y35), and fails nothing else. Task 9b measures and admits them (Y41);
+# until then their parity items are strict xfails, as 3b's D1. ``raises=AssertionError``: the
+# round-off filter below raises ``RuntimeError`` on any other difference, a real failure.
+Y41_ROUND_OFF = frozenset({"growing_spring", "growing_autumn", "growing_decay"})
+_Y41 = pytest.mark.xfail(strict=True, raises=AssertionError, reason="the Y41 admission is Task 9b")
+
+
+def _case_param(name: str, mode: str):
+    marks = (_Y41,) if name in Y41_ROUND_OFF else ()
+    return pytest.param(name, mode, id=f"{name}-{mode}", marks=marks)
+
+
 CASE_RUNS = [
-    pytest.param(name, mode, id=f"{name}-{mode}")
-    for name, spec in CASES.items()
-    if spec.wsimod
-    for mode in spec.modes
+    _case_param(name, mode) for name, spec in CASES.items() if spec.wsimod for mode in spec.modes
 ]
 
 
 # D17 (X32): the nodes whose WSIMOD mass-balance error is printed on every day by construction
 EXPECTED_MASS_BALANCE_PRINTS = {"river_double_discharge": ("riv",)}
 SLOW_CASE_RUNS = [
-    pytest.param(name, mode, id=f"{name}-{mode}")
+    _case_param(name, mode)
     for name, spec in CASES.items()
     if spec.wsimod and spec.slow_days is not None
     for mode in spec.modes
@@ -388,9 +412,54 @@ def case_ours(name: str, mode: str, days: int | None = None, decisions: bool = F
     return results, diagnostics
 
 
+# the largest |x| of a line the Y41 filter removes: WSIMOD's round-off is ~1e-17 kg here
+_ROUND_OFF = 1e-14
+MASS_BALANCE_LINE = re.compile(r"mass balance error for (\S+) of (\S+) in (\S+)")
+
+
+def _without_round_off(reference, print_days):
+    """``reference`` and ``print_days`` without WSIMOD's "mass balance error for <p> of x in
+    land" lines with ``p`` a pollutant and ``|x| <= _ROUND_OFF`` (the Y41 lines, Task 9b's
+    admission), and the number of lines removed."""
+    keep = []
+    for k, line in enumerate(reference.printed):
+        m = MASS_BALANCE_LINE.fullmatch(line)
+        dropped = (
+            m is not None
+            and m.group(1) != "volume"
+            and m.group(3) == "land"
+            and abs(float(m.group(2))) <= _ROUND_OFF
+        )
+        if not dropped:
+            keep.append(k)
+    filtered = dataclasses.replace(reference, printed=[reference.printed[k] for k in keep])
+    return filtered, [print_days[k] for k in keep], len(reference.printed) - len(keep)
+
+
+def _assert_only_round_off(name, mode, results, diagnostics, reference, print_days) -> None:
+    """D12, until Task 9b: a Y41 case equals WSIMOD bitwise with the round-off lines left out;
+    any other difference raises ``RuntimeError``, which the strict xfail does not absorb."""
+    filtered, days, removed = _without_round_off(reference, print_days)
+    try:
+        found = assert_matches_wsimod(
+            results,
+            filtered,
+            diagnostics=diagnostics,
+            case=f"{name}-{mode}",
+            quality=MODES[mode],
+            print_days=days,
+        )
+    except AssertionError as error:
+        raise RuntimeError(f"not the Y41 round-off: {error}") from error
+    if not (found["worst"] == 0.0 and found["admissions"] == [] and removed > 0):
+        raise RuntimeError(f"{name}-{mode}: worst {found['worst']}, {removed} round-off lines")
+
+
 def _assert_case_matches(name: str, mode: str, days: int | None = None) -> None:
     results, diagnostics = case_ours(name, mode, days)
     reference, print_days = case_theirs_by_day(name, days)
+    if name in Y41_ROUND_OFF:
+        _assert_only_round_off(name, mode, results, diagnostics, reference, print_days)
     found = assert_matches_wsimod(
         results,
         reference,
@@ -477,7 +546,8 @@ def test_the_cases_cover_every_listed_feature():
     node_type_override decay_storage decay_groundwater decay_queue_groundwater
     decay_queue_groundwater_n0 decay_arc decay_arc_mixed decay_arc_alt
     surface_decay_nitrification land_run_twice river_nutrients river_double_discharge
-    surface_deposition growing_no_nitrate growing_default_depletion""".split()
+    surface_deposition growing_no_nitrate growing_default_depletion growing_spring growing_autumn
+    growing_decay deposition_non_additive""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",
@@ -488,14 +558,18 @@ def test_the_cases_cover_every_listed_feature():
     assert {n: (spec.crash, spec.crash_day) for n, spec in CASES.items() if spec.crash} == {
         "growing_default_depletion": (("ZeroDivisionError", "land.py:1566"), 11),
     }
-    # D24: the one case whose default run is a prefix of its dates
+    # D24: the cases whose default run is a prefix of their dates
     assert {n: spec.slow_days for n, spec in CASES.items() if spec.slow_days} == {
-        "river_nutrients": 1100
+        "river_nutrients": 1100,
+        "growing_spring": 1096,  # D21: three years, 540 days by default
     }
-    assert (
-        CASES["river_nutrients"].days == 400
-        and len(CASES["river_nutrients"].build()["dates"]) == 1100
-    )
+    for name, (days, slow) in {
+        "river_nutrients": (400, 1100),
+        "growing_spring": (540, 1096),
+    }.items():
+        assert CASES[name].days == days and len(CASES[name].build()["dates"]) == slow
+    # D12: the parity items that are strict xfails until Task 9b's admission
+    assert Y41_ROUND_OFF <= {n for n, spec in CASES.items() if spec.wsimod}
 
 
 def tiny_dropped(results) -> torch.Tensor:
@@ -1030,3 +1104,192 @@ def test_the_surface_decay_cases_carry_yesterdays_decay_into_nitrate_and_nitrite
         assert float(decayed[:, columns.index(source)].abs().sum()) > 0.0
         expected = times * decayed[:-1, columns.index(source)]
         assert torch.allclose(carried[1:], expected, rtol=1e-12, atol=0.0)
+
+
+# --- the growing cases (Task 9a; spec, Verification 3) ------------------------------------------
+@functools.cache
+def growing_capture(name: str, days: int) -> tuple:
+    """WSIMOD's run of a growing case's first ``days`` under ``capture_node_calls`` on its
+    ``land``: every call into it (``NodeCall``), in order."""
+    model = wsimod_model(CASES[name].build())
+    with capture_node_calls(model, ["land"]) as calls:
+        record_wsimod_run(model, days=days)
+    return tuple(calls["land"])
+
+
+def _wsimod_days(name: str) -> list[dict]:
+    """The stores after each day's ``Land.run`` in WSIMOD (``post`` of its one ``run`` call a
+    day: nothing else calls into the land in these cases)."""
+    runs = [c for c in growing_capture(name, CASES[name].days) if c.method == "run"]
+    assert [c.day for c in runs] == list(range(CASES[name].days))
+    return [c.post for c in runs]
+
+
+@functools.cache
+def growing_days(name: str) -> tuple[list[dict], object]:
+    """noodl's day driver (pollutants on) over the case's default ``days``: after each day's
+    orchestration, the growing surface's tank (``(1 + K,)``), pool (``(5, 2)``) and
+    ``days_after_sow``, ``crop_cover`` and ``total_decayed``, the outcomes of its decisions
+    (``{site: {outcome, ...}}`` over the active ones) and the day's events at the land."""
+    network = read_wsimod_config(CASES[name].build())
+    day = WsimodDay(network, pollutants=True)
+    day.record_decisions = True
+    rows = []
+    for _, ctx, engine in day.run_days(days=CASES[name].days):
+        surface = engine.nodes["land"].surfaces[0]
+        outcomes: dict[str, set[bool]] = {}
+        for d in ctx.decisions:
+            if bool(d.active):
+                outcomes.setdefault(d.site, set()).add(bool(d.outcome))
+        rows.append(
+            {
+                "surface": surface.name,
+                "storage": surface.storage.clone(),
+                "pool": surface.nutrient_pool.storage.clone(),
+                "days_after_sow": float(surface.days_after_sow),
+                "crop_cover": float(surface.crop_cover),
+                "total_decayed": surface.total_decayed.clone(),
+                "outcomes": outcomes,
+                "events": {c: bool(t["land"]) for c, t in ctx.events.items() if "land" in t},
+            }
+        )
+    return rows, network.pollutants
+
+
+_N_TANK = ("ammonia", "nitrite", "nitrate", "org-nitrogen")  # the tank's N, the pool's DI + DO
+_P_TANK = ("phosphate", "org-phosphorus")
+
+
+def _gaps(tank: dict[str, float], pool) -> tuple[float, float]:
+    """L8: the tank's N and P (``_N_TANK``, ``_P_TANK``, summed in that order) less the
+    dissolved pools' (``DI + DO``), WSIMOD's or noodl's, by the same arithmetic."""
+    gaps = []
+    for column, names in ((0, _N_TANK), (1, _P_TANK)):
+        total = 0.0
+        for name in names:
+            total = total + tank[name]
+        gaps.append(total - float(pool[DI][column]) - float(pool[DO][column]))
+    return gaps[0], gaps[1]
+
+
+def test_the_pools_are_flushed_twice():
+    """L8 (Y45): ``effective_precipitation_flushing`` takes the outflows' nutrients out of the
+    dissolved pools that ``pull_storage`` already took them from (``land.py:1458``,
+    ``:1605-1645``), so the tank and its pool drift apart. On ``growing_spring``, noodl's daily
+    tank-pool gap (the tank's N and P less ``DI + DO``) equals WSIMOD's from the capture,
+    bitwise, on every day of the default run, and it is not zero: the gap is reproduced, not
+    a hard-coded ratio of it."""
+    name = "growing_spring"
+    ours, pollutants = growing_days(name)
+    theirs = _wsimod_days(name)
+    surface = ours[0]["surface"]
+    gaps = []
+    for day, (row, post) in enumerate(zip(ours, theirs, strict=True)):
+        tank = {n: float(row["storage"][pollutants.column(n)]) for n in (*_N_TANK, *_P_TANK)}
+        mine = _gaps(tank, row["pool"])
+        wsimod = _gaps(
+            post[f"surfaces.{surface}.storage"], post[f"surfaces.{surface}.nutrient_pool"]
+        )
+        assert mine == wsimod, (day, mine, wsimod)
+        gaps.append(mine)
+    assert any(n != 0.0 for n, _ in gaps) and any(p != 0.0 for _, p in gaps)
+
+
+def _negative_columns(tanks, additive) -> list[tuple[int, str]]:
+    return [(day, n) for day, tank in enumerate(tanks) for n in additive if tank[n] < 0.0]
+
+
+@pytest.mark.parametrize("name", ["growing_spring", "growing_decay"])
+def test_the_tank_columns_keep_their_sign(name):
+    """L9: the uptake and the denitrification take the pool's N as nitrate (``land.py:1917``,
+    ``:2145``) and the tank's decay (``growing_decay``) bypasses the pool, so ``pull_storage``
+    could ask a tank column for more than it holds. noodl's answer to "did an additive column
+    of the growing tank go negative on some day" is WSIMOD's from the capture; the message
+    states it."""
+    ours, pollutants = growing_days(name)
+    theirs = _wsimod_days(name)
+    surface = ours[0]["surface"]
+    additive = pollutants.additive
+    mine = _negative_columns(
+        [{n: float(r["storage"][pollutants.column(n)]) for n in additive} for r in ours], additive
+    )
+    wsimod = _negative_columns([post[f"surfaces.{surface}.storage"] for post in theirs], additive)
+    answer = f"a negative column on {mine[:3]}" if mine else "no column went negative"
+    assert mine == wsimod, f"{name}: noodl {answer}; WSIMOD {wsimod[:3]}"
+    assert bool(mine) == bool(wsimod), f"{name}: {answer}"
+
+
+# L1: the first three dates are a leap year's (28 and 29 February are adjusted days 59, 1 March is
+# 60, as intended); the others are common years' 28 February (day 59) and 1 March (raw day 60,
+# shifted to 59: the defect)
+LEAP_DATES = (
+    "2004-02-28",
+    "2004-02-29",
+    "2004-03-01",
+    "2005-02-28",
+    "2005-03-01",
+    "2006-02-28",
+    "2006-03-01",
+)
+
+
+def test_growing_spring_spans_the_leap_shift():
+    """L1: WSIMOD tests ``t.is_leap_year``, a bound method and so always true (``land.py:1526``),
+    and shifts the day of year after 28 February in every year. ``growing_spring``'s dates (its
+    full three years) hold 29 February 2004 and the 1 March of 2005 and 2006, and its crop
+    factor rises over days 0-90, so the shift shows: in 2004 28 and 29 February share a factor
+    and 1 March has the next one; in 2005 and 2006 28 February and 1 March share 2004's
+    29 February factor. noodl's
+    land replayed on the captured calls of those dates equals WSIMOD's stores bitwise, the
+    ``crop_factor`` and ``et0_coefficient`` among them."""
+    spec = CASES["growing_spring"]
+    dates = spec.build()["dates"]
+    days = [dates.index(d) for d in LEAP_DATES]
+    calls = [c for c in growing_capture("growing_spring", spec.slow_days) if c.day in days]
+    runs = {c.day: c.post for c in calls if c.method == "run"}
+    factor = {
+        d: runs[day]["surfaces.wheat.crop_factor"] for d, day in zip(LEAP_DATES, days, strict=True)
+    }
+    assert "surfaces.wheat.et0_coefficient" in runs[days[0]]
+    assert factor["2004-02-28"] == factor["2004-02-29"] != factor["2004-03-01"]
+    for year in ("2005", "2006"):  # the shift in a common year: day 59 twice
+        assert factor[f"{year}-02-28"] == factor[f"{year}-03-01"] == factor["2004-02-29"]
+    network = read_wsimod_config(spec.build())
+    assert replay(network, "land", calls, scale=spec.scale) == 0.0
+
+
+def test_the_growing_cases_exercise_what_they_are_named_for():
+    """``growing_spring``'s default run has soil temperatures below 0, in ``(0, 5]`` and above
+    5 degC (``land.py:1820-1829``), a stressed and an unstressed crop (``:1561-1568``) and rain
+    above 5 mm (``:1943``). ``growing_autumn`` (L2) grows a crop with no cover all year, and its
+    uptake reaches the autumn ``temp_func`` and ``days_after_sow - 25`` (``:1876-1879``), with
+    ``days_after_sow`` both below and above 25. ``growing_decay`` decays its tank's ammonia and
+    nitrite (3b) and raises ``"nutrient_pool_not_tracking"`` (D19)."""
+    spring, pollutants = growing_days("growing_spring")
+    temperature = [float(r["storage"][pollutants.column("temperature")]) for r in spring]
+    assert min(temperature) < 0 and any(0 < t <= 5 for t in temperature) and max(temperature) > 5
+    unstressed = set().union(
+        *(
+            r["outcomes"].get("node:land/surfaces.wheat/calc_crop_cover/unstressed", ())
+            for r in spring
+        )
+    )
+    assert unstressed == {True, False}
+    mapping = CASES["growing_spring"].build()
+    rain = mapping["nodes"][0]["data_input_dict"]
+    first = mapping["dates"][: CASES["growing_spring"].days]
+    assert sum(rain[("precipitation", d)] > 5e-3 for d in first) > 10
+
+    autumn, _ = growing_days("growing_autumn")
+    site = "node:land/surfaces.barley/calc_crop_uptake"
+    reached = [r for r in autumn if f"{site}/temperature_cap" in r["outcomes"]]
+    assert reached and all(r["days_after_sow"] > 0 for r in reached)
+    assert any(r["days_after_sow"] < 25 for r in reached)
+    assert any(r["days_after_sow"] > 25 for r in reached)
+    assert all(r["crop_cover"] == 0.0 for r in autumn)  # L2: the unsorted calendar
+
+    decay, pollutants = growing_days("growing_decay")
+    for name in ("ammonia", "nitrite"):
+        assert sum(float(r["total_decayed"][pollutants.column(name)]) for r in decay) > 0.0
+    tracking = [r["events"].get("nutrient_pool_not_tracking", False) for r in decay]
+    assert any(tracking) and not all(tracking)
