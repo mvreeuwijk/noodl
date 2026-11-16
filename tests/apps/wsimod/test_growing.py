@@ -3879,3 +3879,169 @@ def test_quantity_only_lists_the_garden_surface_like_a_growing_one():
         "gardening_efficiency" in item or "rooting_depth" in item or "ET_depletion" in item
         for item in listed
     )
+
+
+# --- VariableAreaSurface (Task 15) --------------------------------------------------------------
+def _variable_land(**parameters) -> Land:
+    spec = SurfaceSpec("v", "VariableAreaSurface", parameters)
+    return make_node(NodeSpec("land", "Land", "Land", {}, {}, [spec]), None, P)
+
+
+def test_get_climate_equals_wsimods():
+    """``land.py:2455-2459``, bitwise: ``P`` and ``E = et0 * et0_coefficient``, each times
+    ``current_surface_area / area``, over random areas, current areas (0, equal, larger than the
+    area) and crop coefficients."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes.land import VariableAreaSurface as Theirs
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    rng = random.Random(15)
+    for k in range(40):
+        area = rng.uniform(10.0, 5e4)
+        current = (0.0, area, 1.5 * area, rng.uniform(0.0, area))[k % 4] if k < 32 else 0.0
+        rain, et0, coefficient = rng.uniform(0, 0.03), rng.uniform(0, 0.007), rng.uniform(0.2, 1.3)
+        reset_wsimod_globals()
+        constants.POLLUTANTS = []
+        constants.ADDITIVE_POLLUTANTS = []
+        constants.NON_ADDITIVE_POLLUTANTS = []
+        forcing = {"precipitation": rain, "et0": et0}
+        parent = SimpleNamespace(get_data_input=forcing.__getitem__)
+        theirs = Theirs(
+            parent=parent,
+            surface="v",
+            area=area,
+            rooting_depth=0.5,
+            current_surface_area=current,
+            pollutant_load={},
+            initial_storage={"volume": 0.0},
+        )
+        theirs.et0_coefficient = coefficient
+        want = theirs.get_climate()
+        land = _variable_land(area=area, rooting_depth=0.5, current_surface_area=current)
+        surface = land.surfaces[0]
+        at(land, 0)
+        land.bind(
+            {
+                "precipitation": torch.tensor(rain, dtype=F64),
+                "et0": torch.tensor(et0, dtype=F64),
+                "temperature": torch.tensor(10.0, dtype=F64),
+            }
+        )
+        surface.et0_coefficient = torch.tensor(coefficient, dtype=F64)
+        got = surface.get_climate()
+        assert (float(got[0]), float(got[1])) == want, (area, current)
+
+
+def test_a_default_variable_area_surface_gets_no_rain():
+    """The default ``current_surface_area`` is 0 (``:2443``): no rain and no evaporation reach
+    the surface, so its precipitation volume is 0.0 on a rainy day."""
+    land = _variable_land(area=500.0, rooting_depth=0.5)
+    surface = land.surfaces[0]
+    surface.set_dates([datetime(2003, 6, 1)], ["2003-06-01"])
+    at(land, 0)
+    surface.storage = volume(100.0)
+    land.bind(
+        {
+            "precipitation": torch.tensor(0.02, dtype=F64),
+            "et0": torch.tensor(0.004, dtype=F64),
+            "temperature": torch.tensor(10.0, dtype=F64),
+        }
+    )
+    surface.calc_crop_cover(active=TRUE)
+    assert [float(x) for x in surface.get_climate()] == [0.0, 0.0]
+    surface.ihacres(active=TRUE)
+    assert float(surface.precipitation[..., 0]) == 0.0
+    assert float(surface.evaporation[..., 0]) == 0.0
+
+
+def test_erosion_reads_the_unscaled_rain():
+    """``land.py:1940``: erosion's rain depth ``pd`` is the ``Land``'s forcing, whatever share of
+    the area is in use. The same state eroded by a surface at the default area 0, at half its
+    area and at its full area gives the same eroded nutrients, bitwise, and they are not 0 (a
+    scaled depth would give 0 for the idle surface: ``pd <= 5`` mm, no erosion), while
+    ``ihacres``'s rain volume is scaled."""
+    rng = random.Random(1940)
+    parameters = _erosion_parameters(rng)
+    parameters["bulk_density"] = 1200.0
+    draw = _erosion_draw(rng, parameters, 1)  # erodingflow in (0, 4]
+    draw["precipitation"] = 0.02  # 20 mm: above the 5 mm threshold
+    results = []
+    for share in (0.0, 0.5, 1.0):
+        spec = SurfaceSpec(
+            "v",
+            "VariableAreaSurface",
+            {**parameters, "current_surface_area": share * parameters["area"]},
+        )
+        land = make_node(NodeSpec("land", "Land", "Land", {}, {}, [spec]), None, NUT)
+        ours = land.surfaces[0]
+        ours.set_dates([datetime(2003, 6, 21)], ["2003-06-21"])
+        ours.bind({})
+        land.params = {
+            "precipitation": torch.tensor(draw["precipitation"], dtype=F64),
+            "et0": torch.tensor(0.004, dtype=F64),
+        }
+        ours.crop_cover = torch.tensor(draw["crop_cover"], dtype=F64)
+        ours.ground_cover = torch.tensor(draw["ground_cover"], dtype=F64)
+        for j, name in enumerate(_FLOWS):
+            setattr(
+                ours, name, torch.tensor([draw["flows"][j].get(k, 0.0) for k in _KEYS], dtype=F64)
+            )
+        ours.nutrient_pool.storage = torch.tensor(draw["pools"], dtype=F64)
+        land.ctx = Ctx(NUT, FA, torch.Size(()), day=0, node_names=["land"])
+        in_, _ = ours.erosion(active=TRUE)
+        precipitation, _ = ours.get_climate()
+        results.append((in_, float(precipitation)))
+    assert results[0][0].any()
+    assert torch.equal(results[0][0], results[1][0]) and torch.equal(results[1][0], results[2][0])
+    assert [r[1] for r in results] == [0.0, 0.5 * 0.02, 0.02]
+
+
+def test_current_surface_area_is_refused_as_an_override():
+    """``:2443``: a constructor keyword that no ``apply_overrides`` consumes (Y50), so an
+    override naming it is refused by name; as a constructor key it is accepted and, with the
+    schema's first keyword, defaults to 0."""
+    schema = SURFACE_SCHEMAS["VariableAreaSurface"]
+    assert schema.parameters["current_surface_area"] == 0
+    assert list(schema.parameters)[:1] == ["current_surface_area"]
+    assert "current_surface_area" not in schema.override_keys
+    assert "depth" in schema.derived and "depth" not in schema.override_keys
+    surface = {"type_": "VariableAreaSurface", "surface": "g", "rooting_depth": 0.5}
+    with pytest.raises(ValueError, match="current_surface_area"):
+        read_wsimod_config(
+            _mapping(
+                [{**surface, "current_surface_area": 3.0}],
+                overrides={"g": {"current_surface_area": 5.0}},
+                lists=_LISTS,
+            )
+        )
+    accepted = _mapping([{**surface, "current_surface_area": 3.0}], lists=_LISTS)
+    assert _ignored(accepted, pollutants=False) == []
+
+
+def test_a_variable_area_surface_with_no_area_is_refused_by_name():
+    """``:2457`` divides by ``area``, which the growing surfaces' refusal already rules out
+    (``land.py:893`` divides by it first): the build names it, nothing is guarded."""
+    surface = {"type_": "VariableAreaSurface", "surface": "g", "rooting_depth": 0.5, "area": 0}
+    with pytest.raises(ValueError, match="area is 0"):
+        _validate(_mapping([surface], lists=_LISTS))
+
+
+def test_quantity_only_reads_current_surface_area():
+    """Y72: ``current_surface_area`` sets the volumes, so a quantity-only run reads it and does
+    not list it as ignored; the growing parameters it is not given with are listed as before."""
+    from noodl.apps.wsimod import build_model, initial_drivers
+    from tests.verification._wsimod_cases import _variable_area
+
+    mapping = _variable_area()
+    mapping["overrides"] = {
+        "nodes": {"land": {"type_": "Land", "name": "land", "surfaces": {"half": {"kfr": 3.0}}}}
+    }
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    listed = model.ignored_by_quantity_only
+    assert "land.surfaces.half.kfr" in listed
+    assert not any("current_surface_area" in item for item in listed)
+    key = "wsimod.VariableAreaSurface.current_surface_area"
+    assert initial_drivers(model)[key].tolist() == [0.0, 5000.0]
+    assert model.wsimod_day._drivers[key].unit == "m2"

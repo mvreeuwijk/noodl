@@ -1961,6 +1961,51 @@ def _garden() -> dict:
     }
 
 
+# --- VariableAreaSurface (Task 15; spec, Verification 3) ------------------------------------------
+_VARIABLE_AREA_DAYS = 100  # Y68: past the sowing (run day 6), through wet and dry spells
+
+
+def _variable_area() -> dict:
+    """Two ``VariableAreaSurface``s on one ``Land`` (``land.py:2440-2461``): ``idle`` keeps the
+    default ``current_surface_area = 0`` and so gets no rain and no evaporation (its flows are
+    0.0), and ``half`` uses half its area (5000 of 10000 m2): its rain and evaporation volumes
+    are half a full surface's. Erosion reads the unscaled rain on both (``:1940``), so ``idle``
+    still erodes on a rainy day. The crop (sown on run day 6) multiplies the evaporation by the
+    day's coefficient (``:2456``)."""
+    crop = {
+        "area": 1e4,
+        "rooting_depth": 0.5,
+        "ET_depletion_factor": 0.5,
+        "sowing_day": 280,
+        "harvest_day": 200,
+        "infiltration_capacity": 0.01,
+        "initial_soil_storage": dict(_SOIL),
+        "data_input_dict": _monthly(_GROWING_INPUTS, "2003-10", 5),
+        "crop_factor_stages": [0.4, 1.1, 0.25, 0.25, 0.4],
+        "crop_factor_stage_dates": [0, 150, 200, 280, 365],
+    }
+    mapping = _nutrient_land(
+        {
+            "surface": "idle",
+            "type_": "VariableAreaSurface",
+            "initial_storage": _soil_water(1500.0, 11.0),
+            **crop,
+        },
+        _VARIABLE_AREA_DAYS,
+        151,
+    )
+    mapping["nodes"][0]["surfaces"].append(
+        {
+            "surface": "half",
+            "type_": "VariableAreaSurface",
+            "current_surface_area": 5000.0,
+            "initial_storage": _soil_water(1500.0, 11.0),
+            **crop,
+        }
+    )
+    return mapping
+
+
 def _irrigation_without_nutrients() -> dict:
     """noodl only, L13: with the pollutants ``phosphate`` and ``temperature`` (no ``nitrate``) the
     first day with a demand raises ``KeyError: 'org-nitrogen'`` at ``land.py:2373`` (the pool
@@ -3519,6 +3564,12 @@ CASES: dict[str, Case] = {
         days=_GARDEN_DAYS,
         scale=900.0,
         replay=("gardens", "plain"),
+    ),
+    "variable_area": Case(
+        build=_variable_area,
+        days=_VARIABLE_AREA_DAYS,
+        scale=2000.0,
+        replay=("land",),
     ),
     "irrigation_without_nutrients": Case(
         build=_irrigation_without_nutrients,

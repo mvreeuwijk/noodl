@@ -564,6 +564,22 @@ The decisions are `node:<land>/surfaces.<name>/calculate_irrigation_demand/{defi
 (`:2411`, `:2416`). The garden water carries no nutrients, so unlike `irrigate` the handlers never
 touch the nutrient pool.
 
+### The variable-area surface
+
+A `VariableAreaSurface` is a `GrowingSurface` whose rain and evaporation are scaled by the share of
+its area in use today (`land.py:2440-2461`): `ihacres`'s `get_climate` returns `P` and `E = et0 *
+et0_coefficient` (the crop's coefficient of the day), each times `current_surface_area / area`
+(`:2455-2459`). `current_surface_area` (default 0, `m2`) is a constructor keyword and the driver
+`"wsimod.VariableAreaSurface.current_surface_area"` `(..., n)`; no `apply_overrides` consumes it,
+so an override naming it is refused (Y50). A surface at the default 0 gets no rain and no
+evaporation (its precipitation volume is 0.0). A quantity-only run reads it (it sets the volumes),
+so it is not listed as ignored. `area` is never 0 (the build refuses it by name, as for every
+growing surface), so the quotient needs no guard.
+
+Erosion still reads the `Land`'s unscaled rain (`:1940`), so an idle surface erodes on a rainy day
+(transcribed). `get_climate` is called from `ihacres`, so it is part of the `ihacres` mass-balance
+part and has no entry of its own, and the class adds no decision site.
+
 ### The soil temperature
 
 With a `temperature` pollutant, a `PerviousSurface` moves its storage's temperature every day
@@ -1240,6 +1256,10 @@ has to be debugged, not admitted.
   it), the later ones are not, with wet days (no deficit) and dry
   days (a demand); both outcomes of `deficit` and `saturated` are asserted from the decisions.
   Bitwise equal to WSIMOD, and the replay of both `Land`s, handler calls included, is bitwise.
+- **Variable area** (`variable_area`, 100 days): two `VariableAreaSurface`s, `idle` at the default
+  `current_surface_area` 0 (no rain, no evaporation) and `half` at half its area, sown on run day 6.
+  Bitwise equal to WSIMOD in both modes, and the `Land` replay is bitwise. WSIMOD prints three
+  round-off lines for `org-phosphorus` on the land, within the store bound (0.889 eps S, D12).
 - **Crashes** (`test_case_runs_where_wsimod_crashes*`): eleven cases where WSIMOD raises. Three run
   in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,
   `nonresidential_demand`). For two, a decaying `Groundwater` and `QueueGroundwater` without a

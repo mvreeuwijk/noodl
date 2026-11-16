@@ -152,6 +152,7 @@ __all__ = [
     "GardenSurface",
     "GrowingSurface",
     "IrrigationSurface",
+    "VariableAreaSurface",
     "quick_interp",
 ]
 
@@ -1690,3 +1691,36 @@ class GardenSurface(ClimateSurface):
 
 
 SURFACE_CLASSES["GardenSurface"] = GardenSurface
+
+
+class VariableAreaSurface(GrowingSurface):
+    """``VariableAreaSurface`` (``land.py:2440-2461``): a growing surface whose climate is scaled
+    by ``current_surface_area / area``, the share of the area in use today.
+
+    ``current_surface_area`` (``:2443``, default 0, ``m2``) is the constructor keyword and the
+    driver ``"wsimod.VariableAreaSurface.current_surface_area"``; it is not an override (no
+    ``apply_overrides`` consumes it, Y50), and a quantity-only run reads it (it sets the volumes),
+    so it is never listed as ignored (Y72). With the default 0 the surface gets no rain and no
+    evaporation. ``area`` is never 0 (the build refuses it by name, ``land.py:893`` divides by it
+    too), so the quotient needs no guard. Erosion reads the unscaled rain (``:1940``), as it reads
+    the ``Land``'s. The surface is smooth in ``current_surface_area``.
+
+    It adds no decision site and no mass-balance part: ``get_climate`` is called from
+    :meth:`~noodl.apps.wsimod.land.PerviousSurface.ihacres`, which is already the ``ihacres``
+    part (Y57)."""
+
+    surface_class: ClassVar[str] = "VariableAreaSurface"
+    parameter_defaults: ClassVar[dict[str, float]] = {
+        **GrowingSurface.parameter_defaults,
+        "current_surface_area": 0,
+    }
+
+    def get_climate(self) -> tuple[Tensor, Tensor]:
+        """``land.py:2455-2459``: ``P`` and ``E = et0 * et0_coefficient`` (the crop's, ``:2456``),
+        each times ``current_surface_area / area`` (WSIMOD's ``*=``: the quotient first)."""
+        precipitation, evaporation = super().get_climate()
+        share = self._param("current_surface_area") / self.area
+        return precipitation * share, evaporation * share
+
+
+SURFACE_CLASSES["VariableAreaSurface"] = VariableAreaSurface

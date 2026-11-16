@@ -267,6 +267,7 @@ _PARAMETER_UNITS = {
     "percolation_coefficient": "-",
     "et0_coefficient": "-",
     "irrigation_coefficient": "-",
+    "current_surface_area": "m2",
     "ihacres_p": "-",
     "soil_temp_w_prev": "-",
     "soil_temp_w_air": "-",

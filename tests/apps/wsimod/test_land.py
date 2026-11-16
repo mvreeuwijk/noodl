@@ -106,7 +106,7 @@ def test_the_classes_are_registered_under_the_names_wsimod_gives_them():
     assert NODE_CLASSES["Land"] is Land and Land.wsimod_type == "Land"
     assert Land.step_methods == ("run", "apply_irrigation")
     # the growing classes register themselves when ``growing`` is imported (D2)
-    growing = {"GrowingSurface", "IrrigationSurface", "GardenSurface"}
+    growing = {"GrowingSurface", "IrrigationSurface", "GardenSurface", "VariableAreaSurface"}
     assert {k: v for k, v in SURFACE_CLASSES.items() if k not in growing} == {
         "Surface": Surface,
         "ImperviousSurface": ImperviousSurface,

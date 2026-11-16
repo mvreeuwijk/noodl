@@ -81,8 +81,8 @@ refused by name.
   `Waste`, a treatment works other than `FWTW`) is refused if it names one, as WSIMOD raises
   `TypeError`.
 - `surfaces` (a `Land` only): a mapping keyed by name or a list. Each surface has `type_`
-  (`ImperviousSurface`, `PerviousSurface`, `GrowingSurface`, `IrrigationSurface` or
-  `GardenSurface`), `surface` (its name), its
+  (`ImperviousSurface`, `PerviousSurface`, `GrowingSurface`, `IrrigationSurface`,
+  `GardenSurface` or `VariableAreaSurface`), `surface` (its name), its
   parameters, and an optional `filename` or `data_input_dict`. A `GrowingSurface` takes
   `rooting_depth` (its physical depth; `depth` is refused), `ET_depletion_factor`,
   `crop_factor_stages`, `crop_factor_stage_dates`, `sowing_day`, `harvest_day` and
@@ -96,6 +96,9 @@ refused by name.
   for water (see [the garden surface](../applications/wsimod.md#the-garden-surface-and-the-demands-garden-link)).
   With two or more on a `Land`, the last one takes the demand and the earlier ones are listed in
   `model.unread` as `<land>.surfaces.<name>.garden_handlers`.
+  A `VariableAreaSurface` takes a `GrowingSurface`'s keys and `current_surface_area` (m2, default
+  0; a constructor key only, refused as an override; see
+  [the variable-area surface](../applications/wsimod.md#the-variable-area-surface)).
 - Every other key must be a constructor keyword of the class's chain (its own `__init__` and
   those its `**kwargs` reach, `noodl.apps.wsimod.classes`). Otherwise it is refused by name,
   where WSIMOD raises `TypeError`. A surface's `capacity` (and an impervious surface's `depth`)
@@ -119,7 +122,6 @@ refused by name.
   `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
   air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
-  `VariableAreaSurface` (3c), and
   `EnfieldFoulSewer`, whose `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
 
 ### Arcs

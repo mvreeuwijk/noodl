@@ -71,6 +71,12 @@ def test_the_class_schemas_match_wsimods_constructors():
         assert name not in NODE_SCHEMAS | SURFACE_SCHEMAS | ARC_SCHEMAS
 
 
+def test_out_of_scope_holds_only_the_enfield_sewer():
+    """3c ports every surface class (Task 15); only the node WSIMOD cannot run is refused (W4)."""
+    assert set(OUT_OF_SCOPE) == {"EnfieldFoulSewer"}
+    assert "VariableAreaSurface" in SURFACE_SCHEMAS
+
+
 def test_the_renamed_types_are_the_names_wsimod_gives_its_instances():
     pytest.importorskip("wsimod")
     from tests.verification._wsimod_reference import wsimod_model
@@ -412,7 +418,6 @@ REFUSALS = [
     (_with(dates=["2000-01-01 12:00"]), "12:00"),
     (_with(pollutants=["a"], additive_pollutants=["b"], non_additive_pollutants=[]), "'b'"),
     (_node(type_="EnfieldFoulSewer"), "EnfieldFoulSewer"),
-    (_node(type_="Land", surfaces=[{"type_": "VariableAreaSurface"}]), "3c"),
     (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "capacity": 1}]), "capacity"),
     (_node(type_="Land", surfaces=[{"type_": "ImperviousSurface", "depth": 1}]), "depth"),
     (_node(type_="Widget"), "Widget"),
