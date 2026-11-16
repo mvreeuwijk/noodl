@@ -1092,11 +1092,13 @@ has to be debugged, not admitted.
   (every feature the demos skip: queue arcs, a leaky `Distribution` and the reservoir spill,
   sewers with time-areas and foul sewers, storm tanks, an `FWTW` deficit, an evaporation clamp,
   a porous `QueueGroundwater`, rivers and the River biochemistry, decays, treatment, a
-  `float_accuracy` override and others) in two modes.
+  `float_accuracy` override and others) in two modes. (At the end of Task 9b `CASES` holds 63
+  cases: 56 run against WSIMOD, 55 of them in both modes and `growing_lean_soil` in pollutant
+  mode only, and seven are crash cases.)
   Every arc's flow and pollutants, every recorded tank and every surface field, on every day. The
-  worst difference is exactly 0 for every node of both demos and for all 49 cases in both modes,
-  the River biochemistry cases (`river_nutrients`, `river_double_discharge`) included, and no
-  admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
+  worst difference is exactly 0 for every node of both demos and for all 56 cases in each of their
+  modes, the River biochemistry cases (`river_nutrients`, `river_double_discharge`) included, and
+  no tie admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
   day (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
   equal noodl's residual plus the dropped water, with one named exception (W90/W91, X32):
   `river_double_discharge`, where WSIMOD's River balance misses the first of two daily
@@ -1121,10 +1123,12 @@ has to be debugged, not admitted.
   and 60 days). From the recorded decisions (`test_growing_spring_reaches_every_branch`, `-m
   slow`), every site of the transformation, the uptake, the erosion, the denitrification, the
   adsorption and the two factors shows both outcomes: on `growing_spring`'s 365 days and its
-  three years, but for ten outcomes it never shows (the wilted soil, a positive dissolved-P
-  increase, the empty pool, the shortcut, no change, desorption, no available water, no eroded P,
-  and the autumn temperature function's two caps), which `growing_lean_soil` shows; the four
-  noodl-only guards are false on every day of both and true only on their crash case's crash day.
+  three years, but for eight outcomes it never shows (the wilted soil, a positive dissolved-P
+  increase, the empty pool, the shortcut, no change, desorption, no available water and no eroded
+  P) and the autumn temperature function's two sites, which a spring sowing does not have; all of
+  these `growing_lean_soil` shows. The four noodl-only guards are false on every day of both, and
+  first true on their crash case's crash day, never before (WSIMOD stops there; noodl's guard
+  stays true on some later days).
   `deposition_non_additive` runs `surface_deposition`'s surfaces with `ammonia` non-additive
   (Y43): bitwise, no prints.
 - **The one print admission** (Y35, Y41, D12): on lands with a growing surface, WSIMOD's node

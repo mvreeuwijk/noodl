@@ -1287,20 +1287,35 @@ def test_growing_decay_keeps_its_signs_carries_its_decay_and_leaves_the_pool_beh
     assert any(tracking) and not all(tracking)
 
 
-_GROWING_AUTUMN_DAYS = 120  # the crop from run day 7: days_after_sow up to 113, across new year
+# the crop from run day 7 (days_after_sow up to 113 by day 120, across the new year); the harvest
+# on run day 291 (2004-07-18), so 292 days are the shortest run that crosses it (slow: 22 s
+# against the default 120 days' 9 s, measured)
+_AUTUMN_HARVEST_DAY = 291
 
 
-def test_growing_autumn_grows_a_crop_without_cover():
-    """``growing_autumn`` (L2) grows a crop with no cover (its unsorted calendar), and its
-    uptake reaches the autumn ``temp_func`` and ``days_after_sow - 25`` (``:1876-1879``), with
-    ``days_after_sow`` both below and above 25, over its first 120 days."""
-    autumn, _ = growing_days("growing_autumn", _GROWING_AUTUMN_DAYS)
+@pytest.mark.parametrize(
+    "days",
+    [
+        pytest.param(120, id="before-the-harvest"),
+        pytest.param(_AUTUMN_HARVEST_DAY + 1, id="across-the-harvest", marks=pytest.mark.slow),
+    ],
+)
+def test_growing_autumn_grows_a_crop_without_cover(days):
+    """``growing_autumn`` (L2) grows a crop with no cover (its unsorted calendar) on every day,
+    and its uptake reaches the autumn ``temp_func`` and ``days_after_sow - 25``
+    (``:1876-1879``), with ``days_after_sow`` both below and above 25. By default over its
+    first 120 days; under ``slow`` over 292, the whole season through its harvest on run day
+    291, after which the crop is gone (``days_after_sow`` is ``None``, here -1)."""
+    autumn, _ = growing_days("growing_autumn", days)
     site = "node:land/surfaces.barley/calc_crop_uptake"
     reached = [r for r in autumn if f"{site}/temperature_cap" in r["outcomes"]]
     assert reached and all(r["days_after_sow"] > 0 for r in reached)
     assert any(r["days_after_sow"] < 25 for r in reached)
     assert any(r["days_after_sow"] > 25 for r in reached)
     assert all(r["crop_cover"] == 0.0 for r in autumn)  # L2: the unsorted calendar
+    if days > _AUTUMN_HARVEST_DAY:
+        assert autumn[_AUTUMN_HARVEST_DAY - 1]["days_after_sow"] > 0
+        assert autumn[_AUTUMN_HARVEST_DAY]["days_after_sow"] == -1.0  # harvested
 
 
 # L1: the first three dates are a leap year's (28 and 29 February are adjusted days 59, 1 March is
@@ -1376,9 +1391,11 @@ GROWING_SITES = (
     "adsorption/change",
     "adsorption/adsorb",
 )
-# The outcomes growing_spring never shows, in its 365 days or its 1096 (measured), and which
-# growing_lean_soil shows instead: the spec's claim that growing_spring reaches every branch was
-# measured false (Task 9a review, finding 9), and growing_lean_soil was built for these.
+# The eight outcomes growing_spring never shows, in its 365 days or its 1096 (measured), and
+# which growing_lean_soil shows instead (besides the two temperature_* sites, which a spring
+# sowing does not have at all; lean soil's 45 degC days cap the function): the spec's claim that
+# growing_spring reaches every branch was measured false (Task 9a review, finding 9), and
+# growing_lean_soil was built for these.
 LEAN_SOIL_ONLY = {
     "calc_soil_moisture_dependence_factor/wilted": True,  # its soil starts below wilting point
     "soil_pool_transformation/inorganic_P": True,  # no dissolved P, fast-pool P mineralises
@@ -1388,12 +1405,11 @@ LEAN_SOIL_ONLY = {
     "adsorption/adsorb": False,  # clover's 600 kg of adsorbed P desorb
     "calc_crop_uptake/available_water": False,  # a crop on a soil below wilting point
     "erosion/phosphorus": False,  # nothing erodes P on its P-free days
-    "calc_crop_uptake/temperature_cap": False,  # 45 degC air warms the soil above 25 degC
-    "calc_crop_uptake/temperature_floor": True,  # autumn-sown (structural: spring has none)
 }
 # noodl-only guards: where WSIMOD raises (D13), noodl takes the evident intent and records the
-# event, so only a crash case reaches their true outcome, on its crash day; every case WSIMOD
-# runs shows them false only.
+# event, so only a crash case reaches their true outcome: first on its crash day, never before
+# (WSIMOD stops there; noodl's guard can stay true on later days). Every case WSIMOD runs shows
+# them false only.
 NOODL_ONLY_GUARDS = {
     "pull_storage/no_din": "growing_no_din",  # L5, land.py:1460
     "soil_pool_transformation/no_din": "growing_zero_n",  # L6, :1758
@@ -1424,7 +1440,8 @@ def test_growing_spring_reaches_every_branch():
     days and on its full three years, each site of ``GROWING_SITES`` is active, with both
     outcomes, except the outcomes of ``LEAN_SOIL_ONLY``, which it never shows and
     ``growing_lean_soil`` does. Each ``NOODL_ONLY_GUARDS`` site, a noodl guard where WSIMOD
-    raises, is false on every day of both, and true on its crash case's crash day. The Newton
+    raises, is false on every day of both, and first true on its crash case's crash day, never
+    before. The Newton
     loop runs, stops by its step on ``growing_spring`` and by its residual on
     ``growing_lean_soil``."""
     spec = CASES["growing_spring"]

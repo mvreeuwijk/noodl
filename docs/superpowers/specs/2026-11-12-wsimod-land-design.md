@@ -1414,12 +1414,14 @@ season. Each case pins what is listed.
   - soil temperatures below 0, in (0, 5] and above 5 °C.
 
   It reaches every branch of the transformation, uptake, erosion, denitrification and
-  adsorption but ten outcomes, measured in Task 9b (W2: this list first claimed all): the wilted
-  soil, a positive dissolved-P increase, the empty pool, the shortcut, no change, desorption, no
-  available water and no eroded P, and, being spring-sown, the autumn temperature function.
+  adsorption but eight outcomes and two sites, measured in Task 9b (W2: this list first claimed
+  all): the wilted soil, a positive dissolved-P increase, the empty pool, the shortcut, no
+  change, desorption, no available water and no eroded P, and, being spring-sown, the autumn
+  temperature function's two sites (`temperature_cap`, `temperature_floor`).
   `growing_lean_soil` reaches those. A test asserts from the decisions that each branch is
   reached at least once, on one case or the other (`-m slow` only, as X39), and that the
-  noodl-only guards are reached only by the crash cases. It pins the call order, the pool gap
+  noodl-only guards are false on every day of both and first true on their crash case's crash
+  day, never before. It pins the call order, the pool gap
   (L8, L9) and the leap shift (L1).
 - **`growing_lean_soil`** (Task 9b). Two autumn-sown growing surfaces over 60 days: a P-free
   soil (no phosphate, no adsorbed P, no `srp`) that starts below its wilting point and stays dry
