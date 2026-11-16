@@ -744,3 +744,128 @@ def test_validate_registers_the_growing_class_in_a_fresh_interpreter():
         env={**os.environ, "PYTHONPATH": path},
     )
     assert done.returncode == 0, done.stderr
+
+
+# --- the crop state, the drivers and the results (Task 5b) ---------------------------------------
+_FIVE = {
+    "crop_factor_stages": [0.3, 0.3, 1.2, 1.2, 0.3],
+    "crop_factor_stage_dates": [0, 90, 160, 250, 365],
+}
+
+
+def _two_growing(**lists) -> dict:
+    """Two growing surfaces, of 2 and 5 crop-factor stages, a pervious and an impervious one."""
+    return _mapping(
+        [
+            {"type_": "GrowingSurface", "surface": "short", "initial_storage": 0.25},
+            {
+                "type_": "GrowingSurface",
+                "surface": "long",
+                "ET_depletion_factor": 0.5,
+                "initial_storage": 0.25,
+                **_FIVE,
+            },
+            {"type_": "PerviousSurface", "surface": "lawn", "et0_coefficient": 0.7},
+            {"type_": "ImperviousSurface", "surface": "roof"},
+        ],
+        lists=lists or _LISTS,
+    )
+
+
+def test_crop_factor_stages_padding_is_inert():
+    """Y33, D16: the driver is ``(n, S)``, ``S`` the class's longest list, the shorter row
+    padded with 0; a non-zero padding entry is refused at bind, naming the surface and the
+    index."""
+    from noodl.apps.wsimod import build_model, initial_drivers
+
+    model, state, drivers = build_model(read_wsimod_config(_two_growing()))
+    key = "wsimod.GrowingSurface.crop_factor_stages"
+    layout = model.wsimod_day.drivers[key]
+    assert layout.labels == [("land", "short"), ("land", "long")]
+    assert layout.columns == (0, 1, 2, 3, 4)
+    assert drivers[key].tolist() == [[1.0, 1.0, 0.0, 0.0, 0.0], [0.3, 0.3, 1.2, 1.2, 0.3]]
+    assert layout.unit == "-"
+    model.step(state, drivers, dt=86400.0, t=0.0)  # the padding is inert
+    bad = drivers[key].clone()
+    bad[0, 2] = 0.1
+    padded = initial_drivers(model, values={key: bad})
+    with pytest.raises(ValueError, match=r"surfaces\.short.*crop_factor_stages\[2\]"):
+        model.step(state, padded, dt=86400.0, t=0.0)
+
+
+@pytest.mark.parametrize("pollutants", [True, False])
+def test_the_crop_state_exists_in_quantity_only(pollutants):
+    """D4: three flat keys, one row per growing surface, in both modes (the calendar drives the
+    volumes); ``days_after_sow`` starts at -1 (``None``), the covers at 0. They are not water."""
+    from noodl.apps.wsimod import build_model, wsimod_run
+
+    model, state, drivers = build_model(read_wsimod_config(_two_growing()), pollutants=pollutants)
+    day = model.wsimod_day
+    rows = [("land", "surfaces.short"), ("land", "surfaces.long")]
+    for key, start, unit in (
+        ("wsimod.days_after_sow", -1.0, "d"),
+        ("wsimod.crop_cover", 0.0, "-"),
+        ("wsimod.ground_cover", 0.0, "-"),
+    ):
+        assert day.state_labels(key) == rows
+        assert state[key].tolist() == [start, start]
+        assert day.key_labels[key].unit == unit
+    results = wsimod_run(model, state, drivers, days=2)
+    assert float(results.mass_balance.residual.abs().max()) <= 1e-12
+
+
+def test_the_crop_state_round_trips_through_the_state():
+    """Y5: the end of the sowing day holds ``days_after_sow = 0`` and the next day's ``1`` and a
+    cover; a fresh model warm-started from the first day's state gives the second day's state
+    bitwise."""
+    from noodl.apps.wsimod import build_model
+
+    mapping = _two_growing()
+    mapping["nodes"][0]["surfaces"][1]["sowing_day"] = 200
+    model, state, drivers = build_model(read_wsimod_config(mapping))
+    one = model.step(state, drivers, dt=86400.0, t=0.0)
+    assert one["wsimod.days_after_sow"].tolist() == [0.0, -1.0]  # 2000-01-01 is day 1
+    two = model.step(one, drivers, dt=86400.0, t=86400.0)
+    assert two["wsimod.days_after_sow"].tolist() == [1.0, -1.0]
+    assert float(two["wsimod.crop_cover"][0]) > 0.0 and float(two["wsimod.crop_cover"][1]) == 0.0
+    fresh, _, _ = build_model(read_wsimod_config(mapping))
+    again = fresh.step(one, drivers, dt=86400.0, t=86400.0)
+    assert set(again) == set(two)
+    assert all(torch.equal(again[k], two[k]) for k in two)
+
+
+def test_step_cannot_leave_the_network_dates():
+    """D7, Y51: ``model.step`` runs only on the configuration's dates (3a's refusal), so the
+    calendar, built for every one of them, cannot be read past them."""
+    from noodl.apps.wsimod import build_model
+
+    network = read_wsimod_config(_two_growing())
+    model, state, drivers = build_model(network)
+    with pytest.raises(ValueError, match="t"):
+        model.step(state, drivers, dt=86400.0, t=len(network.dates) * 86400.0)
+
+
+def test_et0_coef_is_recorded_for_every_non_impervious_surface():
+    """D23 (``model.py:1150``): ``et0_coef`` is a ``PerviousSurface``'s parameter and a growing
+    surface's coefficient of the day (``Ks * crop_factor``); NaN on an impervious one.
+    ``crop_factor`` (Y32) is NaN except on the growing surfaces."""
+    from noodl.apps.wsimod import build_model, wsimod_run
+
+    network = read_wsimod_config(_two_growing())
+    model, state, drivers = build_model(network)
+    results = wsimod_run(model, state, drivers, days=2)
+    column = {name: i for i, (_, name) in enumerate(results.surface_names)}
+    et0 = results.surface["et0_coef"]
+    crop = results.surface["crop_factor"]
+    assert et0[:, column["lawn"]].tolist() == [0.7, 0.7]
+    assert torch.isnan(et0[:, column["roof"]]).all()
+    assert torch.isnan(crop[:, column["lawn"]]).all() and torch.isnan(crop[:, column["roof"]]).all()
+    # the soil is above RAW on both: Ks = 1 and et0_coef is the day's crop factor, not the
+    # PerviousSurface default of 0.5
+    stages = torch.tensor(_FIVE["crop_factor_stages"], dtype=F64)
+    assert crop[:, column["short"]].tolist() == [1.0, 1.0]
+    assert crop[:, column["long"]].tolist() == [
+        float(quick_interp(d, _FIVE["crop_factor_stage_dates"], stages, 1)) for d in (1, 2)
+    ]
+    for name in ("short", "long"):
+        assert torch.equal(et0[:, column[name]], crop[:, column[name]])

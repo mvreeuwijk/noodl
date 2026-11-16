@@ -812,6 +812,36 @@ def test_the_total_decayed_state_round_trips():
     assert model.wsimod_day.state_labels("wsimod.total_decayed") == []
 
 
+def test_the_crop_state_is_carried_and_set_by_label():
+    """D4, D5: a growing surface's crop registers are flat state keys, one row
+    ``(land, "surfaces.<name>")`` each and carried; its crop factor and day's
+    ``et0_coefficient`` are per-day stores; ``initial_state`` sets them by label. A land without
+    a growing surface has no rows."""
+    from noodl.apps.wsimod.land import Land
+
+    network = read_wsimod_config(CASES["growing_no_nitrate"].build())
+    model, _, _ = build_model(network, pollutants=False)
+    day = model.wsimod_day
+    land = day.engine.nodes["land"]
+    paths = ["days_after_sow", "crop_cover", "ground_cover", "crop_factor", "et0_coefficient"]
+    assert [f"surfaces.wheat.{f}" for f in paths] == [
+        x for x in land.store_paths if x.split(".")[-1] in paths
+    ]
+    assert land.store_paths == Land.store_paths_of(
+        [("GrowingSurface", "wheat"), ("ImperviousSurface", "yard")], nutrients=False
+    )
+    assert {f"surfaces.wheat.{f}" for f in paths[:3]} <= set(land.carried_paths)
+    assert not {f"surfaces.wheat.{f}" for f in paths[3:]} & set(land.carried_paths)
+    for key in ("wsimod.days_after_sow", "wsimod.crop_cover", "wsimod.ground_cover"):
+        assert day.state_labels(key) == [("land", "surfaces.wheat")]
+    state = initial_state(model, values={"wsimod.days_after_sow": {("land", "surfaces.wheat"): 7}})
+    assert state["wsimod.days_after_sow"].tolist() == [7.0]
+    _, ctx, engine = next(day.run_days(state, days=1))
+    assert float(engine.nodes["land"].surfaces[0].days_after_sow) == 8.0  # sown: counts on
+    plain, _, _ = build_model(read_wsimod_config(CASES["pervious_only"].build()))
+    assert plain.wsimod_day.state_labels("wsimod.days_after_sow") == []
+
+
 # --- the user Decay* arcs (X29, D15) ------------------------------------------------------------
 _ARC_PHOSPHATE = {"phosphate": {"constant": 0.1, "exponent": 1.07}}
 

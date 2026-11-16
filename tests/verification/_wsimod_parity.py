@@ -16,6 +16,7 @@ import io
 import re
 import types
 from collections.abc import Sequence
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 
 import torch
@@ -23,7 +24,12 @@ from torch import Tensor
 
 from noodl.apps.wsimod import WsimodResults
 from tests.verification import _wsimod_reference
-from tests.verification._wsimod_reference import WsimodReference, record_wsimod_run, wsimod_model
+from tests.verification._wsimod_reference import (
+    WsimodReference,
+    record_wsimod_run,
+    reference_of_rows,
+    wsimod_model,
+)
 
 __all__ = [
     "ADMISSION_MARGIN",
@@ -32,6 +38,7 @@ __all__ = [
     "assert_matches_wsimod",
     "mass_balance_worst",
     "wsimod_reference_by_day",
+    "wsimod_until_crash",
 ]
 
 BOUND = 1e-12
@@ -398,6 +405,36 @@ class _DayTaggedStdout(io.StringIO):
         *complete, self._pending = self._pending.split("\n")
         self._lines.extend((self._days[0], line) for line in complete)
         return super().write(text)
+
+
+def wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]:
+    """D13: WSIMOD's own run of ``mapping`` (``wsimod_model``, nothing patched), one day at a
+    time (``Model.run`` over one date continues from the state the last one left), until it
+    raises. Returns the record of the days before the crash day (``reference_of_rows``; empty
+    when it crashes on day 0), the exception and the crash day. A run that never raises fails."""
+    from wsimod.core import constants
+
+    model = wsimod_model(mapping)
+    dates = list(model.dates)
+    flows: list = []
+    tanks: list = []
+    surfaces: list = []
+    printed: list[str] = []
+    for day, date in enumerate(dates):
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                f, t, _, s = model.run(dates=[date], verbose=True, record_all=True)
+        except Exception as error:  # the crash is the result
+            reference = reference_of_rows(
+                dates[:day], flows, tanks, surfaces, printed, tuple(constants.POLLUTANTS)
+            )
+            return reference, error, day
+        flows += f
+        tanks += t
+        surfaces += s
+        printed += out.getvalue().splitlines()
+    raise AssertionError(f"WSIMOD ran all {len(dates)} days without raising (D13)")
 
 
 def wsimod_reference_by_day(

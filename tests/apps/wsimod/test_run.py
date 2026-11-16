@@ -431,6 +431,8 @@ def test_the_results_follow_wsimods_record_layout():
         "subsurface_r",
         "surface_r",
         "tank_recharge",
+        "et0_coef",  # model.py:1150 (D23)
+        "crop_factor",  # noodl's own (Y32)
     }
     assert all(v.shape == (t, n) for v in results.surface.values())
     assert results.surface_quality.shape == (t, n, k)
@@ -440,8 +442,9 @@ def test_the_results_follow_wsimods_record_layout():
     assert all(not attribute.startswith("surface:") for _, attribute in results.tank_names)
     model, state, drivers = _case("impervious_only")
     results = wsimod_run(model, state, drivers, days=5)
-    for field in ("percolation", "subsurface_r", "surface_r", "tank_recharge"):
+    for field in ("percolation", "subsurface_r", "surface_r", "tank_recharge", "et0_coef"):
         assert torch.isnan(results.surface[field]).all(), field
+    assert torch.isnan(results.surface["crop_factor"]).all()
     for field in ("storage", "evaporation", "precipitation"):
         assert not torch.isnan(results.surface[field]).any(), field
 

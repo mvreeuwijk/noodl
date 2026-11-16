@@ -77,7 +77,7 @@ from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, Dec
 from noodl.apps.wsimod.config import WsimodNetwork
 from noodl.apps.wsimod.constants import SURFACE_DEPOSITION
 from noodl.apps.wsimod.engine import Ctx, Engine
-from noodl.apps.wsimod.land import month_start
+from noodl.apps.wsimod.land import PerviousSurface, month_start
 from noodl.apps.wsimod.structure import (
     check_network,
     forcing_readers,
@@ -112,6 +112,9 @@ STATE_KEYS = (
     "wsimod.total_decayed",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.days_after_sow",
+    "wsimod.crop_cover",
+    "wsimod.ground_cover",
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
@@ -121,12 +124,16 @@ STATE_KEYS = (
 # through the next day's carry-over (land.py:427-439), and a DecayQueueTank's is decay its
 # storage has not lost yet (tanks.py:694), so neither is held
 # a River's lag registers hold temperatures and phosphorus masses already in its storage
+# a growing surface's crop registers hold no water at all (Y11)
 _NOT_HELD = (
     "wsimod.active_storage",
     "wsimod.previous_pulled",
     "wsimod.total_decayed",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.days_after_sow",
+    "wsimod.crop_cover",
+    "wsimod.ground_cover",
 )
 # keys of one value per row, not a VQIP
 _FLAT_KEYS = (
@@ -134,12 +141,24 @@ _FLAT_KEYS = (
     "wsimod.arc_queue_since",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.days_after_sow",
+    "wsimod.crop_cover",
+    "wsimod.ground_cover",
 )
 _STATE_UNITS = {
     "wsimod.travel_queue_present": "-",
     "wsimod.arc_queue_since": "d",
     "wsimod.river_temperature_lag": "degC",
     "wsimod.river_phosphorus_lag": "kg",
+    "wsimod.days_after_sow": "d",
+    "wsimod.crop_cover": "-",
+    "wsimod.ground_cover": "-",
+}
+# a growing surface's carried crop register -> its state key (D4)
+_CROP_REGISTERS = {
+    "days_after_sow": "wsimod.days_after_sow",
+    "crop_cover": "wsimod.crop_cover",
+    "ground_cover": "wsimod.ground_cover",
 }
 # a River's store path -> its register's state key (D8)
 _RIVER_REGISTERS = {
@@ -167,6 +186,18 @@ _STATE_TEXT = {
     "wsimod.river_phosphorus_lag": (
         "every biochemistry River's lagged_total_phosphorus register, max_phosphorus_lag + 1 "
         "slots, slot 0 the oldest, zero-padded at the front (X17)"
+    ),
+    "wsimod.days_after_sow": (
+        "every growing surface's days since sowing (land.py:1531-1544), -1 for WSIMOD's None "
+        "(unsown; 0 on the sowing day)"
+    ),
+    "wsimod.crop_cover": (
+        "every growing surface's crop cover (land.py:1550-1558), kept outside the season until "
+        "the harvest resets it"
+    ),
+    "wsimod.ground_cover": (
+        "every growing surface's ground cover (land.py:1550-1558), kept outside the season "
+        "until the harvest resets it"
     ),
 }
 
@@ -235,6 +266,34 @@ _PARAMETER_UNITS = {
     "prodPpar": "kg/m3/d",
     "muptNpar": "kg/m2/d",
     "muptPpar": "kg/m2/d",
+    # a GrowingSurface (land.py:1186-1250, WSIMOD's comments; :1170-1180 for the keywords)
+    "ET_depletion_factor": "-",
+    "rooting_depth": "m",
+    "crop_factor_stages": "-",
+    "crop_cover_max": "-",
+    "ground_cover_max": "-",
+    "satact": "-",
+    "thetaupp": "-",
+    "thetalow": "-",
+    "thetapow": "-",
+    "uptake1": "g/m2/y",
+    "uptake2": "-",
+    "uptake3": "1/d",
+    "erodibility": "g*d/(J*mm)",
+    "sreroexp": "-",
+    "cohesion": "kPa",
+    "slope": "-",
+    "srfilt": "-",
+    "macrofilt": "-",
+    "limpar": "-",
+    "exppar": "-",
+    "hsatINs": "mg/l",
+    "denpar": "-",
+    "adosorption_nr_limit": "-",
+    "kfr": "l/kg",
+    "nfr": "-",
+    "kadsdes": "1/d",
+    "bulk_density": "kg/m3",
 }
 _FORCING_UNITS = {
     "precipitation": "m/d",
@@ -253,6 +312,10 @@ _SURFACE_FIELDS = {
     "subsurface_r": "subsurface_flow",
     "surface_r": "infiltration_excess",
     "tank_recharge": "tank_recharge",
+    # D23: every non-impervious surface's (model.py:1150), a PerviousSurface's its parameter
+    "et0_coef": "et0_coefficient",
+    # noodl's own (Y32): a growing surface's crop factor of the day, NaN on the others
+    "crop_factor": "crop_factor",
 }
 
 
@@ -534,8 +597,19 @@ class WsimodDay:
                 name, fractions = timearea
                 add(f"wsimod.{spec.cls}.{name}", spec.name, node, name, fractions, "time")
             for surface in getattr(node, "surfaces", ()):
+                columns = surface.driver_columns()  # before the pollutant rule (D16)
                 for name, value in surface.defaults.items():
                     value = _f64(value)
+                    if name in columns:
+                        add(
+                            f"wsimod.{surface.spec.cls}.{name}",
+                            (spec.name, surface.name),
+                            node,
+                            f"surfaces.{surface.name}.{name}",
+                            value,
+                            columns[name],
+                        )
+                        continue
                     if value.ndim == 1 and p.K == 0:
                         continue
                     add(
@@ -561,6 +635,13 @@ class WsimodDay:
                     for t, fraction in fractions.items():
                         row[t] = fraction
                     rows.append(row)
+                d.columns = tuple(range(width))
+                d.template = torch.stack(rows)
+            elif d.columns == "stages":  # D16, Y33: padded with 0 to the longest list
+                width = max(len(stages) for stages in values[key])
+                rows = [torch.zeros(width, dtype=F64) for _ in values[key]]
+                for row, stages in zip(rows, values[key], strict=True):
+                    row[: len(stages)] = stages
                 d.columns = tuple(range(width))
                 d.template = torch.stack(rows)
             else:
@@ -738,6 +819,11 @@ class WsimodDay:
                     size = stores[path].shape[-1]
                     rows = [(spec.name, i) for i in range(size)]
                     put(_RIVER_REGISTERS[path], node, path, rows, (size,))
+                elif path.startswith("surfaces.") and last in _CROP_REGISTERS:
+                    # D4: flat, one row per growing surface
+                    surface = path.split(".")[1]
+                    rows = [(spec.name, f"surfaces.{surface}")]
+                    put(_CROP_REGISTERS[last], node, path, rows, ())
                 elif path.startswith("surfaces.") and last == "total_decayed":
                     # X35: the attribute path, not "surface:<name>" (D7)
                     surface = path.split(".")[1]
@@ -916,7 +1002,7 @@ class WsimodDay:
             else:
                 rows = value[..., slot.start : slot.start + slot.rows]
                 batch = rows.shape[:-1]
-            stored = rows.reshape(*batch, *slot.shape)
+            stored = rows.reshape((*batch, *slot.shape))
             by_element.setdefault(id(slot.element), (slot.element, {}))[1][slot.path] = stored
         for element, stores in by_element.values():
             element.load_stores(stores)
@@ -1187,6 +1273,10 @@ class WsimodDay:
                     surface[f].append(s.tank_recharge)
                 elif attribute in s.flow_fields:
                     surface[f].append(getattr(s, attribute)[..., 0])
+                elif attribute == "et0_coefficient" and isinstance(s, PerviousSurface):
+                    surface[f].append(s.crop_et0_coefficient())  # D23
+                elif attribute == "crop_factor" and s.is_growing:
+                    surface[f].append(s.crop_factor)
                 else:  # WSIMOD records no such field for this surface (model.py:1155-1167)
                     surface[f].append(nan)
             quality.append(s.storage[..., 1:])

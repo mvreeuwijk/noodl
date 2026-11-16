@@ -25,6 +25,7 @@ import copy
 import functools
 import io
 import re
+import traceback
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,7 @@ from tests.verification._wsimod_parity import (  # noqa: E402
     assert_matches_wsimod,
     mass_balance_worst,
     wsimod_reference_by_day,
+    wsimod_until_crash,
 )
 from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
 
@@ -475,11 +477,16 @@ def test_the_cases_cover_every_listed_feature():
     node_type_override decay_storage decay_groundwater decay_queue_groundwater
     decay_queue_groundwater_n0 decay_arc decay_arc_mixed decay_arc_alt
     surface_decay_nitrification land_run_twice river_nutrients river_double_discharge
-    surface_deposition""".split()
+    surface_deposition growing_no_nitrate growing_default_depletion""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",
         "nonresidential_demand",
+        "growing_default_depletion",
+    }
+    # D13: the cases WSIMOD runs as they are until it raises
+    assert {n: spec.crash for n, spec in CASES.items() if spec.crash} == {
+        "growing_default_depletion": ("ZeroDivisionError", "land.py:1566"),
     }
     # D24: the one case whose default run is a prefix of its dates
     assert {n: spec.slow_days for n, spec in CASES.items() if spec.slow_days} == {
@@ -880,6 +887,63 @@ def test_case_runs_where_wsimod_crashes_land_sewer_ponding():
     assert bool(torch.isfinite(results.arc_flow).all())
     assert mass_balance_worst(results) <= BOUND
     assert len(results.dates) == spec.days
+
+
+# D13: the crash cases, with the event noodl records on the crash day (None: no event)
+CRASH_EVENTS = {"growing_default_depletion": "crop_water_stress_zero_denominator"}
+CRASH_RUNS = [
+    pytest.param(name, mode, id=f"{name}-{mode}")
+    for name, spec in CASES.items()
+    if spec.crash is not None
+    for mode in spec.modes
+]
+
+
+@functools.cache
+def crashed(name: str):
+    return wsimod_until_crash(CASES[name].build())
+
+
+def _innermost_land_line(error: BaseException) -> str:
+    """``"land.py:<line>"`` of the innermost frame of ``error`` in WSIMOD's ``nodes/land.py``."""
+    frames = [
+        f
+        for f in traceback.extract_tb(error.__traceback__)
+        if Path(f.filename).parts[-2:] == ("nodes", "land.py")
+    ]
+    assert frames, f"no frame of nodes/land.py in {error!r}"
+    return f"land.py:{frames[-1].lineno}"
+
+
+@pytest.mark.parametrize(("name", "mode"), CRASH_RUNS)
+def test_case_runs_where_wsimod_crashes(name, mode):
+    """D13: WSIMOD, run as it is, raises the case's exception at its line of ``nodes/land.py``
+    on the crash day. noodl runs every day: on the days before the crash it equals WSIMOD
+    bitwise (``assert_matches_wsimod``, prints included; vacuous on day 0), on the crash day it
+    records the event at the land (the evident intent instead of the exception), and over the
+    whole run its results are finite and its balance closes."""
+    spec = CASES[name]
+    reference, error, day = crashed(name)
+    kind, line = spec.crash
+    assert type(error).__name__ == kind
+    assert _innermost_land_line(error) == line
+    assert 0 <= day < spec.days
+    if day:
+        results, diagnostics = case_ours(name, mode, day)
+        found = assert_matches_wsimod(
+            results, reference, diagnostics=diagnostics, case=f"{name}-{mode}", quality=MODES[mode]
+        )
+        assert found["worst"] == 0.0 and found["admissions"] == []
+    results, diagnostics = case_ours(name, mode)
+    event = CRASH_EVENTS[name]
+    if event is not None:
+        names = diagnostics["node_names"]
+        land = next(n["name"] for n in spec.build()["nodes"] if n["type_"] == "Land")
+        flags = diagnostics["events"][event][:, names.index(land)]
+        assert bool(flags[day]) and not bool(flags[:day].any())
+    for values in (results.arc_flow, results.tank_storage, results.surface["storage"]):
+        assert bool(torch.isfinite(values).all())
+    assert mass_balance_worst(results) <= BOUND
 
 
 def test_case_runs_where_wsimod_crashes_wtw_zero_input():

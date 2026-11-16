@@ -199,6 +199,8 @@ class Surface(DecayTank):
     is_growing: ClassVar[bool] = False
     # the per-day state WSIMOD keeps on the surface besides its storage (recorded, model.py:1135)
     flow_fields: ClassVar[tuple[str, ...]] = ()
+    # the registers a class keeps beyond its tank and flows (D5): the carried ones are state
+    carried_fields: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, spec: SurfaceSpec, pollutants: Pollutants, *, parent: Land) -> None:
         self.spec = spec
@@ -267,6 +269,18 @@ class Surface(DecayTank):
         spec alone; returns what a quantity-only run ignores (``[]`` for these surfaces)."""
         return []
 
+    @classmethod
+    def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """The store paths of the class's registers (D5), after its flows: none here. A growing
+        surface's crop registers (and, with ``nutrients``, its pool)."""
+        return ()
+
+    def driver_columns(self) -> dict[str, tuple | str]:
+        """The columns of the surface's non-pollutant vector parameters by name (D16):
+        ``_driver_layout`` consults it before the pollutant-column rule. ``"stages"`` is padded
+        to the class's longest list. None here."""
+        return {}
+
     # --- parameters -----------------------------------------------------------------------------
     def _param(self, name: str) -> Tensor:
         return self.params.get(name, self.defaults[name])
@@ -314,9 +328,11 @@ class Surface(DecayTank):
     def stores(self) -> dict[str, Tensor]:
         """``storage``, the per-day flows and ``total_decayed``: always held and compared in the
         replay; carried by the Land only when ``nitrite`` is a pollutant (D8)."""
+        nutrients = getattr(self, "has_nutrients", False)
         return {
             "storage": self.storage,
             **{f: getattr(self, f) for f in self.flow_fields},
+            **{f: getattr(self, f) for f in self.state_fields(nutrients=nutrients)},
             "total_decayed": self.total_decayed,
         }
 
@@ -786,24 +802,38 @@ class Land(Node):
         # land.py:155-156
         self.running_inflow_mb = empty(pollutants, ())
         self.running_outflow_mb = empty(pollutants, ())
-        self.store_paths = self.store_paths_of([(s.cls, s.name) for s in spec.surfaces])
+        self.store_paths = self.store_paths_of(
+            [(s.cls, s.name) for s in spec.surfaces], nutrients="nitrate" in pollutants.names
+        )
         # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
         # running mass balance are the day's (W75). A surface's total_decayed is carried when
-        # "nitrite" is a pollutant: the next day's run reads it (D8)
+        # "nitrite" is a pollutant: the next day's run reads it (D8). A surface's registers
+        # (``carried_fields``: a growing surface's crop state, D5) are carried always
         carried = [x for x in self.store_paths if x.endswith(".storage")]
         if "nitrite" in pollutants.names:
             carried += [x for x in self.store_paths if x.endswith(".total_decayed")]
+        carried += [f"surfaces.{s.name}.{f}" for s in self.surfaces for f in s.carried_fields]
         self.carried_paths = tuple(carried)
 
     @classmethod
-    def store_paths_of(cls, surfaces: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+    def store_paths_of(
+        cls, surfaces: Sequence[tuple[str, str]], *, nutrients: bool = False
+    ) -> tuple[str, ...]:
         """The store paths of a ``Land`` with ``surfaces`` ``[(class, name), ...]``: the
-        residence tanks in ``dir()`` order (D10), each surface's ``storage``, per-day flows and
-        ``total_decayed``, and the running mass balance."""
+        residence tanks in ``dir()`` order (D10), each surface's ``storage``, per-day flows,
+        registers (``Surface.state_fields``; a growing surface's pool only with ``nutrients``,
+        ``"nitrate"`` among the run's pollutants, D5) and ``total_decayed``, and the running mass
+        balance."""
         paths = [f"{tank}.storage" for tank in cls._TANKS]
         for surface_cls, name in surfaces:
-            fields = ("storage", *SURFACE_CLASSES[surface_cls].flow_fields)
-            paths += [f"surfaces.{name}.{field}" for field in (*fields, "total_decayed")]
+            surface = SURFACE_CLASSES[surface_cls]
+            fields = (
+                "storage",
+                *surface.flow_fields,
+                *surface.state_fields(nutrients=nutrients),
+                "total_decayed",
+            )
+            paths += [f"surfaces.{name}.{field}" for field in fields]
         return (*paths, "running_inflow_mb", "running_outflow_mb")
 
     # --- the day's context and parameters -------------------------------------------------------

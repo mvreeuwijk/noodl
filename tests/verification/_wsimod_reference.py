@@ -71,6 +71,7 @@ __all__ = [
     "extract_topology",
     "pad_register",
     "record_wsimod_run",
+    "reference_of_rows",
     "reset_wsimod_globals",
     "wsimod_model",
     "wsimod_reference",
@@ -84,6 +85,7 @@ _SURFACE_FIELDS = (
     ("subsurface_r", "subsurface_r"),
     ("surface_r", "surface_r"),
     ("tank_recharge", "tank_recharge"),
+    ("et0_coef", "et0_coef"),  # every non-impervious surface's (model.py:1150, D23)
 )
 
 
@@ -352,19 +354,26 @@ def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
     from wsimod.core import constants
 
     dates = list(model.dates)[:days]
-    pollutants = tuple(constants.POLLUTANTS)
     out = io.StringIO()
     with redirect_stdout(out):
         flows, tanks, _, surfaces = model.run(dates=dates, verbose=True, record_all=True)
+    return reference_of_rows(
+        dates, flows, tanks, surfaces, out.getvalue().splitlines(), tuple(constants.POLLUTANTS)
+    )
+
+
+def reference_of_rows(dates, flows, tanks, surfaces, printed, pollutants) -> WsimodReference:
+    """The :class:`WsimodReference` of ``record_all``'s rows (``model.py:1075-1170``) over
+    ``dates``; with no date it holds no element (a run that crashed on its first day)."""
     n_days = len(dates)
 
     def quality(rows, width):
         values = [[row[p] for p in pollutants] for row in rows]
         return torch.tensor(values, dtype=torch.float64).reshape(n_days, width, len(pollutants))
 
-    n_arcs = len(flows) // n_days
-    n_tanks = len(tanks) // n_days
-    n_surfaces = len(surfaces) // n_days
+    n_arcs = len(flows) // max(n_days, 1)
+    n_tanks = len(tanks) // max(n_days, 1)
+    n_surfaces = len(surfaces) // max(n_days, 1)
     return WsimodReference(
         pollutants=pollutants,
         dates=[str(d) for d in dates],
@@ -377,7 +386,7 @@ def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
         surface_names=[(row["node"], row["surface"]) for row in surfaces[:n_surfaces]],
         surface={name: _tensor(surfaces, key, n_days, n_surfaces) for name, key in _SURFACE_FIELDS},
         surface_quality=quality(surfaces, n_surfaces),
-        printed=out.getvalue().splitlines(),
+        printed=list(printed),
     )
 
 
@@ -468,13 +477,18 @@ _ARC_METHODS = {  # the end of the arc that makes the call (arcs.py:112-228)
 def _store_paths(node) -> tuple[str, ...]:
     """``Node.store_paths`` of the noodl class of ``node``. ``__qualname__`` survives the
     renames that set ``__class__.__name__`` (``storage.py:294``, ``:1043``, ``demand.py:214``)."""
+    from wsimod.core import constants
+
     from noodl.apps.wsimod.engine import _register_all
     from noodl.apps.wsimod.node import NODE_CLASSES
 
     _register_all()
     cls = NODE_CLASSES[type(node).__qualname__]
-    if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
-        return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
+    if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces (D5)
+        return cls.store_paths_of(
+            [(type(s).__name__, s.surface) for s in node.surfaces],
+            nutrients="nitrate" in constants.POLLUTANTS,
+        )
     tank = type(getattr(node, "tank", None)).__name__
     paths = cls.store_paths
     if tank == "DecayTank":  # D8: a per-day store
@@ -489,7 +503,11 @@ def _store_paths(node) -> tuple[str, ...]:
 def _wsimod_store(node, path: str):
     """The WSIMOD value of a noodl store path: an attribute, except that noodl's dense queue
     (``<tank>.internal_arc.register``/``.present``) is WSIMOD's ``queue`` dict (the rows, by
-    time) and its key set (``tanks.py:481-486``, ``arcs.py:567``)."""
+    time) and its key set (``tanks.py:481-486``, ``arcs.py:567``), and a growing surface's
+    ``days_after_sow`` of ``None`` (unsown) is noodl's ``-1`` (D6)."""
+    if path.endswith(".days_after_sow"):
+        value = _attribute(node, path)
+        return -1 if value is None else value
     for suffix, make in (
         (".internal_arc.register", lambda queue: queue),
         (".internal_arc.present", lambda queue: sorted(queue)),

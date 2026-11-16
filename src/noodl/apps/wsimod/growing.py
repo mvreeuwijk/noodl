@@ -223,6 +223,10 @@ class GrowingSurface(PerviousSurface):
 
     surface_class: ClassVar[str] = "GrowingSurface"
     is_growing: ClassVar[bool] = True
+    # D4, D5: the crop registers, carried in "wsimod.<field>" (one row per surface); the crop
+    # factor and the day's et0_coefficient are per-day stores, recomputed before every reader
+    carried_fields: ClassVar[tuple[str, ...]] = ("days_after_sow", "crop_cover", "ground_cover")
+    crop_fields: ClassVar[tuple[str, ...]] = (*carried_fields, "crop_factor", "et0_coefficient")
     parameter_defaults: ClassVar[dict[str, float]] = {
         **{
             k: v
@@ -241,6 +245,9 @@ class GrowingSurface(PerviousSurface):
         self.crop_factor_stage_dates: list = list(structure["crop_factor_stage_dates"])
         self._stages_default = _f64(list(structure["crop_factor_stages"]))
         self.crop_factor_stages = self._stages_default
+        # the driver "wsimod.<Class>.crop_factor_stages" (..., n, S), padded with 0 to the
+        # class's longest list (D16, Y33)
+        self.defaults["crop_factor_stages"] = self._stages_default
         self.sowing_day = _integral(structure, "sowing_day", where)
         self.harvest_day = _integral(structure, "harvest_day", where)
         self.adsorption_nr_maxiter = int(structure["adsorption_nr_maxiter"])
@@ -271,18 +278,41 @@ class GrowingSurface(PerviousSurface):
         self.ground_cover_stages = _stages_tensor(self._param("ground_cover_max"))
         self.crop_cover_stages = _stages_tensor(self._param("crop_cover_max"))
 
+    @classmethod
+    def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """D5: the crop registers and the day's crop factor and ``et0_coefficient``."""
+        return cls.crop_fields
+
+    def driver_columns(self) -> dict[str, tuple | str]:
+        """D16: ``crop_factor_stages`` is padded to the class's longest list (``"stages"``)."""
+        return {"crop_factor_stages": "stages"}
+
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
-        """The day's parameters, ``crop_factor_stages`` ``(..., S)`` among them (``S`` the length
-        of ``crop_factor_stage_dates``). ``wilting_point`` must stay below ``field_capacity``
-        (``TAW > 0``, L4)."""
+        """The day's parameters, ``crop_factor_stages`` ``(..., S)`` among them, ``S`` at least
+        the length ``L`` of ``crop_factor_stage_dates``: the driver of the class is padded to
+        its longest list (D16), and an entry beyond ``L`` must be 0 (inert, Y33): another value
+        is refused, naming the surface and the index. ``wilting_point`` must stay below
+        ``field_capacity`` (``TAW > 0``, L4)."""
         parameters = dict(parameters)
         stages = parameters.pop("crop_factor_stages", None)
         stages = self._stages_default if stages is None else _f64(stages)
-        if stages.shape[-1:] != (len(self.crop_factor_stage_dates),):
+        length = len(self.crop_factor_stage_dates)
+        if stages.ndim == 0 or stages.shape[-1] < length:
             raise ValueError(
-                f"{self.site}: crop_factor_stages has {stages.shape[-1]} entries but "
-                f"crop_factor_stage_dates has {len(self.crop_factor_stage_dates)} (land.py:1547)"
+                f"{self.site}: crop_factor_stages has {stages.shape[-1:]} entries but "
+                f"crop_factor_stage_dates has {length} (land.py:1547)"
             )
+        if stages.shape[-1] > length:
+            padding = stages[..., length:].reshape(-1, stages.shape[-1] - length)
+            nonzero = (padding != 0).any(dim=0).nonzero().flatten().tolist()
+            if nonzero:
+                index = length + nonzero[0]
+                raise ValueError(
+                    f"{self.site}: crop_factor_stages[{index}] is "
+                    f"{padding[:, nonzero[0]].tolist()}, beyond the surface's {length} stages: "
+                    "the padding of the driver is inert and must stay 0 (D16, Y33)"
+                )
+            stages = stages[..., :length]
         super().bind(parameters)
         self.crop_factor_stages = stages
         if bool((self.TAW <= 0).any()):

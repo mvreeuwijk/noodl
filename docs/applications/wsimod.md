@@ -313,6 +313,22 @@ surface needs the fertiliser and manure data (`nhx-fertiliser`, `noy-fertiliser`
 as WSIMOD reads them whenever `nitrate` is in its pollutants (a quantity-only run lists them as
 ignored).
 
+**The crop state.** `days_after_sow`, `crop_cover` and `ground_cover` are carried from day to
+day in the state keys `"wsimod.days_after_sow"` (d), `"wsimod.crop_cover"` and
+`"wsimod.ground_cover"` (-), one value per growing surface, rows `(land, "surfaces.<name>")`, in
+both modes (the calendar drives the evaporation, so the volumes). `days_after_sow` is `-1` for
+WSIMOD's `None` (not sown) and `0` on the sowing day; the covers start at 0. They hold no water,
+so the mass balance leaves them out. The day's crop factor and `et0_coefficient` are recomputed
+before anything reads them and are not carried; the results record them as
+`surface["crop_factor"]` (noodl's own field, NaN on every other surface) and
+`surface["et0_coef"]` (WSIMOD's `record_all` field, `model.py:1150`, recorded for every surface
+that is not impervious: a `PerviousSurface`'s is its parameter).
+
+`crop_factor_stages` is the driver `"wsimod.GrowingSurface.crop_factor_stages"` `(..., n, S)`,
+`S` the longest list among the class's surfaces; a shorter surface's row is padded with 0, and a
+padding entry other than 0 is refused when the day is bound, naming the surface and the index.
+The stage dates, the sowing and harvest days are structure and are not drivers.
+
 ### The soil temperature
 
 With a `temperature` pollutant, a `PerviousSurface` moves its storage's temperature every day
@@ -534,9 +550,10 @@ the days next:
   `record_all` reports (`Tank`, `QueueTank` and `ResidenceTank`), nodes in configuration order and
   each node's attributes alphabetically;
 - `surface_names`, `surface` (`storage`, `evaporation`, `precipitation`, `percolation`,
-  `subsurface_r`, `surface_r` and `tank_recharge`, each `(..., T, n_surfaces)`) and
-  `surface_quality`: the surfaces of the nodes under the type key `"Land"`, as WSIMOD records
-  them. A field WSIMOD does not record for an impervious surface is NaN;
+  `subsurface_r`, `surface_r`, `tank_recharge` and `et0_coef`, each `(..., T, n_surfaces)`, and
+  noodl's own `crop_factor`) and `surface_quality`: the surfaces of the nodes under the type key
+  `"Land"`, as WSIMOD records them. A field WSIMOD does not record for an impervious surface is
+  NaN, and `crop_factor` is NaN except on a growing surface;
 - `mass_balance`, below.
 
 The records are taken at the state the day reached, before `end_timestep`, as WSIMOD records
@@ -615,6 +632,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.liquor"`, `"wsimod.previous_pulled"`, `"wsimod.treated"` | node | the treatment works' liquor, an `FWTW`'s previous day's pull, a `WWTW`'s treated water |
 | `"wsimod.river_temperature_lag"`, `"wsimod.river_phosphorus_lag"` | `(river, i)` | the two registers of every River with biochemistry, `max_temp_lag + 1` and `max_phosphorus_lag + 1` slots (degC, kg) |
 | `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
+| `"wsimod.days_after_sow"`, `"wsimod.crop_cover"`, `"wsimod.ground_cover"` | `(node, "surfaces.<name>")` | every growing surface's days since sowing (`-1` before sowing: WSIMOD's `None`; d) and its crop and ground cover (-), `(..., n_growing)`, in both modes |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
 volume with no pollutants and a mapping a VQIP by name, `{"volume": 5.0, "phosphate": 0.1}`; a

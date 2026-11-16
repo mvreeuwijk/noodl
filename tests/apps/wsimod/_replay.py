@@ -343,6 +343,10 @@ def replay(
     p = network.pollutants if pollutants is None else pollutants
     spec = _spec(network, name)
     node = make_node(spec, network, p)
+    for surface in getattr(node, "surfaces", ()):  # the build-time calendar (D7), as Engine's
+        set_dates = getattr(surface, "set_dates", None)
+        if set_dates is not None:
+            set_dates(network.dates, network.date_labels)
     types = {n.name: NODE_SCHEMAS[n.cls].renamed_type for n in network.nodes}
     script: list = []
     arcs: dict[str, ScriptedArc] = {}

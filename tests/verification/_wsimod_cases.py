@@ -40,6 +40,15 @@ class Case:
     # D24: the full horizon of a case whose default run is a prefix of its dates; a test marked
     # ``slow`` runs it. ``None``: the default run is the whole case.
     slow_days: int | None = None
+    # D13: WSIMOD raises on this case, as it is: the exception's class name and the
+    # ``"land.py:<line>"`` of its innermost frame in ``nodes/land.py``. A crash case has
+    # ``wsimod=False`` (the generic parity and replay skip it); its own test compares the days
+    # before the crash (``_wsimod_parity.wsimod_until_crash``)
+    crash: tuple[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.crash is not None and self.wsimod:
+            raise ValueError("a crash case (D13) has wsimod=False")
 
 
 # A short pollutant list: one additive, one more additive, one non-additive.
@@ -1356,6 +1365,108 @@ def _surface_deposition() -> dict:
     }
 
 
+def _growing(name: str, **values) -> dict:
+    return {"surface": name, "type_": "GrowingSurface", **values}
+
+
+_GROWING_DAYS = 540
+# a five-point crop factor over the year (land.py:1547-1549), sown on day 90, harvested on 250
+_GROWING_STAGES = {
+    "crop_factor_stages": [0.3, 0.3, 1.15, 1.15, 0.3],
+    "crop_factor_stage_dates": [0, 90, 160, 250, 365],
+}
+
+
+def _growing_no_nitrate() -> dict:
+    """D21, Y49: a ``GrowingSurface`` (sown on day 90, harvested on 250, ``ET_depletion_factor =
+    0.5``, five crop-factor stages) beside an ``ImperviousSurface``, over the simple pollutants
+    (``phosphate`` and ``temperature``, no ``nitrate``): the crop calendar and IHACRES only, no
+    nutrient pool (``land.py:1276``), and the dry and wet deposition straight into the tank
+    (``adjust_vqip_to_liquid`` does nothing without ``nitrate``, ``:1594``). 540 days from
+    2003-10-01: one season, both covers persisting after the harvest, 29 February 2004 and dry
+    spells in which the crop is stressed (``Ks < 1``) on some days and not on others."""
+    days = _GROWING_DAYS
+    dates = _land_dates(days)
+    data = _monthly(_DEPOSITION, "2003-10", 19)
+    return {
+        **_SIMPLE,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [
+                    _growing(
+                        "wheat",
+                        area=1e4,
+                        rooting_depth=0.5,
+                        ET_depletion_factor=0.5,
+                        sowing_day=90,
+                        harvest_day=250,
+                        infiltration_capacity=0.01,
+                        initial_storage=1400.0,
+                        data_input_dict=dict(data),
+                        **_GROWING_STAGES,
+                    ),
+                    _impervious("yard", area=500.0, pore_depth=0.001),
+                ],
+                _land_forcing(
+                    days,
+                    50,
+                    rain=(0.0, 0.0, 0.0, 2e-4, 1e-3, 4e-3, 1e-2),
+                    et0=(5e-4, 5e-3),
+                    dates=dates,
+                ),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+_DEFAULT_DEPLETION_DAYS = 20
+
+
+def _growing_default_depletion() -> dict:
+    """noodl only, L3: the default ``ET_depletion_factor = 1`` makes the stress coefficient's
+    denominator ``(1 - ET_depletion_factor) * TAW`` zero (``land.py:1564-1568``). A soil that
+    starts near field capacity dries under ``et0 = 0.01`` and no rain, and when it reaches its
+    wilting point WSIMOD raises ``ZeroDivisionError`` (an empty soil would crash on day 0 and
+    give no day to compare). noodl gives ``Ks = 0`` and records
+    ``"crop_water_stress_zero_denominator"`` (Y17). No ``nitrate``: the pool is a later task."""
+    days = _DEFAULT_DEPLETION_DAYS
+    dates = _land_dates(days)
+    forcing = {}
+    for k, date in enumerate(dates):
+        forcing[("precipitation", date)] = 0.0
+        forcing[("et0", date)] = 0.01
+        forcing[("temperature", date)] = 10.0 + (k % 5)
+    return {
+        **_SIMPLE,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [_growing("barley", area=1000.0, rooting_depth=0.6, initial_storage=179.0)],
+                forcing,
+            ),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("land_to_brook", "land", "brook"), _arc("brook_to_sea", "brook", "sea")],
+        "orchestration": [{"Land": "run"}],
+    }
+
+
 def _land_percolation_threshold() -> dict:
     """``Land.run`` forces the percolation the groundwater rejects back only above
     ``FLOAT_ACCURACY`` (``land.py:213-215``). A plot of 1e-8 m2 percolates about 1e-10 a day into
@@ -2529,6 +2640,19 @@ CASES: dict[str, Case] = {
         days=_SURFACE_DEPOSITION_DAYS,
         scale=300.0,
         replay=("suburb",),
+    ),
+    "growing_no_nitrate": Case(
+        build=_growing_no_nitrate,
+        days=_GROWING_DAYS,
+        scale=2000.0,
+        replay=("land",),
+    ),
+    "growing_default_depletion": Case(
+        build=_growing_default_depletion,
+        days=_DEFAULT_DEPLETION_DAYS,
+        scale=200.0,
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1566"),
     ),
     "land_percolation_threshold": Case(
         build=_land_percolation_threshold,
