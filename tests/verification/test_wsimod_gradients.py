@@ -50,8 +50,9 @@ KINK = 1e-6  # |margin| of an active decision, relative to the case scale
 NOISE = 1e-12  # a margin change this small (relative to the scale) is rounding
 # 3c: decisions whose distance to the jump is measured in steps, 2 |margin| / |margin(+h) -
 # margin(-h)| (the parameter changes of h it would take to flip them), not against the scale:
-# - the adsorption's Newton tests compare concentrations (mg/l: the step |dx| with 1e-6 xn) and
-#   the residual in kg/km2, in no unit of the arcs (their margins are 1e-8 to 1e-5 on every day);
+# - the adsorption's Newton tests, in no unit of the arcs (their margins are 1e-8 to 1e-5 on every
+#   day): the step |dx| against 1e-6 xn and the positive clamp in mg/l, the residual |fxn|
+#   against the limit in P per area (kg/km2);
 # - the spec's continuous switches (Differentiability): the pool transformation's in_/out_ (the
 #   sign of a day's increase, both sides 0 at 0) and erosion's eff_erodedP > 0 (nothing eroded on
 #   both sides). Near a freeze or a thaw, or on a day of little runoff, they sit 1e-5 kg from 0,
@@ -777,6 +778,16 @@ SPECS_3C = {
     "nhx-fertiliser": _month("nhx-fertiliser", "2003-11"),
     "noy-dry": _month("noy-dry", "2003-11"),
     "srp-manure": _month("srp-manure", "2004-01", "phosphate"),
+    # the default selection's growing entry (W15 cut): 20 days from 2003-10-21 (run day 20) into
+    # November, with the window, an initial state, the month, pool and arcs kinds and STEPPED
+    "noy-dry (short window)": _spring(
+        ("month", "wsimod.noy-dry", _WHEAT_DATA, "2003-11"),
+        _DIN,
+        _NITRATE_OUT,
+        start=20,
+        days=20,
+        initial=_HUMUS_P,
+    ),
     # the Land's temperature through tdf: from 2004-04-04 (run day 186) for 70 days the soil stays
     # between 6 and 20 degC (off the 5 degC jump and the 0 degC kink, L12)
     "temperature (tdf)": _spring(("scale", "wsimod.temperature"), _DIN, start=186, days=70),
@@ -826,8 +837,12 @@ SLOW = {
     "temperature (river) [nitrate]",
     "temperature (river) [org-nitrogen]",
     # 3c: every growing run takes 15-30 s alone (120 days with the pool, three runs per entry);
-    # the surface_deposition entries stay in the default selection
-    *(name for name, spec in SPECS_3C.items() if spec.case != "surface_deposition"),
+    # the surface_deposition entries and one short growing window stay in the default selection
+    *(
+        name
+        for name, spec in SPECS_3C.items()
+        if spec.case != "surface_deposition" and name != "noy-dry (short window)"
+    ),
 }
 
 
@@ -919,7 +934,9 @@ def test_the_adsorption_limit_gradient_is_zero_through_a_run():
     """``adosorption_nr_limit`` is the Newton loop's tolerance: it decides the iteration count, a
     detached decision, and enters no value (Y25). Its gradient through 30 days of
     ``growing_spring`` is absent or zero, while the same scalar (the final ``ads.P`` and the
-    out-arc phosphate) depends on the adsorption: ``kfr``, set the same way, has a gradient."""
+    out-arc phosphate) depends on the adsorption: ``kfr``, set the same way, has a gradient. The
+    driver is read: at a limit of 1e6 the loop exits on the residual test before the step test
+    (at the configured 1e-5, and up to 1e-2, the step test exits first), and the value differs."""
     model = _model("growing_spring", True)
     layout = model.wsimod_day.drivers
     p = {
@@ -936,3 +953,8 @@ def test_the_adsorption_limit_gradient_is_zero_through_a_run():
     grad, kfr = torch.autograd.grad(value, (p["adosorption_nr_limit"], p["kfr"]), allow_unused=True)
     assert grad is None or torch.equal(grad, torch.zeros_like(grad))
     assert kfr is not None and float(kfr) != 0.0
+    with torch.no_grad():
+        drivers = initial_drivers(model, values={_G + "adosorption_nr_limit": {_WHEAT: 1e6}})
+        results = wsimod_run(model, initial_state(model), drivers, days=30)
+        loose = _value(model, results, _ADS_P) + _value(model, results, _PHOSPHATE_OUT)
+    assert float(loose) != float(value)

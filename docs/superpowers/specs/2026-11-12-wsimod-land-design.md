@@ -1317,6 +1317,9 @@ They are documented on the application page.
     - `erodingflow > 0` is continuous. `ie.volume > 0` is continuous for `sreroexp > 0` and a
       jump for `sreroexp = 0` (`0 ** 0 = 1`; Task 8a review).
     - The enrichment's switch at 4 is continuous (`4 − 2.5 = 1.5`).
+    - `eff_erodedP > 0` is continuous: every term it gates scales with `surface_erodedP`,
+      `subsurface_erodedP` or `percolation_erodedP` (`land.py:2047-2077`), which go to 0 with
+      `eff_erodedP`.
     - `min(1, ·)` of the transport factor is a kink.
   - **Denitrification** is continuous at `fc_m` (`f = 1` on both sides) and at `limpar` (`f →
     0`).
@@ -1478,10 +1481,12 @@ The protocol is 3a's:
 
 - central differences at relative step 1e-6 and agreement 1e-6;
 - the `"decisions"` asserted identical between ±h;
-- the kink rule of W92/W93. The adsorption's Newton tests (their margins are concentrations, in
-  no unit of the arcs) and the continuous switches above (the transformation's `in_`/`out_`,
-  `eff_erodedP > 0`) are held to at least 1e3 steps of `h` from their switch, instead of
-  `1e-6 × scale` (Task 11).
+- the kink rule of W92/W93. The adsorption's Newton tests are held to at least 1e3 steps of `h`
+  from their switch, instead of `1e-6 × scale` (Task 11). Their margins are in no unit of the
+  arcs: the `step` test is in mg/l (`|dx|` against `1e-6 xn`), the `residual` test in P per area
+  (`|fxn|` against the limit), and the `newton:<j>/positive` clamp (`xn_1 ≤ 0 → 1e-10`, a jump)
+  in mg/l. The continuous switches above (the transformation's `in_`/`out_`, `eff_erodedP > 0`)
+  are held the same way.
 
 An entry may run a window of its case: its dates from a later day, with the configured initial
 state on that day, amended where the window needs it (`growing_no_nitrate` from a stressed soil;
