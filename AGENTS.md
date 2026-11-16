@@ -30,7 +30,7 @@ Add the application you are changing. CI's `branch` job uses the same table
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |
 
 The wsimod row (`tests/apps/wsimod`, the allocation and `test_wsimod_*` verification files,
-1,852 tests) takes about 15 minutes with `-n 4` on the development machine: 887 s at the end of 3c,
+1,854 tests) takes about 15 minutes with `-n 4` on the development machine: 891 s at the end of 3c,
 against 810 s and 917 s before it. The four whole-demo parity items take 90 to 97 s each, a tenth
 of the row. The default composition is quickstart in full (1456 days, both modes), oxford for its
 first 365 days (both modes), the sampled replays, the gradients and the cases; `river_nutrients`

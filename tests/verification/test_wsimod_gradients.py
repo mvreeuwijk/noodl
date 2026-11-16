@@ -1026,4 +1026,4 @@ def test_the_adsorption_limit_gradient_is_zero_through_a_run():
         drivers = initial_drivers(model, values={_G + "adosorption_nr_limit": {_WHEAT: 1e6}})
         results = wsimod_run(model, initial_state(model), drivers, days=30)
         loose = _value(model, results, _ADS_P) + _value(model, results, _PHOSPHATE_OUT)
-    assert float(loose) != float(value)
+    assert loose.item() != value.detach().item()

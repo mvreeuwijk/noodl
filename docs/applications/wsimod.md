@@ -1403,6 +1403,6 @@ cases a prefix (Y68: `growing_spring` 365 of 1096 days, `growing_autumn` 300 of 
 bookkeeping items run the long cases on a shorter prefix (`Case.bookkeeping`). The quantity-only
 volume comparison runs by default only on the three cases WSIMOD does not run (Y90). `pytest -m
 slow` adds the full horizons, the full `oxford` run, the full per-node replays, the slow gradients
-and the other quantity-only comparisons. At the end of 3c the row (1,852 tests, without the core
-subset) took 887 s with `-n 4` on the development machine, the four demo parity items 90 to 97 s
+and the other quantity-only comparisons. At the end of 3c the row (1,854 tests, without the core
+subset) took 891 s with `-n 4` on the development machine, the four demo parity items 90 to 97 s
 each.

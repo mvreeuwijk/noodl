@@ -146,14 +146,16 @@ def month_start(date: datetime) -> datetime:
 # --- derived quantities (D5) -------------------------------------------------------------------
 def is_number(value: object) -> bool:
     """A real number as a configuration gives one (M3, N1): a ``numbers.Real`` (Python's or
-    numpy's scalars), a numeric ``np.ndarray`` or a ``torch.Tensor``; not a boolean, ``None``, a
-    string or a list."""
+    numpy's scalars), a real-valued 0-d ``np.ndarray`` or single-element ``torch.Tensor``; not a
+    complex or multi-element array, a boolean, ``None``, a string or a list."""
     if isinstance(value, (bool, np.bool_)):
         return False
     if isinstance(value, np.ndarray):
-        return bool(np.issubdtype(value.dtype, np.number))
+        return value.ndim == 0 and bool(
+            np.issubdtype(value.dtype, np.number) and not np.iscomplexobj(value)
+        )
     if isinstance(value, Tensor):
-        return not value.dtype.is_complex and value.dtype != torch.bool
+        return value.numel() == 1 and not value.dtype.is_complex and value.dtype != torch.bool
     return isinstance(value, numbers.Real)
 
 
@@ -197,6 +199,7 @@ def surface_derived(spec: SurfaceSpec) -> dict[str, float]:
     by the porosity and multiplies it back, so after an override its values can differ from
     construction's by one ulp; construction's are computed here.
     """
+    _register_all()  # ``_derive`` reads the growing classes, which register themselves
     cls = SURFACE_CLASSES[spec.cls]
     values = {**cls.parameter_defaults, **spec.parameters}
     return {k: float(v) for k, v in _derive(spec.cls, values).items()}

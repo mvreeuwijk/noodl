@@ -36,7 +36,7 @@ python -m mkdocs build --strict
 
 ## Continuous integration
 
-A push to a branch runs only the `branch` job, which takes a few minutes. A pull request, a push to `main` and a manual run run the other `tests` jobs. A newer push cancels the run still in progress on the same branch or pull request.
+A push to a branch runs only the `branch` job, which takes a few minutes for most applications and about 20 minutes when the branch touches `apps/wsimod` (20 min 23 s on PR #43). A pull request, a push to `main` and a manual run run the other `tests` jobs. A newer push cancels the run still in progress on the same branch or pull request.
 
 | Workflow / job | Runs on | What it runs |
 | --- | --- | --- |

@@ -13,6 +13,7 @@ import warnings
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -1317,6 +1318,9 @@ def test_nitrate_needs_the_eight_pollutants(name):
         ("crop_factor_stage_dates", [0, "x"], r"crop_factor_stage_dates \[0, 'x'\] holds 'x'"),
         ("rooting_depth", "deep", "rooting_depth 'deep' is not a number"),
         ("ET_depletion_factor", None, "ET_depletion_factor None is not a number"),
+        ("rooting_depth", np.array([1e4, 2e4]), "rooting_depth array.* is not a number"),
+        ("rooting_depth", np.array(1.0 + 0j), "rooting_depth array.* is not a number"),
+        ("rooting_depth", torch.tensor([1.0, 2.0]), "rooting_depth tensor.* is not a number"),
     ],
 )
 def test_malformed_growing_values_are_refused_by_name(name, value, message):

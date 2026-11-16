@@ -1,5 +1,5 @@
 # Two tiers. A push to a branch runs `branch`: ruff, the core tests and the tests of every
-# application the branch changed (.github/scripts/select_tests.py), in a few minutes. A pull
+# application the branch changed (.github/scripts/select_tests.py), in a few minutes for most applications and about 20 minutes for a wsimod branch. A pull
 # request, a push to main and a manual run run everything else: the full suite with the
 # coverage threshold, the oldest supported versions, the wheel, Windows and macOS. The `slow`
 # tests run weekly (slow.yml).
