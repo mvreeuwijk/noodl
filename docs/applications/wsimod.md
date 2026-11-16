@@ -531,6 +531,39 @@ state holds no water (the tank has it), so the mass balance leaves it out. Becau
 `calc_crop_cover` runs in `Land.run`, an `apply_irrigation` before it still sees yesterday's
 `days_after_sow`: a crop sown on day 0 is first irrigated on day 2.
 
+### The garden surface and the demand's garden link
+
+A `GardenSurface` is a `GrowingSurface` (a grass crop) with two extra methods (`land.py:2384-2437`)
+that its `Land` binds as the `("Demand", "Garden")` push check and push set (`:120-128`). A
+`ResidentialDemand` asks for them in `create_demand` (`demand.py:78-117`, `:250-301`): the check
+gives `max(evaporation - precipitation, 0)` of the surface's flows, 0 where the soil's moisture
+deficit is at most `FLOAT_ACCURACY`; the demand takes it times `gardening_efficiency` (default
+0.6 x 0.7, a parameter of the `Demand`), pulls it from its supply with the house demand and pushes
+it back with the garden tag, and the surface takes it by force. Without a `GardenSurface` the
+`Land` answers an empty VQIP and the garden demand is 0 (`:93-94`). A `NonResidentialDemand` asks
+for no garden water. The garden surface has no parameter of its own, and its handlers are not in
+any surface's `inflows`, `processes` or `outflows` list, so they have no mass-balance part: the
+garden water crosses the `Land`'s in-arcs, which 3a already counts.
+
+Three behaviours are transcribed:
+
+- **The demand is yesterday's (the same carried climate as irrigation).** `create_demand` runs
+  before `Land.run`, so `evaporation` and `precipitation` are the previous day's flows: the
+  check answers 0 on day 0. They are the same state, `"wsimod.surface_climate"`, which a garden
+  surface carries like an irrigation surface (two rows per surface; both are `ClimateSurface`s).
+- **The garden water is at 0 degC (L19).** `apply_gardening_pollutants` builds the push from an
+  empty VQIP (`demand.py:273-287`), so the water that enters the soil has temperature 0 and cools
+  it (11.5 degC to 9.2 degC for 2 m3 into 8 m3). The pulled water's quality stays at the `Demand`.
+  Reproduced (Y29).
+- **Only the last garden surface is irrigated (L18).** With two or more on a `Land`, each later one
+  replaces the handlers of the earlier ones (`:120-128`), so the earlier ones still grow and
+  drain but are never asked. Reproduced (Y28) and listed in `model.unread` as
+  `<land>.surfaces.<name>.garden_handlers`.
+
+The decisions are `node:<land>/surfaces.<name>/calculate_irrigation_demand/{deficit,saturated}`
+(`:2411`, `:2416`). The garden water carries no nutrients, so unlike `irrigate` the handlers never
+touch the nutrient pool.
+
 ### The soil temperature
 
 With a `temperature` pollutant, a `PerviousSurface` moves its storage's temperature every day
@@ -847,7 +880,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
 | `"wsimod.nutrient_pool"` | `(node, "surfaces.<name>.nutrient_pool", pool, nutrient)` | every growing surface's five nutrient pools, `N` then `P` of each (kg), `(..., 10 n_growing)`, with `nitrate` a pollutant and pollutants on |
 | `"wsimod.days_after_sow"`, `"wsimod.crop_cover"`, `"wsimod.ground_cover"` | `(node, "surfaces.<name>")` | every growing surface's days since sowing (`-1` before sowing: WSIMOD's `None`; d) and its crop and ground cover (-), `(..., n_growing)`, in both modes |
-| `"wsimod.surface_climate"` | `(node, "surfaces.<name>", "evaporation" or "precipitation")` | every irrigation surface's last evaporation and precipitation volumes (m3), `(..., 2 n_irrigation)`, in both modes |
+| `"wsimod.surface_climate"` | `(node, "surfaces.<name>", "evaporation" or "precipitation")` | every irrigation and garden surface's last evaporation and precipitation volumes (m3), `(..., 2 n_climate)`, in both modes |
 
 A store is a VQIP: the volume, then one column per pollutant. In `initial_state` a number is a
 volume with no pollutants and a mapping a VQIP by name, `{"volume": 5.0, "phosphate": 0.1}`; a
@@ -970,6 +1003,8 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface`: a float `initial_soil_storage`, which the docstring allows, raises `TypeError` (L16) | refused | `test_initial_soil_storage_refusals` |
 | `NutrientPool`: its parameters cannot be configured (L20) | drivers with WSIMOD's defaults; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` |
 | `IrrigationSurface.irrigate` reads five pollutant keys whatever the pollutants (L13) | the pool is updated only when `nitrate` is a pollutant (Y20) | `test_irrigation_without_nitrate_leaves_the_pool_alone`; `test_case_runs_where_wsimod_crashes[irrigation_without_nutrients-pollutants]` (WSIMOD raises `KeyError` at `land.py:2373` on day 5, the first day with a demand) |
+| Two or more `GardenSurface`s on a `Land`: the last one's handlers replace the others' (L18) | reproduced; the earlier ones are listed in `model.unread` (Y28) | `test_the_last_garden_takes_the_handlers`; `garden` |
+| The garden water is an empty VQIP with a volume (`demand.py:273-287`), so it is at 0 degC (L19) | reproduced (Y29) | `test_the_garden_water_is_at_zero_degrees`; `garden` |
 | `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]`; `test_wsimod_erosion_without_solids_raises` |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
@@ -1197,6 +1232,13 @@ has to be debugged, not admitted.
   runs `apply_irrigation` before `Land.run` (the carried climate). Both are bitwise equal to
   WSIMOD, and the `Land` replay (its `apply_irrigation` call, with its pulls and replies) is
   bitwise. WSIMOD prints no mass-balance line on either.
+- **Garden** (`garden`, 100 days): a `ResidentialDemand` fed through a `Distribution` asks two
+  `Land`s for garden water. `gardens` has two `GardenSurface`s and a `PerviousSurface`, `plain`
+  has no garden surface and answers 0. The soils keep their 11 degC, so the 0 degC water cools
+  `g2`, the surface that holds the handlers; `g1` only grows. The soil starts above capacity, so
+  the first days are saturated and the later ones are not, with wet days (no deficit) and dry
+  days (a demand); both outcomes of `deficit` and `saturated` are asserted from the decisions.
+  Bitwise equal to WSIMOD, and the replay of both `Land`s, handler calls included, is bitwise.
 - **Crashes** (`test_case_runs_where_wsimod_crashes*`): eleven cases where WSIMOD raises. Three run
   in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,
   `nonresidential_demand`). For two, a decaying `Groundwater` and `QueueGroundwater` without a

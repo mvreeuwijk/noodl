@@ -250,7 +250,10 @@ class ResidentialDemand(Demand):
     def get_garden_demand(self, *, active: Tensor) -> Tensor:
         """``demand.py:250-301``: the push capacity ``Land`` nodes offer for the tag
         ``("Demand", "Garden")`` times ``gardening_efficiency``, as a VQIP with no pollutants.
-        ``Land`` answers 0 unless it has a ``GardenSurface`` (``land.py:93-94``, 3c)."""
+        ``Land`` answers 0 unless it has a ``GardenSurface`` (``land.py:93-94``); with one, the last
+        garden surface answers ``max(E - P, 0)`` of the previous day's flows, since
+        ``create_demand`` runs before ``Land.run`` (``land.py:2396-2423``, L18). A
+        ``NonResidentialDemand`` asks for no garden water."""
         excess = self.get_connected("push", "Land", ("Demand", "Garden"), active=active).avail
         volume = excess * self._param("gardening_efficiency")  # demand.py:292
         return self._vqip(volume, torch.zeros(self.p.K, dtype=torch.float64))

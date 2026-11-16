@@ -522,6 +522,25 @@ def test_the_irrigation_cases_reach_every_irrigate_branch(name):
             assert seen.get(site) == {False, True}, (name, site, seen.get(site))
 
 
+def test_the_garden_case_reaches_both_garden_branches():
+    """From the decisions (Task 14, Y80): on the ``garden`` case, ``deficit`` (a negative and a
+    positive ``E - P``) and ``saturated`` (a full and a dry soil) are active with both outcomes
+    at ``g2``, the surface that holds the handlers, and no decision is recorded at ``g1``, whose
+    handlers the last garden replaced (L18). The outcomes themselves are recorded."""
+    spec = CASES["garden"]
+    day = WsimodDay(read_wsimod_config(spec.build()), pollutants=True)
+    day.record_decisions = True
+    seen: dict[str, set[bool]] = {}
+    for _, ctx, _ in day.run_days(days=spec.bookkeeping):
+        for d in ctx.decisions:
+            if bool(d.active.any()):
+                seen.setdefault(d.site, set()).update(d.outcome[d.active].tolist())
+    for branch in ("deficit", "saturated"):
+        site = f"node:gardens/surfaces.g2/calculate_irrigation_demand/{branch}"
+        assert seen.get(site) == {False, True}, (site, seen.get(site))
+    assert not [s for s in seen if "surfaces.g1/calculate_irrigation_demand" in s]
+
+
 def test_the_cases_cover_every_listed_feature():
     """The plan's case list, task by task (Task 17 step 1): no listed case is missing."""
     listed = """three_out_arcs node_chain forced_negative_excess maxiter_pull pull_and_push_arcs
@@ -538,7 +557,7 @@ def test_the_cases_cover_every_listed_feature():
     surface_deposition growing_no_nitrate growing_default_depletion growing_spring growing_autumn
     growing_decay deposition_non_additive growing_no_din growing_zero_n growing_nitrite_only
     growing_empty_soil growing_lean_soil surface_overrides irrigation irrigation_early
-    irrigation_without_nutrients""".split()
+    irrigation_without_nutrients garden""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",

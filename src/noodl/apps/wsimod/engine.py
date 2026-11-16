@@ -122,6 +122,9 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   (``:2350``, ``:2352``'s ``max``, ``:2356``, ``:2357``), the ``Land``'s ``pull_distributed``
   sites for its pull and the tank's ``get_excess`` sites; ``Land.apply_irrigation`` makes none of
   its own (``:192-198``).
+  A ``GardenSurface`` adds
+  ``node:N/surfaces.<name>/calculate_irrigation_demand/{deficit,saturated}`` (``:2411``'s ``max``,
+  ``:2416``) and the tank's ``get_excess`` sites; its push set makes none.
   Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's

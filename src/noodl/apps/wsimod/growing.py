@@ -148,6 +148,8 @@ __all__ = [
     "STRUCTURE_DEFAULTS",
     "IRRIGATION_TYPES",
     "CalendarDay",
+    "ClimateSurface",
+    "GardenSurface",
     "GrowingSurface",
     "IrrigationSurface",
     "quick_interp",
@@ -1524,28 +1526,15 @@ SURFACE_CLASSES["GrowingSurface"] = GrowingSurface
 IRRIGATION_TYPES = ("River", "Node", "Groundwater", "Reservoir")
 
 
-class IrrigationSurface(GrowingSurface):
-    """``IrrigationSurface`` (``land.py:2314-2381``): a growing surface that draws the water its
-    crop lacks from the ``Land``'s in-arcs.
+class ClimateSurface(GrowingSurface):
+    """A growing surface that reads the volumes of its last ``ihacres`` flows, which the day's
+    ``Land.run`` has left in ``evaporation`` and ``precipitation`` (``land.py:1029-1044``): an
+    :class:`IrrigationSurface` (``:2352``) and a :class:`GardenSurface` (``:2411``). They are
+    carried (``surface_climate``, D5, state key ``"wsimod.surface_climate"``), because the
+    reader runs before ``Land.run``, or wherever the orchestration puts it, and then reads the
+    previous day's flows (0 on day 0). Not a WSIMOD class and not registered."""
 
-    ``irrigation_coefficient`` (``:2317``, default 0.1; an override, ``:2334-2345``) is the
-    proportion of the area irrigated times the proportion of the demand met; it is a driver,
-    ``"wsimod.IrrigationSurface.irrigation_coefficient"``, read in quantity-only runs too, so it
-    is never listed as ignored (Y72). The surface's climate (the volumes of its last ``ihacres``
-    flows) is carried (``surface_climate``, D5): ``Land.apply_irrigation`` runs wherever the
-    orchestration puts it, and before ``Land.run`` it reads the previous day's flows (0 on day
-    0).
-
-    The decisions are ``S/irrigate/{crop,deficit,demand,saturated}``, ``S`` being
-    ``node:N/surfaces.<s>``, then the pull's own sites and the tank's ``get_excess`` sites."""
-
-    surface_class: ClassVar[str] = "IrrigationSurface"
-    is_irrigated: ClassVar[bool] = True
     carried_fields: ClassVar[tuple[str, ...]] = (*GrowingSurface.carried_fields, "surface_climate")
-    parameter_defaults: ClassVar[dict[str, float]] = {
-        **GrowingSurface.parameter_defaults,
-        "irrigation_coefficient": 0.1,
-    }
 
     @classmethod
     def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
@@ -1565,6 +1554,29 @@ class IrrigationSurface(GrowingSurface):
         value = _f64(value)
         self.evaporation = v_change_vqip(self.p, self.ctx.empty(), value[..., 0])
         self.precipitation = v_change_vqip(self.p, self.ctx.empty(), value[..., 1])
+
+
+class IrrigationSurface(ClimateSurface):
+    """``IrrigationSurface`` (``land.py:2314-2381``): a growing surface that draws the water its
+    crop lacks from the ``Land``'s in-arcs.
+
+    ``irrigation_coefficient`` (``:2317``, default 0.1; an override, ``:2334-2345``) is the
+    proportion of the area irrigated times the proportion of the demand met; it is a driver,
+    ``"wsimod.IrrigationSurface.irrigation_coefficient"``, read in quantity-only runs too, so it
+    is never listed as ignored (Y72). The surface's climate (the volumes of its last ``ihacres``
+    flows) is carried (``surface_climate``, D5, :class:`ClimateSurface`):
+    ``Land.apply_irrigation`` runs wherever the orchestration puts it, and before ``Land.run`` it
+    reads the previous day's flows (0 on day 0).
+
+    The decisions are ``S/irrigate/{crop,deficit,demand,saturated}``, ``S`` being
+    ``node:N/surfaces.<s>``, then the pull's own sites and the tank's ``get_excess`` sites."""
+
+    surface_class: ClassVar[str] = "IrrigationSurface"
+    is_irrigated: ClassVar[bool] = True
+    parameter_defaults: ClassVar[dict[str, float]] = {
+        **GrowingSurface.parameter_defaults,
+        "irrigation_coefficient": 0.1,
+    }
 
     def irrigate(self, *, active: Tensor) -> None:
         """``land.py:2347-2381``. With a crop (``days_after_sow > 0``; ``crop``) the demand is
@@ -1629,3 +1641,52 @@ class IrrigationSurface(GrowingSurface):
 
 
 SURFACE_CLASSES["IrrigationSurface"] = IrrigationSurface
+
+
+class GardenSurface(ClimateSurface):
+    """``GardenSurface`` (``land.py:2384-2437``): a growing surface (a grass crop) whose parent
+    ``Land`` binds its two methods as the ``("Demand", "Garden")`` push check and push set
+    (``land.py:120-128``; the last garden surface of the ``Land`` takes them, L18, Y28), to be
+    asked by a ``ResidentialDemand`` (``create_demand``, before ``Land.run``). It has no
+    parameter of its own: ``gardening_efficiency`` belongs to the ``Demand`` (3a).
+
+    The decisions are ``S/calculate_irrigation_demand/{deficit,saturated}`` (``:2411``,
+    ``:2416``), ``S`` being ``node:N/surfaces.<s>``."""
+
+    surface_class: ClassVar[str] = "GardenSurface"
+    is_garden: ClassVar[bool] = True
+
+    def calculate_irrigation_demand(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        """``land.py:2396-2423``: the push check, whose argument is ignored. The demand is
+        ``max(evaporation - precipitation, 0)`` (``deficit``) of the carried climate, so
+        yesterday's (``Demand.create_demand`` runs before ``Land.run``); it is 0 where the soil's
+        moisture deficit ``get_excess / area`` is at most ``FLOAT_ACCURACY`` (``saturated``;
+        unlike ``irrigate``, with no threshold on the demand). The reply carries only a volume."""
+        ctx = self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("calculate_irrigation_demand")
+        site = f"{self.site}/calculate_irrigation_demand"
+        demand = dmax(
+            ctx,
+            f"{site}/deficit",
+            self.evaporation[..., 0] - self.precipitation[..., 0],
+            0.0,
+            active=active,
+            call=call,
+        )
+        moisture = self.get_excess(active=active)[..., 0] / self.area
+        saturated = active & ctx.decide(
+            f"{site}/saturated", moisture, "<=", ctx.fa, active=active, call=call
+        )
+        demand = torch.where(saturated | ~active, torch.zeros_like(demand), demand)
+        return self._volume_vqip(demand)
+
+    def receive_irrigation_demand(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:2425-2437``: the push set, the water forced into the tank (it is at 0 degrees
+        C, L19: ``apply_gardening_pollutants`` builds it from an empty VQIP, ``demand.py:273-287``).
+        The reply is what the tank did not take."""
+        active = torch.as_tensor(active, dtype=torch.bool)
+        return self.push_storage(vqip, force=True, active=active)
+
+
+SURFACE_CLASSES["GardenSurface"] = GardenSurface

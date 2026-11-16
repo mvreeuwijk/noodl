@@ -3631,3 +3631,239 @@ def test_irrigate_with_a_mixed_active_mask_equals_each_scalar_run():
         assert torch.equal(batch.nutrient_pool.storage[i], one.nutrient_pool.storage), i
     assert torch.equal(batch.storage[1], before[1])
     assert float(batch.storage[3, 0]) == 5.0  # no demand: the precipitation exceeds the evaporation
+
+
+# --- GardenSurface (Task 14) -------------------------------------------------------------------
+_GARDEN_TAG = ("Demand", "Garden")
+
+
+def _garden_land(pollutants=NUT, names=("g",), **parameters) -> Land:
+    specs = [
+        SurfaceSpec(
+            name,
+            "GardenSurface",
+            {"area": _IRRIGATION_AREA, "rooting_depth": _IRRIGATION_DEPTH, **parameters},
+            {},
+            constructed_variables=frozenset(),
+            constructed_load=(),
+        )
+        for name in names
+    ]
+    return make_node(NodeSpec("land", "Land", "Land", {}, {}, specs), None, pollutants)
+
+
+def _wsimod_garden(pollutants=NUT, storage: dict | None = None):
+    """WSIMOD's ``GardenSurface`` (``land.py:2384-2437``) on an empty parent."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+    from wsimod.nodes.land import GardenSurface as WsimodGarden
+
+    from tests.verification._wsimod_reference import reset_wsimod_globals
+
+    reset_wsimod_globals()
+    constants.POLLUTANTS = list(pollutants.names)
+    constants.ADDITIVE_POLLUTANTS = list(pollutants.additive)
+    constants.NON_ADDITIVE_POLLUTANTS = list(pollutants.non_additive)
+    keys = ("volume", *pollutants.names)
+    return WsimodGarden(
+        parent=SimpleNamespace(),
+        surface="g",
+        area=_IRRIGATION_AREA,
+        rooting_depth=_IRRIGATION_DEPTH,
+        pollutant_load={},
+        initial_storage={**dict.fromkeys(keys, 0.0), **(storage or {})},
+    )
+
+
+def test_garden_handlers_equal_wsimods():
+    """``land.py:2396-2437``, bitwise, over the check (``max(E - P, 0)``, 0 where the soil's
+    deficit ``cmd <= FLOAT_ACCURACY``: full, over-full, 1e-12 and 5e-11 below full) and the
+    forced push (a quantity at 0 degC, past the capacity too, reply and tank; the pool is not
+    touched). Both outcomes of both decisions are recorded, as the outcomes themselves."""
+    pytest.importorskip("wsimod")
+    rng = random.Random(1401)
+    theirs = _wsimod_garden()
+    land = _garden_land()
+    ours = land.surfaces[0]
+    outcomes = {"deficit": set(), "saturated": set()}
+    for k in range(144):
+        kind = k % 6
+        evaporation = rng.uniform(2.0, 9.0)
+        precipitation = rng.uniform(0.0, 1.5) if kind != 1 else evaporation + rng.uniform(0.1, 1.0)
+        storage = {0: rng.uniform(3.0, 19.0), 1: rng.uniform(3.0, 19.0), 2: 20.0, 3: 22.5}.get(
+            kind, 20.0 - (1e-10 if kind == 4 else 5e-9)
+        )
+        volume = {"volume": storage, "temperature": 11.5, **{n: 0.1 * k for n in NUT.additive}}
+        theirs.evaporation = {**dict.fromkeys(_KEYS, 0.0), "volume": evaporation}
+        theirs.precipitation = {**dict.fromkeys(_KEYS, 0.0), "volume": precipitation}
+        ours.evaporation = NUT.to_vqip({"volume": evaporation})
+        ours.precipitation = NUT.to_vqip({"volume": precipitation})
+        theirs.storage = {**dict.fromkeys(_KEYS, 0.0), **volume}
+        ours.storage = NUT.to_vqip(volume)
+        pools = [[rng.uniform(0.0, 2.0), rng.uniform(0.0, 2.0)] for _ in POOLS]
+        ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+        ctx = _nut_ctx(land)
+
+        asked = theirs.calculate_irrigation_demand("ignored")
+        reply = ours.calculate_irrigation_demand(active=TRUE)
+        assert torch.equal(reply, _vector(asked)), k
+        for d in ctx.decisions:
+            if "/calculate_irrigation_demand/" in d.site:
+                outcomes[d.site.rsplit("/", 1)[1]].update(d.outcome[d.active].tolist())
+
+        push = {"volume": rng.uniform(0.1, 40.0), "temperature": 0.0}
+        left = theirs.receive_irrigation_demand({**dict.fromkeys(_KEYS, 0.0), **push})
+        back = ours.receive_irrigation_demand(NUT.to_vqip(push), active=TRUE)
+        assert torch.equal(back, _vector(left)), k
+        assert torch.equal(ours.storage, _vector(theirs.storage)), k
+        assert torch.equal(ours.nutrient_pool.storage, torch.tensor(pools, dtype=F64)), k
+    assert outcomes == {"deficit": {False, True}, "saturated": {False, True}}
+
+
+def test_the_garden_check_sites_and_the_inactive_rows():
+    """The decisions are ``S/calculate_irrigation_demand/{deficit,saturated}``; an inactive row
+    is not asked: its reply is 0 and its tank is not touched by the push."""
+    land = _garden_land(SIMPLE, rooting_depth=0.5)
+    surface = land.surfaces[0]
+    ctx = Ctx(SIMPLE, FA, torch.Size((2,)), day=0, node_names=["land"], record_decisions=True)
+    land.ctx = ctx
+    surface.evaporation = SIMPLE.to_vqip({"volume": 5.0}).expand(2, -1).clone()
+    surface.storage = SIMPLE.to_vqip({"volume": 3.0, "temperature": 11.5}).expand(2, -1).clone()
+    mask = torch.tensor([True, False])
+    reply = surface.calculate_irrigation_demand(active=mask)
+    assert reply[..., 0].tolist() == [5.0, 0.0]
+    assert [d.site for d in ctx.decisions if "calculate_irrigation_demand" in d.site] == [
+        "node:land/surfaces.g/calculate_irrigation_demand/deficit",
+        "node:land/surfaces.g/calculate_irrigation_demand/saturated",
+    ]
+    before = surface.storage.clone()
+    push = SIMPLE.to_vqip({"volume": 1.0}).expand(2, -1).clone()
+    surface.receive_irrigation_demand(push, active=mask)
+    assert surface.storage[..., 0].tolist() == [4.0, 3.0]
+    assert torch.equal(surface.storage[1], before[1])
+
+
+def test_the_last_garden_takes_the_handlers():
+    """L18, Y28 (``land.py:120-128``): with ``g1`` and ``g2`` (and a lawn between them) the
+    ``("Demand", "Garden")`` check and push are ``g2``'s, and ``g1`` is listed in
+    ``model.unread``; a lone garden is listed nowhere, and a land without one answers empty."""
+    from noodl.apps.wsimod import build_model
+
+    land = _garden_land(names=("g1", "g2"))
+    first, last = land.surfaces
+    assert land.push_check_handler[_GARDEN_TAG] == last.calculate_irrigation_demand
+    assert land.push_set_handler[_GARDEN_TAG] == last.receive_irrigation_demand
+    assert land.push_check_handler[_GARDEN_TAG] != first.calculate_irrigation_demand
+
+    def mapping(*surfaces):
+        return {
+            "pollutants": ["phosphate", "temperature"],
+            "additive_pollutants": ["phosphate"],
+            "non_additive_pollutants": ["temperature"],
+            "dates": ["2000-01-01", "2000-01-02"],
+            "nodes": [
+                {
+                    "name": "land",
+                    "type_": "Land",
+                    "surfaces": [
+                        {"surface": name, "type_": type_, "area": 10.0, "rooting_depth": 0.5}
+                        if type_ != "PerviousSurface"
+                        else {"surface": name, "type_": type_, "area": 10.0}
+                        for name, type_ in surfaces
+                    ],
+                    "data_input_dict": {
+                        (v, d): 0.0
+                        for v in ("precipitation", "et0", "temperature")
+                        for d in ("2000-01-01", "2000-01-02")
+                    },
+                }
+            ],
+        }
+
+    garden = "GardenSurface"
+    both = mapping(("g1", garden), ("lawn", "PerviousSurface"), ("g2", garden))
+    assert "land.surfaces.g1.garden_handlers" in read_wsimod_config(both).unread
+    model, _, _ = build_model(read_wsimod_config(both))
+    assert "land.surfaces.g1.garden_handlers" in model.unread
+    assert not any("g2.garden_handlers" in item for item in model.unread)
+    one = read_wsimod_config(mapping(("g2", garden), ("lawn", "PerviousSurface")))
+    assert not any("garden_handlers" in item for item in one.unread)
+
+
+def test_the_garden_water_is_at_zero_degrees():
+    """L19, Y29: the push is built from an empty VQIP (``demand.py:273-287``), so a push at 0 degC
+    into a soil at 11.5 degC cools it, as in WSIMOD, bitwise."""
+    pytest.importorskip("wsimod")
+    theirs = _wsimod_garden(storage={"volume": 8.0, "temperature": 11.5})
+    land = _garden_land()
+    ours = land.surfaces[0]
+    ours.storage = NUT.to_vqip({"volume": 8.0, "temperature": 11.5})
+    _nut_ctx(land)
+    push = {"volume": 2.0, "temperature": 0.0}
+    theirs.receive_irrigation_demand({**dict.fromkeys(_KEYS, 0.0), **push})
+    ours.receive_irrigation_demand(NUT.to_vqip(push), active=TRUE)
+    cooled = float(ours.storage[..., NUT.column("temperature")])
+    assert torch.equal(ours.storage, _vector(theirs.storage))
+    assert cooled == pytest.approx(11.5 * 8.0 / 10.0, rel=1e-12) and cooled < 11.5
+
+
+def test_the_garden_demand_is_yesterdays():
+    """``Demand.create_demand`` runs before ``Land.run``, so the garden check reads the previous
+    day's flows: the demand of day ``d`` is ``max(E - P, 0)`` of day ``d - 1`` times
+    ``gardening_efficiency`` (the spec's run: 40.0 x 0.42 = 16.8), 0 on day 0 and where the soil
+    was full, and the supply's pull carries it with the house demand."""
+    from noodl.apps.wsimod import build_model, wsimod_run
+    from tests.verification._wsimod_cases import _garden
+
+    mapping = _garden()
+    forcing = mapping["nodes"][3]["data_input_dict"]
+    assert mapping["nodes"][3]["name"] == "gardens"
+    for date in mapping["dates"][:6]:  # the first days dry: a demand from day 1
+        forcing[("precipitation", date)], forcing[("et0", date)] = 0.0, 0.004
+    mapping["nodes"][3]["surfaces"][1]["initial_storage"] = {  # a soil that is not full
+        "volume": 100.0,
+        "temperature": 11.0,
+        "phosphate": 0.2,
+        "ammonia": 1.0,
+    }
+    model, _, _ = build_model(read_wsimod_config(mapping))
+    results = wsimod_run(model, days=6)
+    names = results.arc_names
+    pulled = results.arc_flow[:, names.index("dist_to_homes")]
+    garden = [float(pulled[d]) - 40.0 * 0.15 for d in range(6)]
+    g2 = 1  # surfaces: g1, g2, lawn, patch
+    evaporation = results.surface["evaporation"][:, g2]
+    precipitation = results.surface["precipitation"][:, g2]
+    assert garden[0] == 0.0 and float(evaporation[0]) > 0  # day 0 has a deficit of its own
+    for d in range(1, 6):
+        expected = max(float(evaporation[d - 1]) - float(precipitation[d - 1]), 0.0)
+        assert garden[d] == pytest.approx(expected * 0.42, rel=1e-9), d
+        assert garden[d] > 0
+
+
+def test_the_garden_surface_is_a_schema_class_with_no_parameter_of_its_own():
+    """``land.py:2391``: ``GardenSurface.__init__(**kwargs)`` adds no keyword, so its schema is
+    ``GrowingSurface``'s (``depth`` derived). ``gardening_efficiency`` is the ``Demand``'s."""
+    garden, growing_ = SURFACE_SCHEMAS["GardenSurface"], SURFACE_SCHEMAS["GrowingSurface"]
+    assert garden.parameters == growing_.parameters
+    assert garden.override_keys == growing_.override_keys - {"depth"}
+    assert "depth" in garden.derived and "gardening_efficiency" not in garden.parameters
+
+
+def test_quantity_only_lists_the_garden_surface_like_a_growing_one():
+    """Y72: a garden surface has no parameter of its own, so the quantity-only list is a growing
+    surface's (``rooting_depth`` and ``ET_depletion_factor`` are read, the rest listed); the
+    ``Demand``'s ``gardening_efficiency`` sets the volume and is read, so it is not listed."""
+    from noodl.apps.wsimod import build_model
+    from tests.verification._wsimod_cases import _garden
+
+    mapping = _garden()
+    mapping["overrides"]["nodes"]["gardens"]["surfaces"]["g2"]["kfr"] = 3.0  # an override
+    mapping["nodes"][2]["gardening_efficiency"] = 0.3
+    model, _, _ = build_model(read_wsimod_config(mapping), pollutants=False)
+    listed = model.ignored_by_quantity_only
+    assert "gardens.surfaces.g2.kfr" in listed
+    assert not any(
+        "gardening_efficiency" in item or "rooting_depth" in item or "ET_depletion" in item
+        for item in listed
+    )

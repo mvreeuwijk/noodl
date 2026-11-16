@@ -210,8 +210,8 @@ _STATE_TEXT = {
         "the harvest resets it"
     ),
     "wsimod.surface_climate": (
-        "the evaporation and precipitation volumes of every irrigation surface's last ihacres "
-        "(land.py:1029-1044, read by :2352), two rows per surface"
+        "the evaporation and precipitation volumes of every irrigation and garden surface's last "
+        "ihacres (land.py:1029-1044, read by :2352 and :2411), two rows per surface"
     ),
     "wsimod.ground_cover": (
         "every growing surface's ground cover (land.py:1550-1558), kept outside the season "

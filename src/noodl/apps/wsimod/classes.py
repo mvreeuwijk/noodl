@@ -218,6 +218,8 @@ _CONSTRUCTORS: dict[str, tuple[dict[str, object], str | None]] = {
     ),
     # land.py:2317: the first keyword, ahead of GrowingSurface's
     "IrrigationSurface": ({"irrigation_coefficient": 0.1}, "GrowingSurface"),
+    # land.py:2391: ``GardenSurface.__init__(**kwargs)`` adds no keyword of its own
+    "GardenSurface": ({}, "GrowingSurface"),
     # arcs.py
     "Arc": (
         {
@@ -396,6 +398,7 @@ _NOT_OVERRIDES = {
     "ImperviousSurface": frozenset({"depth"}),
     "GrowingSurface": frozenset({"depth"}),
     "IrrigationSurface": frozenset({"depth"}),
+    "GardenSurface": frozenset({"depth"}),
 }
 _DERIVED = {
     "Surface": frozenset({"capacity", "parent"}),
@@ -403,6 +406,7 @@ _DERIVED = {
     "PerviousSurface": frozenset({"capacity", "parent"}),
     "GrowingSurface": frozenset({"capacity", "parent", "depth"}),
     "IrrigationSurface": frozenset({"capacity", "parent", "depth"}),
+    "GardenSurface": frozenset({"capacity", "parent", "depth"}),
 }
 
 
@@ -465,6 +469,7 @@ SURFACE_SCHEMAS: dict[str, ClassSchema] = {
         "PerviousSurface",
         "GrowingSurface",
         "IrrigationSurface",
+        "GardenSurface",
     )
 }
 ARC_SCHEMAS: dict[str, ClassSchema] = {
@@ -484,7 +489,6 @@ ARC_SCHEMAS: dict[str, ClassSchema] = {
 
 # Classes WSIMOD has and this port does not, with where they go (spec, Scope).
 OUT_OF_SCOPE: dict[str, str] = {
-    "GardenSurface": "3c",
     "VariableAreaSurface": "3c",
     "EnfieldFoulSewer": "refused (W4: undefined storm_exchange, sewer.py:288-291)",
 }

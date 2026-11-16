@@ -792,6 +792,11 @@ def read_wsimod_config(
             for surface in node.surfaces
             if "rooting_depth" in SURFACE_SCHEMAS[surface.cls].parameters
         )
+    # land.py:120-128 (L18, Y28, D15): the last GardenSurface of a Land takes its garden
+    # handlers, so the earlier ones are never asked
+    for node in nodes:
+        gardens = [s.name for s in node.surfaces if s.cls == "GardenSurface"]
+        unread.extend(f"{node.name}.surfaces.{name}.garden_handlers" for name in gardens[:-1])
     # land.py:375-382, :540-581 (D15, Y21): the surface data a surface never reads. Without
     # ``nhx-dry`` in the constructor's data no deposition function is built, so every variable is
     # unread; with it, a deposition of a species that is not a run pollutant is read and dropped

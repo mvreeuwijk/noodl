@@ -772,8 +772,10 @@ class Land(Node):
     ``"surfaces.<name>.<parameter>"``.
 
     Handlers (``land.py:91-129``): pushes with the default tag and their checks are denied; the
-    ``("Demand", "Garden")`` check and push answer empty, as without a ``GardenSurface`` (3c,
-    W16), so a garden demand is 0. W4: ``push_set_sewer`` (``:246-264``) reads a nonexistent
+    ``("Demand", "Garden")`` check and push answer empty (``:91-94``, W16), so a garden demand is
+    0, unless the land has a ``GardenSurface``: the last one's ``calculate_irrigation_demand`` and
+    ``receive_irrigation_demand`` replace them (``:120-128``, L18). W4: ``push_set_sewer``
+    (``:246-264``) reads a nonexistent
     ``self.surface`` and there is no ``"Sewer"`` check, so ponding from a sewer crashes WSIMOD;
     noodl does the evident intent, a check that accepts everything when the land has an
     ``ImperviousSurface`` (empty otherwise) and a set that forces the water into the first one.
@@ -808,12 +810,17 @@ class Land(Node):
             name: _f64(values.get(name, default))
             for name, default in self.parameter_defaults.items()
         }
-        # land.py:91-94 (no GardenSurface: W16), :120-123, W4's "Sewer" check
+        # land.py:91-94 (no GardenSurface: W16), W4's "Sewer" check
         self.push_check_handler[GARDEN_TAG] = self.push_check_deny
         self.push_set_handler[GARDEN_TAG] = self.push_set_garden
         self.surfaces: list[Surface] = [
             SURFACE_CLASSES[s.cls](s, pollutants, parent=self) for s in spec.surfaces
         ]
+        # land.py:120-128: the last GardenSurface's methods overwrite the empty answers (L18)
+        for surface in self.surfaces:
+            if getattr(surface, "is_garden", False):
+                self.push_check_handler[GARDEN_TAG] = surface.calculate_irrigation_demand
+                self.push_set_handler[GARDEN_TAG] = surface.receive_irrigation_demand
         self.push_set_handler["default"] = self.push_set_deny
         self.push_check_handler["default"] = self.push_check_deny
         self.push_set_handler["Sewer"] = self.push_set_sewer

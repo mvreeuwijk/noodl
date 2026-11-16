@@ -612,6 +612,31 @@ def test_the_land_cases_reach_the_branches_they_are_built_for():
     garden = [c for c in gardens if c.tag == ("Demand", "Garden")]
     assert [c.method for c in garden] == ["push_check"] * 2 * CASES["residential_with_land"].days
     assert all(c.vqip is None and c.reply["volume"] == 0 for c in garden)
+    # garden (Task 14): the check is asked twice a day (demand.py:262, nodes.py:444). The first
+    # days answer 0 (the climate of day 0, then wet days); then the previous day's deficit. The
+    # push carries the garden water at 0 degC (L19, demand.py:273-287) and cools the soil
+    garden = [c for c in captured("garden")["gardens"] if c.tag == ("Demand", "Garden")]
+    checks = [c for c in garden if c.method == "push_check"]
+    pushes = [c for c in garden if c.method == "push_set"]
+    assert [c.reply["volume"] for c in checks[:4]] == [0.0] * 4
+    assert any(c.reply["volume"] > 0 for c in checks) and any(
+        c.reply["volume"] == 0 for c in checks
+    )
+    assert pushes and all(p.vqip["volume"] > 0 and p.vqip["temperature"] == 0.0 for p in pushes)
+    assert all(p.reply["volume"] == 0 for p in pushes)  # forced in: nothing is returned
+    # the land answers from g2 only: the push is the check's reply times gardening_efficiency
+    for push in pushes:
+        asked = [c for c in checks if c.day == push.day][0].reply["volume"]
+        assert push.vqip["volume"] == pytest.approx(asked * (0.6 * 0.7), rel=1e-12)
+        before, after = push.pre["surfaces.g2.storage"], push.post["surfaces.g2.storage"]
+        assert after["volume"] == before["volume"] + push.vqip["volume"]
+        assert after["temperature"] < before["temperature"]
+        assert push.post["surfaces.g1.storage"] == push.pre["surfaces.g1.storage"]
+    # the land without a garden surface answers 0 every time
+    plain = [c for c in captured("garden")["plain"] if c.tag == ("Demand", "Garden")]
+    assert plain and {c.method for c in plain} <= {"push_check", "push_set"}
+    assert all(c.reply["volume"] == 0 for c in plain)  # the empty answer of land.py:93-94
+    assert all(c.post["surfaces.patch.storage"] == c.pre["surfaces.patch.storage"] for c in plain)
     # temperature_blending: the surfaces' temperature changes from day to day
     suburb = [c for c in captured("temperature_blending")["suburb"] if c.method == "run"]
     assert len({c.post["surfaces.roofs.storage"]["temperature"] for c in suburb}) > 5

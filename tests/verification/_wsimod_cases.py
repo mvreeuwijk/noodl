@@ -1880,6 +1880,85 @@ def _irrigation_early() -> dict:
 _IRRIGATION_CRASH_DAYS = 40
 
 
+# --- GardenSurface and the Demand garden link (Task 14; spec, Verification 3) ---------------------
+_GARDEN_DAYS = 100  # Y68: dry spells (a demand) and wet ones (saturated), both surfaces' branches
+
+
+def _garden_surface(name: str, **values) -> dict:
+    return {
+        "surface": name,
+        "type_": "GardenSurface",
+        "rooting_depth": 0.5,
+        "ET_depletion_factor": 0.5,
+        "infiltration_capacity": 0.02,
+        "sowing_day": 10,
+        "harvest_day": 300,
+        **_SPRING_STAGES,
+        **values,
+    }
+
+
+def _garden() -> dict:
+    """A ``ResidentialDemand`` fed through a ``Distribution`` asks two ``Land`` nodes for garden
+    water (``demand.py:250-301``). ``gardens`` has two ``GardenSurface``s, ``g1`` and ``g2``, and
+    a ``PerviousSurface``: the last garden surface takes the handlers (L18), so ``g2`` is
+    irrigated and ``g1`` only grows, and the water arrives at 0 degC (L19). ``plain`` has no
+    garden surface and answers 0 (``land.py:93-94``). The demand is the previous day's deficit
+    (the check runs before ``Land.run``): 0 on day 0 and, with the forcing's first days wet, on
+    the next ones; the wet spells saturate the soil (``cmd <= FLOAT_ACCURACY``, ``:2416``)."""
+    days = _GARDEN_DAYS
+    dates = _dates(days)
+    return {
+        **_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(900.0)),
+            _store("dist", "Distribution", leakage=0.0),
+            _homes("homes", days, 56),
+            _land(
+                "gardens",
+                [
+                    _garden_surface("g1", area=800.0, initial_storage=_stocked(150.0)),
+                    _garden_surface("g2", area=1200.0, initial_storage=_stocked(250.0)),
+                    _pervious("lawn", area=500.0, depth=0.5, initial_storage=_stocked(80.0)),
+                ],
+                _irrigation_forcing(dates, 57),
+            ),
+            _land(
+                "plain",
+                [_pervious("patch", area=600.0, depth=0.5, initial_storage=_stocked(90.0))],
+                _irrigation_forcing(dates, 58),
+            ),
+            _store("drain", "Sewer", capacity=50.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("supply_to_dist", "supply", "dist"),
+            _arc("dist_to_homes", "dist", "homes"),
+            _arc("homes_to_gardens", "homes", "gardens"),
+            _arc("homes_to_plain", "homes", "plain"),
+            _arc("homes_to_drain", "homes", "drain"),
+            _arc("gardens_to_brook", "gardens", "brook"),
+            _arc("plain_to_brook", "plain", "brook"),
+            _arc("brook_to_sea", "brook", "sea"),
+            _arc("drain_to_sea", "drain", "sea"),
+        ],
+        # the soils keep their temperature (11 degC), so the 0 degC garden water shows (L19)
+        "overrides": {
+            "nodes": {
+                **_neutral_soil("gardens", "g1", "g2", "lawn")["nodes"],
+                **_neutral_soil("plain", "patch")["nodes"],
+            }
+        },
+        "orchestration": [
+            {"ResidentialDemand": "create_demand"},
+            {"Land": "run"},
+            {"Sewer": "make_discharge"},
+        ],
+    }
+
+
 def _irrigation_without_nutrients() -> dict:
     """noodl only, L13: with the pollutants ``phosphate`` and ``temperature`` (no ``nitrate``) the
     first day with a demand raises ``KeyError: 'org-nitrogen'`` at ``land.py:2373`` (the pool
@@ -3432,6 +3511,12 @@ CASES: dict[str, Case] = {
         scale=3400.0,
         replay=("farm",),
         bookkeeping_days=60,  # Y68: past both sowings, with demands and saturated days
+    ),
+    "garden": Case(
+        build=_garden,
+        days=_GARDEN_DAYS,
+        scale=900.0,
+        replay=("gardens", "plain"),
     ),
     "irrigation_without_nutrients": Case(
         build=_irrigation_without_nutrients,
