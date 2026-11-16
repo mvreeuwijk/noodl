@@ -549,6 +549,28 @@ def _attribute(obj, path: str):
     return obj
 
 
+def call_forcing(node) -> dict[str, float]:
+    """The day's forcing the call reads: a biochemistry River's
+    ``get_data_input("temperature")`` (``storage.py:750``)."""
+    if _runs_biochemistry(node):
+        return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
+    if hasattr(node, "surfaces") and hasattr(node, "monthyear"):
+        # a Land: its month (model.py:997) and each deposition surface's monthly value
+        # (get_data_input_surface, land.py:462-471)
+        out: dict[str, object] = {"forcing.monthyear": str(node.monthyear)}
+        for surface in node.surfaces:
+            read = ()
+            if "nhx-dry" in {variable for variable, _ in surface.data_input_dict}:
+                read = DEPOSITION_VARIABLES
+            if _runs_nutrients() and hasattr(surface, "nutrient_pool"):
+                read = (*read, *INPUT_VARIABLES)
+            for variable in read:
+                value = surface.data_input_dict[(variable, node.monthyear)]
+                out[f"forcing.surfaces.{surface.surface}.{variable}"] = value
+        return out
+    return {}
+
+
 @contextmanager
 def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[NodeCall]]]:
     """Record every call into the named nodes while ``model`` runs (spec, Verification 1).
@@ -585,27 +607,6 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
             out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
         return out
 
-    def forcing(node) -> dict[str, float]:
-        """The day's forcing the call reads: a biochemistry River's
-        ``get_data_input("temperature")`` (``storage.py:750``)."""
-        if _runs_biochemistry(node):
-            return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
-        if hasattr(node, "surfaces") and hasattr(node, "monthyear"):
-            # a Land: its month (model.py:997) and each deposition surface's monthly value
-            # (get_data_input_surface, land.py:462-471)
-            out: dict[str, object] = {"forcing.monthyear": str(node.monthyear)}
-            for surface in node.surfaces:
-                read = ()
-                if "nhx-dry" in {variable for variable, _ in surface.data_input_dict}:
-                    read = DEPOSITION_VARIABLES
-                if _runs_nutrients() and hasattr(surface, "nutrient_pool"):
-                    read = (*read, *INPUT_VARIABLES)
-                for variable in read:
-                    value = surface.data_input_dict[(variable, node.monthyear)]
-                    out[f"forcing.surfaces.{surface.surface}.{variable}"] = value
-            return out
-        return {}
-
     def install(obj, attr: str, make) -> None:
         own = attr in vars(obj)
         restore.append((obj, attr, own, vars(obj).get(attr)))
@@ -634,7 +635,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                     vqip=copy.deepcopy(vqip),
                     tag=copy.deepcopy(tag),
                     reply=None,
-                    pre={**snapshot(node), **forcing(node)},
+                    pre={**snapshot(node), **call_forcing(node)},
                     post={},
                     arc_calls=[],
                 )

@@ -390,10 +390,12 @@ and no pool driver, and the deposition enters the tank whole.
 
 With `nitrate`, these are refused by name, in either mode: a missing one of `ammonia`,
 `nitrite`, `phosphate`, `org-nitrogen`, `org-phosphorus`, `solids` (which erosion reads, though
-WSIMOD's docstring omits it, L24) and `temperature`; and, at build and for every batched
-instance at bind, `rooting_depth`, `bulk_density`, `kfr` or `nfr` at or below 0, `cohesion`,
-`thetaupp` or `thetalow` of 0, `hsatINs` at or below 0, `limpar` below 0 and `field_capacity` at
-or below 0, each a division by zero or a logarithm of a non-positive number in WSIMOD.
+WSIMOD's docstring omits it, L24) and `temperature`; and `rooting_depth`, `bulk_density`,
+`kfr` or `nfr` at or below 0, `cohesion`, `thetaupp` or `thetalow` of 0, `hsatINs` at or below 0,
+`limpar` below 0 and `field_capacity` at or below 0, each a division by zero or a logarithm of a
+non-positive number in WSIMOD. These parameter checks run at build in either mode, and again for
+every batched instance when the day is bound, but only with pollutants on: a quantity-only run
+has no pool, so nothing reads them.
 
 ### The soil temperature
 

@@ -280,6 +280,12 @@ class Surface(DecayTank):
         return []
 
     @classmethod
+    def carried_fields_of(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """The registers of :meth:`state_fields` that the Land carries (D5): ``carried_fields``
+        here; a growing surface adds its pool with ``nutrients``."""
+        return cls.carried_fields
+
+    @classmethod
     def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
         """The store paths of the class's registers (D5), after its flows: none here. A growing
         surface's crop registers (and, with ``nutrients``, its pool)."""
@@ -817,8 +823,9 @@ class Land(Node):
         # land.py:155-156
         self.running_inflow_mb = empty(pollutants, ())
         self.running_outflow_mb = empty(pollutants, ())
+        nutrients = runs_nutrients(pollutants.names)
         self.store_paths = self.store_paths_of(
-            [(s.cls, s.name) for s in spec.surfaces], nutrients=runs_nutrients(pollutants.names)
+            [(s.cls, s.name) for s in spec.surfaces], nutrients=nutrients
         )
         # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
         # running mass balance are the day's (W75). A surface's total_decayed is carried when
@@ -827,7 +834,11 @@ class Land(Node):
         carried = [x for x in self.store_paths if x.endswith(".storage")]
         if "nitrite" in pollutants.names:
             carried += [x for x in self.store_paths if x.endswith(".total_decayed")]
-        carried += [f"surfaces.{s.name}.{f}" for s in self.surfaces for f in s.carried_fields]
+        carried += [
+            f"surfaces.{s.name}.{f}"
+            for s in self.surfaces
+            for f in type(s).carried_fields_of(nutrients=nutrients)
+        ]
         self.carried_paths = tuple(carried)
 
     @classmethod
@@ -843,6 +854,10 @@ class Land(Node):
         paths = [f"{tank}.storage" for tank in cls._TANKS]
         for surface_cls, name in surfaces:
             surface = SURFACE_CLASSES[surface_cls]
+            # every carried register is a store (Land.__init__ carries carried_fields_of)
+            assert set(surface.carried_fields_of(nutrients=nutrients)) <= set(
+                surface.state_fields(nutrients=nutrients)
+            )
             fields = (
                 "storage",
                 *surface.flow_fields,

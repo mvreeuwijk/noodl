@@ -921,14 +921,20 @@ NUT = Pollutants(
     tuple(_NITRATE["non_additive_pollutants"]),
 )
 _KEYS = ("volume", *NUT.names)
-_SOIL = {
-    "phosphate": 1.5,
-    "ammonia": 0.2,
-    "nitrate": 0.7,
-    "nitrite": 0.05,
-    "org-nitrogen": 3.0,
-    "org-phosphorus": 0.4,
-}
+# random values, so that a sum taken in another order (association) is another float
+_SOIL_KEYS = ("phosphate", "ammonia", "nitrate", "nitrite", "org-nitrogen", "org-phosphorus")
+_SOIL = {key: random.Random(3).uniform(0.0, 3.0) * (i + 1) / 7 for i, key in enumerate(_SOIL_KEYS)}
+
+
+def _random_tank(rng, *, volume=None) -> dict:
+    """A tank of ``NUT`` with random, order-sensitive masses (inorganic N > 0)."""
+    tank = {n: rng.uniform(1e-3, 0.5) for n in NUT.additive}
+    tank.update(volume=rng.uniform(0.5, 3.0) if volume is None else volume, temperature=9.5)
+    return tank
+
+
+def _random_soil(rng) -> dict:
+    return {key: rng.uniform(0.0, 3.0) for key in _SOIL_KEYS}
 
 
 def _nutrient_land(*, data=None, **parameters) -> Land:
@@ -1175,57 +1181,96 @@ def test_the_liquid_ratio_is_evaluated():
 
 
 def test_flushing_extracts_the_outflows_again():
-    """L8 (``land.py:1605-1647``, reproduced: Y16, Y45): after two ``pull_storage`` calls (the
-    subsurface flow and the percolation) and ``effective_precipitation_flushing``, the dissolved
-    pools are WSIMOD's: smaller than ``DI0 - (ss + perc)`` by the second extraction."""
-    storage = {"volume": 2.0, "nitrate": 0.3, "ammonia": 0.1, "nitrite": 0.02, "phosphate": 0.05}
-    storage.update({"org-nitrogen": 0.2, "org-phosphorus": 0.03, "solids": 1.0, "temperature": 9.0})
-    theirs = _wsimod_nutrient(storage)
-    land = _nutrient_land(initial_storage=storage)
+    """L8 (``land.py:1605-1647``, reproduced: Y16, Y45), on 50 random tanks and requests: after
+    two ``pull_storage`` calls (the subsurface flow and the percolation) and
+    ``effective_precipitation_flushing``, the pools and the tank are WSIMOD's, bitwise. Every
+    other case has nutrients in the infiltration excess (a unit test may: in a day erosion adds
+    them only later), which pins its terms and their order. Without them, the dissolved
+    inorganic N is smaller than ``DI0 - (ss + perc)`` by the second extraction."""
+    rng = random.Random(23)
+    theirs = _wsimod_nutrient({"volume": 1.0})
+    land = _nutrient_land()
     ours = land.surfaces[0]
-    ctx = _nut_ctx(land)
-    assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs))
-    start = ours.nutrient_pool.storage.clone()
-    their_ss = theirs.pull_storage({"volume": 0.2})
-    their_perc = theirs.pull_storage({"volume": 0.3})
-    theirs.subsurface_flow, theirs.percolation = their_ss, their_perc
-    theirs.infiltration_excess = theirs.empty_vqip()
-    ss = ours.pull_storage(NUT.to_vqip({"volume": 0.2}), active=TRUE)
-    perc = ours.pull_storage(NUT.to_vqip({"volume": 0.3}), active=TRUE)
-    ours.subsurface_flow, ours.percolation, ours.infiltration_excess = ss, perc, ctx.empty()
-    once = ours.nutrient_pool.storage.clone()
-    assert theirs.effective_precipitation_flushing() == (theirs.empty_vqip(),) * 2
-    in_, out_ = ours.effective_precipitation_flushing(active=TRUE)
-    assert not in_.any() and not out_.any()
-    assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs))
-    assert torch.equal(ours.storage, _vector(theirs.storage))
-    flowed = _n(ss) + _n(perc)
-    di_n = float(ours.nutrient_pool.storage[DI, 0])
-    assert di_n < float(start[DI, 0]) - flowed
-    assert di_n == pytest.approx(float(once[DI, 0]) - flowed, rel=1e-12)
-    assert di_n == pytest.approx(float(start[DI, 0]) - 2 * flowed, rel=1e-12)
+    for k in range(50):
+        storage = _random_tank(rng)
+        pools = [[rng.uniform(0.0, 1.0), rng.uniform(0.0, 1.0)] for _ in POOLS]
+        requests = [storage["volume"] * rng.uniform(0.05, 0.4) for _ in range(2)]
+        excess = {"volume": 0.0, **dict.fromkeys(NUT.names, 0.0)}
+        if k % 2:
+            excess.update({n: rng.uniform(0.0, 0.05) for n in NUT.additive}, volume=0.1)
+        theirs.storage = dict(storage)
+        _set_their_pools(theirs, pools)
+        ours.storage = NUT.to_vqip(storage)
+        ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+        _nut_ctx(land)
+        start = ours.nutrient_pool.storage.clone()
+        their_ss, their_perc = (theirs.pull_storage({"volume": v}) for v in requests)
+        theirs.subsurface_flow, theirs.percolation = their_ss, their_perc
+        theirs.infiltration_excess = dict(excess)
+        ss, perc = (ours.pull_storage(NUT.to_vqip({"volume": v}), active=TRUE) for v in requests)
+        ours.subsurface_flow, ours.percolation = ss, perc
+        ours.infiltration_excess = NUT.to_vqip(excess)
+        once = ours.nutrient_pool.storage.clone()
+        assert theirs.effective_precipitation_flushing() == (theirs.empty_vqip(),) * 2
+        in_, out_ = ours.effective_precipitation_flushing(active=TRUE)
+        assert not in_.any() and not out_.any()
+        assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs)), k
+        assert torch.equal(ours.storage, _vector(theirs.storage)), k
+        if k % 2 == 0 and float(once[DI, 0]) > _n(ss) + _n(perc):  # nothing clipped
+            flowed = _n(ss) + _n(perc)
+            di_n = float(ours.nutrient_pool.storage[DI, 0])
+            assert di_n < float(start[DI, 0]) - flowed
+            assert di_n == pytest.approx(float(once[DI, 0]) - flowed, rel=1e-9, abs=1e-15)
 
 
 def test_the_initial_pool_comes_from_the_storage_and_initial_soil_storage():
     """``land.py:1293-1324``: ``DI = (nitrate + ammonia + nitrite, phosphate)`` and ``DO =
     (org-nitrogen, org-phosphorus)`` of the tank; ``ads = (ammonia + nitrate + nitrite,
     phosphate)`` and ``fast = (org-nitrogen, org-phosphorus)`` of ``initial_soil_storage``,
-    in WSIMOD's order of terms; the humus pool stays 0."""
-    storage = {"volume": 2.0, "nitrate": 0.3, "ammonia": 0.1, "nitrite": 0.01, "phosphate": 0.05}
-    storage.update({"org-nitrogen": 0.2, "org-phosphorus": 0.03, "solids": 1.0, "temperature": 9.0})
-    for soil in (_SOIL, None, 0, {}):
+    in WSIMOD's order of terms (random values, so another association is another float); the
+    humus pool stays 0."""
+    rng = random.Random(29)
+    for k in range(40):
+        storage = _random_tank(rng)
+        soil = (_random_soil(rng), None, 0, {})[k % 4]
         theirs = _wsimod_nutrient(storage, initial_soil_storage=soil)
         pool = _nutrient_land(initial_storage=storage, initial_soil_storage=soil).surfaces[0]
         pool = pool.nutrient_pool.storage
-        assert torch.equal(pool, _their_pools(theirs)), soil
-        assert pool[DI].tolist() == [0.3 + 0.1 + 0.01, 0.05]
-        assert pool[DO].tolist() == [0.2, 0.03]
+        assert torch.equal(pool, _their_pools(theirs)), k
+        di_n = (storage["nitrate"] + storage["ammonia"]) + storage["nitrite"]
+        assert pool[DI].tolist() == [di_n, storage["phosphate"]]
+        assert pool[DO].tolist() == [storage["org-nitrogen"], storage["org-phosphorus"]]
         if soil:
-            assert pool[ADS].tolist() == [0.2 + 0.7 + 0.05, 1.5]
-            assert pool[FAST].tolist() == [3.0, 0.4]
+            ads_n = (soil["ammonia"] + soil["nitrate"]) + soil["nitrite"]
+            assert pool[ADS].tolist() == [ads_n, soil["phosphate"]]
+            assert pool[FAST].tolist() == [soil["org-nitrogen"], soil["org-phosphorus"]]
         else:
             assert not pool[ADS].any() and not pool[FAST].any()
         assert not pool[POOLS.index("humus_pool")].any()
+
+
+def test_adjust_vqip_to_liquid_equals_wsimods():
+    """``land.py:1574-1603`` on 200 random VQIPs with every scaled column non-zero
+    (``org-nitrogen`` and ``org-phosphorus`` included), ``dep`` positive, zero or negative and
+    ``in_`` any fraction of it: bitwise WSIMOD's."""
+    rng = random.Random(31)
+    theirs = _wsimod_nutrient({"volume": 1.0})
+    land = _nutrient_land()
+    ours = land.surfaces[0]
+    for k in range(200):
+        vqip = {"volume": 0.0, **{n: rng.uniform(-0.1, 1.0) for n in NUT.additive}}
+        vqip["temperature"] = 0.0
+        dep = {n: rng.choice((rng.uniform(0.01, 2.0), 0.0, -rng.uniform(0.01, 2.0))) for n in "NP"}
+        in_ = {n: dep[n] * rng.uniform(0.0, 1.0) for n in "NP"}
+        _nut_ctx(land)
+        got = ours.adjust_vqip_to_liquid(
+            NUT.to_vqip(vqip),
+            torch.tensor([dep["N"], dep["P"]], dtype=F64),
+            torch.tensor([in_["N"], in_["P"]], dtype=F64),
+            active=TRUE,
+        )
+        want = theirs.adjust_vqip_to_liquid(dict(vqip), dict(dep), dict(in_))
+        assert torch.equal(got, _vector(want)), k
 
 
 def _complete(**values):
@@ -1280,11 +1325,13 @@ _DOMAINS = [
 @pytest.mark.parametrize(("name", "value"), _DOMAINS)
 def test_the_domain_refusals(name, value):
     """Spec, Validation: with ``nitrate`` each of these is a WSIMOD crash, refused at build (the
-    merged parameters) and at bind (any batched instance). Without ``nitrate`` the build
+    merged parameters, in either mode) and at bind (any batched instance, with pollutants on,
+    where the pool exists). Without ``nitrate`` the build
     accepts what it reads nothing from."""
     mapping = _mapping([_complete()], overrides={"g": {name: value}}, lists=_NITRATE)
-    with pytest.raises(ValueError, match=name):
-        _validate(mapping, pollutants=True)
+    for pollutants in (True, False):  # at build in either mode (D18); at bind with the pool
+        with pytest.raises(ValueError, match=name):
+            _validate(mapping, pollutants=pollutants)
     surface = _nutrient_land(initial_storage=_START).surfaces[0]
     good = float(surface.defaults[name])
     with pytest.raises(ValueError, match=name):
@@ -1297,7 +1344,8 @@ def test_the_domain_refusals(name, value):
 
 def _nitrate_mapping(**surface) -> dict:
     data = {(v, d): 0.001 for v in ("precipitation", "et0", "temperature") for d in _DATES}
-    start = {"volume": 0.2, "nitrate": 0.01, "ammonia": 0.002, "phosphate": 0.001}
+    start = {**dict.fromkeys(_KEYS, 0.0), "volume": 0.2, "nitrate": 0.01, "ammonia": 0.002}
+    start.update(phosphate=0.001, temperature=10.0)  # every key: WSIMOD's tank reads them all
     growing = _complete(initial_storage=start, initial_soil_storage=_SOIL, **surface)
     return _mapping([growing], data=data, lists=_NITRATE)
 
@@ -1408,7 +1456,13 @@ def test_the_pool_state_has_ten_labelled_rows():
     assert land.store_paths == Land.store_paths_of([("GrowingSurface", "g")], nutrients=True)
     assert "surfaces.g.nutrient_pool" not in Land.store_paths_of([("GrowingSurface", "g")])
     expected = torch.tensor(
-        [[3.0, 0.4], [0.0, 0.0], [0.01 + 0.002 + 0.0, 0.001], [0.0, 0.0], [0.2 + 0.7 + 0.05, 1.5]],
+        [
+            [_SOIL["org-nitrogen"], _SOIL["org-phosphorus"]],
+            [0.0, 0.0],
+            [0.01 + 0.002 + 0.0, 0.001],
+            [0.0, 0.0],
+            [(_SOIL["ammonia"] + _SOIL["nitrate"]) + _SOIL["nitrite"], _SOIL["phosphate"]],
+        ],
         dtype=F64,
     )
     assert torch.equal(state["wsimod.nutrient_pool"].reshape(5, 2), expected)
@@ -1423,3 +1477,46 @@ def test_the_pool_state_has_ten_labelled_rows():
     )
     results = wsimod_run(model, given, drivers, days=2)
     assert float(results.mass_balance.residual.abs().max()) <= 1e-12
+
+
+def test_the_harness_captures_and_replays_the_pool():
+    """The replay harness's pool support, before any whole-model nitrate case (D20):
+    ``_wsimod_store`` of a live WSIMOD Land's ``surfaces.g.nutrient_pool`` is its five stores'
+    ``(N, P)``; ``load_value`` makes the ``(5, 2)`` tensor that ``load_stores`` takes;
+    ``compare_store`` passes on it and raises ``Mismatch`` on one perturbed entry; and
+    ``call_forcing`` captures the six fertiliser and manure values with nitrate, none
+    without."""
+    pytest.importorskip("wsimod")
+    from wsimod.orchestration.model import to_datetime
+
+    from tests.apps.wsimod._replay import Mismatch, _Comparer, compare_store, load_value
+    from tests.verification._wsimod_reference import _wsimod_store, call_forcing, wsimod_model
+
+    path = "surfaces.g.nutrient_pool"
+    mapping = _nitrate_mapping()
+    theirs = wsimod_model(mapping).nodes["land"]
+    pools = theirs.get_surface("g").nutrient_pool.pools
+    rng = random.Random(37)
+    for pool in pools:
+        pool.storage = {"N": rng.uniform(0.0, 2.0), "P": rng.uniform(0.0, 2.0)}
+    value = _wsimod_store(theirs, path)
+    assert value == [[pool.storage[n] for n in "NP"] for pool in pools]
+    network = read_wsimod_config(mapping)
+    ours = make_node(network.nodes[0], network, network.pollutants)
+    assert path in ours.store_paths
+    tensor = load_value(network.pollutants, ours, path, value)
+    assert tensor.shape == (5, 2) and tensor.tolist() == value
+    ours.load_stores({path: tensor})
+    assert torch.equal(ours.surfaces[0].nutrient_pool.storage, tensor)
+    compare = _Comparer(network.pollutants, 1.0, 0.0)
+    compare_store(compare, "pool", path, ours.stores()[path], value)
+    perturbed = [list(row) for row in value]
+    perturbed[3][1] = math.nextafter(perturbed[3][1], math.inf)
+    with pytest.raises(Mismatch, match=r"pool\[3, 1\]"):
+        compare_store(compare, "pool", path, ours.stores()[path], perturbed)
+    theirs.monthyear = to_datetime("2000-01")
+    captured = {k: v for k, v in call_forcing(theirs).items() if k.startswith("forcing.surfaces.")}
+    assert captured == {f"forcing.surfaces.g.{v}": 0.001 for v in SURFACE_INPUTS}
+    plain = wsimod_model(_mapping([_complete()], lists=_LISTS)).nodes["land"]
+    plain.monthyear = to_datetime("2000-01")
+    assert not [k for k in call_forcing(plain) if k.startswith("forcing.surfaces.")]

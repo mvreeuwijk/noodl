@@ -379,8 +379,6 @@ class GrowingSurface(PerviousSurface):
             self._fill_pool(_soil_storage(structure.get("initial_soil_storage"), where))
             # :1278-1281 (residue stays unwired, :1281)
             self.inflows += [self.effective_precipitation_flushing, self.fertiliser, self.manure]
-            # D5: the pool is carried with the crop registers
-            self.carried_fields = (*type(self).carried_fields, "nutrient_pool")
 
     def _fill_pool(self, soil: Mapping | None) -> None:
         """``land.py:1293-1324``: the dissolved pools from the tank's storage, then the solid
@@ -422,6 +420,11 @@ class GrowingSurface(PerviousSurface):
         self.RAW = self.TAW * self._param("ET_depletion_factor")
         self.ground_cover_stages = _stages_tensor(self._param("ground_cover_max"))
         self.crop_cover_stages = _stages_tensor(self._param("crop_cover_max"))
+
+    @classmethod
+    def carried_fields_of(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """D5: the crop registers, and with ``nutrients`` the pool."""
+        return (*cls.carried_fields, "nutrient_pool") if nutrients else cls.carried_fields
 
     @classmethod
     def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:

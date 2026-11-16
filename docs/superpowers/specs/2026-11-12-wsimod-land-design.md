@@ -1118,7 +1118,8 @@ In the list below, `S` is `node:N/surfaces.<s>`.
 - **`pull_storage`:** `S/pull_storage/empty` (`:1446`), `S/pull_storage/clip` (`:1450`) and
   `S/pull_storage/no_din` (noodl's guard, Y18; event `"pull_storage_no_din"`).
 - **`adjust_vqip_to_liquid`:** `S/adjust_vqip_to_liquid/N` and `…/P` (`:1595`, `:1599`), with
-  `call` counting the fertiliser, manure, dry and wet calls in call order.
+  `call` counting the dry deposition, wet deposition, fertiliser and manure calls, in that
+  (call) order.
 - **`soil_pool_transformation`:**
   - `S/soil_pool_transformation/no_din` (Y18; event `"transformation_no_din"`);
   - `S/soil_pool_transformation/inorganic_N`, `…/organic_N`, `…/inorganic_P` and `…/organic_P`
