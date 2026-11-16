@@ -502,6 +502,27 @@ def test_quantity_only_equals_the_pollutant_run_volumes(name):
         assert torch.equal(values.nan_to_num(), other.nan_to_num()), field
 
 
+@pytest.mark.parametrize("name", ["irrigation", "irrigation_early"])
+def test_the_irrigation_cases_reach_every_irrigate_branch(name):
+    """From the decisions (spec, Verification 3; Task 13, Y80): on each case's bookkeeping
+    prefix, each of ``crop``, ``deficit``, ``demand`` and ``saturated`` is active with both
+    outcomes at both irrigation surfaces: before and after sowing, a negative and a positive
+    deficit, demands above and below ``FLOAT_ACCURACY`` and saturated and unsaturated soils. A
+    site that never records fails."""
+    day = WsimodDay(read_wsimod_config(CASES[name].build()), pollutants=True)
+    day.record_decisions = True
+    seen: dict[str, set[bool]] = {}
+    for _, ctx, _ in day.run_days(days=CASES[name].bookkeeping):
+        for d in ctx.decisions:
+            if bool(d.active.any()):
+                seen.setdefault(d.site, set()).add(bool(d.outcome[d.active].any()))
+                seen[d.site].add(bool((~d.outcome[d.active]).any()))
+    for surface in ("irr_a", "irr_b"):
+        for branch in ("crop", "deficit", "demand", "saturated"):
+            site = f"node:farm/surfaces.{surface}/irrigate/{branch}"
+            assert seen.get(site) == {False, True}, (name, site, seen.get(site))
+
+
 def test_the_cases_cover_every_listed_feature():
     """The plan's case list, task by task (Task 17 step 1): no listed case is missing."""
     listed = """three_out_arcs node_chain forced_negative_excess maxiter_pull pull_and_push_arcs

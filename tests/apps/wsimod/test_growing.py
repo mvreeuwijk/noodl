@@ -3499,6 +3499,7 @@ def test_the_climate_is_carried():
     supplied = results.arc_flow[:, into].sum(dim=-1)
     demand = [max(float(evaporation[d, 0]) - float(precipitation[d, 0]), 0) * 0.3 for d in range(4)]
     assert supplied[:2].tolist() == [0.0, 0.0]  # the climate is 0, then the sowing day's
+    assert float(evaporation[0, 0]) > 0  # day 0 would have a demand were it not for the 0 climate
     assert demand[1] > 0 and demand[2] == 0.0  # day 2's own flows have no demand
     assert float(supplied[2]) == pytest.approx(demand[1], rel=1e-9)  # yesterday's flows
 
@@ -3548,9 +3549,85 @@ def test_the_irrigation_surface_is_a_schema_class():
     keywords after; the override is the coefficient, and ``depth`` is derived."""
     schema = SURFACE_SCHEMAS["IrrigationSurface"]
     assert schema.parameters["irrigation_coefficient"] == 0.1
-    assert list(schema.parameters)[:1] == ["irrigation_coefficient"] or (
-        "irrigation_coefficient" in schema.parameters
-    )
+    assert list(schema.parameters)[:1] == ["irrigation_coefficient"]
     assert "irrigation_coefficient" in schema.override_keys
     assert set(schema.override_keys) >= set(SURFACE_SCHEMAS["GrowingSurface"].override_keys)
     assert "depth" in schema.derived and "depth" not in schema.override_keys
+
+
+def test_the_climate_of_day_0_is_zero_for_a_crop_that_is_already_sown():
+    """D5: a crop with ``days_after_sow > 0`` on day 0 (a warm start) and a dry soil still makes
+    no demand, since ``apply_irrigation`` before ``Land.run`` reads the climate of the initial
+    state, 0; the same state with the climate of a dry day (a warm start from a previous run)
+    pulls ``max(E - P, 0) * coefficient`` on day 0."""
+    from noodl.apps.wsimod import build_model, initial_state, read_wsimod_config, wsimod_run
+    from tests.verification._wsimod_cases import _irrigation_early
+
+    mapping = _irrigation_early()
+    mapping["nodes"][0]["surfaces"][0]["initial_storage"] = _irrigation_dry_soil()
+    forcing = mapping["nodes"][0]["data_input_dict"]
+    forcing[("precipitation", mapping["dates"][0])] = 0.03  # wet: no own demand on day 0
+    model, _, _ = build_model(read_wsimod_config(mapping))
+    arrived = [
+        i for i, n in enumerate(wsimod_run(model, days=1).arc_names) if n.endswith("_to_farm")
+    ]
+
+    def day_0(climate):
+        state = initial_state(model)
+        state["wsimod.days_after_sow"] = torch.tensor([5.0, 5.0], dtype=F64)
+        state["wsimod.surface_climate"] = torch.tensor(climate, dtype=F64)
+        results = wsimod_run(model, state, days=1)
+        return float(results.arc_flow[0, arrived].sum())
+
+    assert day_0([0.0, 0.0, 0.0, 0.0]) == 0.0
+    assert day_0([20.0, 4.0, 0.0, 0.0]) == pytest.approx(16.0 * 0.3, rel=1e-9)
+
+
+def test_irrigate_with_a_mixed_active_mask_equals_each_scalar_run():
+    """The masked rows (``land.py:2347-2381`` under ``active``): a batch of four, one inactive,
+    one unsown, one with no demand and one demanding, equals four scalar runs bitwise (the tank
+    and the pools), and the inactive row is untouched."""
+    days, evaporation = [3.0, 3.0, -1.0, 3.0], [6.0, 6.0, 6.0, 6.0]
+    precipitation, storage = [1.0, 1.0, 1.0, 7.0], [5.0, 5.0, 5.0, 5.0]
+    pool = [[0.1 * (i + 1), 0.2 * (i + 1)] for i in range(len(POOLS))]
+    supply = {"nitrate": 0.1, "ammonia": 0.05, "phosphate": 0.02}
+    supply.update({"org-nitrogen": 0.03, "org-phosphorus": 0.01})
+
+    def setup(shape, day, e, p, v):
+        land = _irrigation_land(irrigation_coefficient=0.3)
+        surface = land.surfaces[0]
+        land.ctx = Ctx(NUT, FA, torch.Size(shape), day=0, node_names=["land"])
+        surface.days_after_sow = torch.as_tensor(day, dtype=F64)
+        surface.storage = NUT.to_vqip({"volume": 0.0}, shape=shape).clone()
+        surface.storage[..., 0] = torch.as_tensor(v, dtype=F64)
+        surface.evaporation = NUT.to_vqip({"volume": 0.0}, shape=shape).clone()
+        surface.evaporation[..., 0] = torch.as_tensor(e, dtype=F64)
+        surface.precipitation = NUT.to_vqip({"volume": 0.0}, shape=shape).clone()
+        surface.precipitation[..., 0] = torch.as_tensor(p, dtype=F64)
+        surface.nutrient_pool.storage = torch.tensor(pool, dtype=F64).expand(*shape, 5, 2).clone()
+
+        def pull(vqip, of_type=None, tag="default", *, active):
+            reply = NUT.to_vqip({**supply, "volume": 0.0}, shape=shape).clone()
+            reply[..., 0] = vqip[..., 0] * 0.7
+            return reply * active[..., None]
+
+        land.pull_distributed = pull
+        return surface
+
+    mask = torch.tensor([True, False, True, True])
+    batch = setup(
+        (4,),
+        torch.tensor(days, dtype=F64),
+        torch.tensor(evaporation, dtype=F64),
+        torch.tensor(precipitation, dtype=F64),
+        torch.tensor(storage, dtype=F64),
+    )
+    before = batch.storage.clone()
+    batch.irrigate(active=mask)
+    for i in range(4):
+        one = setup((), days[i], evaporation[i], precipitation[i], storage[i])
+        one.irrigate(active=mask[i])
+        assert torch.equal(batch.storage[i], one.storage), i
+        assert torch.equal(batch.nutrient_pool.storage[i], one.nutrient_pool.storage), i
+    assert torch.equal(batch.storage[1], before[1])
+    assert float(batch.storage[3, 0]) == 5.0  # no demand: the precipitation exceeds the evaporation
