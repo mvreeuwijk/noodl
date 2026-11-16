@@ -559,12 +559,14 @@ def test_the_mass_balance_closes_by_hand():
 
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_the_mass_balance_closes_on_every_case(name, mode):
-    """Every case, both modes, over its default ``days``: the residual is within ``1e-12 *
+    """Every case, both modes, over its bookkeeping prefix (``Case.bookkeeping``, Y68: the
+    default ``days`` but for the long growing cases): the residual is within ``1e-12 *
     scale`` on every day; ``evaporation_clamp`` apart, whose residual is the clamp gap (W75,
     tested below)."""
     model, state, drivers = _case(name, mode)
     diagnostics: dict = {}
-    results = wsimod_run(model, state, drivers, days=CASES[name].days, diagnostics=diagnostics)
+    days = CASES[name].bookkeeping
+    results = wsimod_run(model, state, drivers, days=days, diagnostics=diagnostics)
     event = diagnostics["events"]["inaccurate_evaporation"].any(dim=-1)
     if name == "evaporation_clamp":
         assert bool(event.any())  # its residual is the clamp gap: the tests below
@@ -591,9 +593,10 @@ LAND_RUN_CASES = [(name, mode) for name, mode in RUN_CASES if _has_land(name)]
 @pytest.mark.parametrize(("name", "mode"), LAND_RUN_CASES)
 def test_the_parts_sum_to_the_running_terms(name, mode):
     """D11: the per-function parts of each direction sum to the Land's running term (WSIMOD
-    adds sequentially, ``land.py:444-449``; the parts differ by summation order only)."""
+    adds sequentially, ``land.py:444-449``; the parts differ by summation order only), over
+    the case's bookkeeping prefix (Y68)."""
     model, state, drivers = _case(name, mode)
-    results = wsimod_run(model, state, drivers, days=CASES[name].days)
+    results = wsimod_run(model, state, drivers, days=CASES[name].bookkeeping)
     balance = results.mass_balance
     tolerance = 1e-12 * CASES[name].scale
     for direction, term in (("in", "Land.running_inflow_mb"), ("out", "Land.running_outflow_mb")):
@@ -960,10 +963,10 @@ def _completed_records(day, **kw) -> list:
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_consecutive_balance_windows_meet(name, mode):
     """X8: a day's window ends at the state ``end_timestep`` leaves, which is the next day's
-    loaded state, so consecutive windows meet exactly."""
+    loaded state, so consecutive windows meet exactly (the case's bookkeeping prefix, Y68)."""
     model, _, _ = _case(name, mode)
-    records = _completed_records(model.wsimod_day, days=CASES[name].days)
-    assert len(records) == CASES[name].days
+    records = _completed_records(model.wsimod_day, days=CASES[name].bookkeeping)
+    assert len(records) == CASES[name].bookkeeping
     for d in range(len(records) - 1):
         assert torch.equal(records[d + 1].storage_start, records[d].storage_end), (name, d)
 
@@ -971,17 +974,18 @@ def test_consecutive_balance_windows_meet(name, mode):
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_end_timestep_records_no_decision_and_no_maxiter(name, mode):
     """D22: ``end_timestep`` records no decision and no ``maxiter``; a later one that does
-    fails here, and ``_finish_record`` would have to re-snapshot it."""
+    fails here, and ``_finish_record`` would have to re-snapshot it (the case's bookkeeping
+    prefix, Y68)."""
     model, _, _ = _case(name, mode)
     day = model.wsimod_day
     day.record_decisions = True
     seen = []
     try:
-        for _, ctx, _ in day.run_days(days=CASES[name].days):
+        for _, ctx, _ in day.run_days(days=CASES[name].bookkeeping):
             seen.append((ctx, len(ctx.decisions), dict(ctx.maxiter)))
     finally:
         day.record_decisions = False
-    assert len(seen) == CASES[name].days
+    assert len(seen) == CASES[name].bookkeeping
     for ctx, decisions, maxiter in seen:
         assert decisions > 0 and len(ctx.decisions) == decisions
         assert ctx.maxiter.keys() == maxiter.keys()

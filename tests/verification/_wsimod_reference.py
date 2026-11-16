@@ -69,6 +69,7 @@ __all__ = [
     "capture_events",
     "capture_node_calls",
     "extract_topology",
+    "initial_land_stores",
     "pad_register",
     "record_wsimod_run",
     "reference_of_rows",
@@ -342,6 +343,10 @@ class WsimodReference:
     surface: dict[str, torch.Tensor]  # field -> (T, n_surfaces), NaN where not recorded
     surface_quality: torch.Tensor  # (T, n_surfaces, K)
     printed: list[str] = field(default_factory=list)
+    additive: tuple[str, ...] = ()  # ``constants.ADDITIVE_POLLUTANTS`` of the run
+    # D12: each Land's stores before the first day, its surfaces' then its three residence
+    # tanks' (``land.py:158-162``), as ``{pollutant: storage}`` (the ``S`` of day 0)
+    initial_land_stores: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
 
 def _tensor(rows, key, n_days, width):
@@ -354,17 +359,43 @@ def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
     from wsimod.core import constants
 
     dates = list(model.dates)[:days]
+    initial = initial_land_stores(model)
     out = io.StringIO()
     with redirect_stdout(out):
         flows, tanks, _, surfaces = model.run(dates=dates, verbose=True, record_all=True)
     return reference_of_rows(
-        dates, flows, tanks, surfaces, out.getvalue().splitlines(), tuple(constants.POLLUTANTS)
+        dates,
+        flows,
+        tanks,
+        surfaces,
+        out.getvalue().splitlines(),
+        tuple(constants.POLLUTANTS),
+        initial=initial,
     )
 
 
-def reference_of_rows(dates, flows, tanks, surfaces, printed, pollutants) -> WsimodReference:
+def initial_land_stores(model) -> dict[str, list[dict[str, float]]]:
+    """D12: every Land's stores as they stand (before the run), its surfaces' then its
+    ``surface_runoff``, ``subsurface_runoff`` and ``percolation`` tanks' (``land.py:158-162``,
+    the ``mass_balance_ds`` of the node check), each a copy of the ``storage`` VQIP."""
+    stores = {}
+    for name, node in model.nodes_type.get("Land", {}).items():
+        tanks = [s.storage for s in node.surfaces]
+        tanks += [
+            t.storage for t in (node.surface_runoff, node.subsurface_runoff, node.percolation)
+        ]
+        stores[name] = [dict(t) for t in tanks]
+    return stores
+
+
+def reference_of_rows(
+    dates, flows, tanks, surfaces, printed, pollutants, *, initial=None
+) -> WsimodReference:
     """The :class:`WsimodReference` of ``record_all``'s rows (``model.py:1075-1170``) over
-    ``dates``; with no date it holds no element (a run that crashed on its first day)."""
+    ``dates``; with no date it holds no element (a run that crashed on its first day).
+    ``initial`` is :func:`initial_land_stores` of the model before its first day."""
+    from wsimod.core import constants
+
     n_days = len(dates)
 
     def quality(rows, width):
@@ -387,6 +418,8 @@ def reference_of_rows(dates, flows, tanks, surfaces, printed, pollutants) -> Wsi
         surface={name: _tensor(surfaces, key, n_days, n_surfaces) for name, key in _SURFACE_FIELDS},
         surface_quality=quality(surfaces, n_surfaces),
         printed=list(printed),
+        additive=tuple(constants.ADDITIVE_POLLUTANTS),
+        initial_land_stores={} if initial is None else initial,
     )
 
 

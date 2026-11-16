@@ -912,15 +912,15 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface.residue` is unwired | sub-project 3c; refused with the other unported classes | `test_refusals_name_the_key` |
 | `GrowingSurface`: `if t.is_leap_year:` tests a method, so the day of year shifts after 28 February in every year (L1) | reproduced, documented | `test_every_year_shifts_the_day_after_february`; `test_growing_spring_spans_the_leap_shift` |
 | `GrowingSurface`: an autumn-sown crop (`sowing_day > harvest_day`) has no cover (L2) | reproduced | `test_an_autumn_calendar_has_no_cover_all_year`; case `growing_autumn` |
-| `GrowingSurface`: the stress coefficient divides by `(1 - ET_depletion_factor) * TAW`, which is 0 for the default factor at the wilting point (L3) | `Ks = 0`, event `"crop_water_stress_zero_denominator"` | `test_the_stress_zero_denominator_gives_zero` |
+| `GrowingSurface`: the stress coefficient divides by `(1 - ET_depletion_factor) * TAW`, which is 0 for the default factor at the wilting point (L3) | `Ks = 0`, event `"crop_water_stress_zero_denominator"` | `test_the_stress_zero_denominator_gives_zero`; `test_case_runs_where_wsimod_crashes[growing_default_depletion-*]` (WSIMOD raises on day 11) |
 | `GrowingSurface`: `TAW < 0` only prints, `TAW = 0` divides by zero (L4) | `wilting_point >= field_capacity` refused | `test_growing_refusals` |
 | `GrowingSurface`: `quick_interp` wraps to the last entry for a day at or before the first, and raises past the last (L23) | the wrap reproduced; a raising date refused with its name | `test_quick_interp_equals_wsimods`; `test_calendar_refusals` |
 | `GrowingSurface`: the configured `et0_coefficient` is overwritten (L22) | listed in `model.unread` | `test_a_growing_et0_coefficient_is_unread` |
-| `GrowingSurface.pull_storage` divides by the tank's inorganic nitrogen (L5) | the three species 0, event `"pull_storage_no_din"` | `test_pull_storage_without_din_gives_no_species` |
-| `GrowingSurface`: `effective_precipitation_flushing` extracts the outflows' nutrients from the pools that `pull_storage` already extracted them from (L8) | reproduced, documented | `test_flushing_extracts_the_outflows_again`; `test_the_pools_are_flushed_twice` (noodl's daily tank-pool gap equals WSIMOD's on `growing_spring`) |
-| `GrowingSurface.soil_pool_transformation` divides by the tank's `nitrate + ammonia` (L6) | proportion 0 (the change goes to ammonia), event `"transformation_no_din"` | `test_the_transformation_without_din_sends_the_change_to_ammonia` |
-| `GrowingSurface.calc_crop_uptake` divides by the tank's volume (L7) | no available uptake, event `"crop_uptake_dry_soil"` | `test_crop_uptake_from_an_empty_soil_is_zero` |
-| `GrowingSurface`: uptake and denitrification take all their N as nitrate (L9) | reproduced; the tank's clamp recorded as `"nutrient_pool_not_tracking"` | `test_calc_crop_uptake_equals_wsimods`; `test_denitrification_equals_wsimods`; `test_the_tank_columns_keep_their_sign` (no column went negative on `growing_spring` or `growing_decay`, in WSIMOD or noodl) |
+| `GrowingSurface.pull_storage` divides by the tank's inorganic nitrogen (L5) | the three species 0, event `"pull_storage_no_din"` | `test_pull_storage_without_din_gives_no_species`; `test_case_runs_where_wsimod_crashes[growing_no_din-pollutants]` (a zero-N tank with rain on day 0; WSIMOD raises at `land.py:1460` on day 0) |
+| `GrowingSurface`: `effective_precipitation_flushing` extracts the outflows' nutrients from the pools that `pull_storage` already extracted them from (L8) | reproduced, documented | `test_flushing_extracts_the_outflows_again`; `test_growing_spring_flushes_its_pools_twice_keeps_its_signs_and_reaches_its_bands` (noodl's daily tank-pool gap equals WSIMOD's on `growing_spring`'s first 120 days: about 7.4 kg N and 0.44 kg P by day 120) |
+| `GrowingSurface.soil_pool_transformation` divides by the tank's `nitrate + ammonia` (L6) | proportion 0 (the change goes to ammonia), event `"transformation_no_din"` | `test_the_transformation_without_din_sends_the_change_to_ammonia`; `test_case_runs_where_wsimod_crashes[growing_zero_n-pollutants]` and `[growing_nitrite_only-pollutants]` (no rain on day 0; WSIMOD raises at `land.py:1758` on day 0) |
+| `GrowingSurface.calc_crop_uptake` divides by the tank's volume (L7) | no available uptake, event `"crop_uptake_dry_soil"` | `test_crop_uptake_from_an_empty_soil_is_zero`; `test_case_runs_where_wsimod_crashes[growing_empty_soil-pollutants]` (an empty soil sown on the first day, dry deposition; WSIMOD raises at `land.py:1899` on day 1, noodl equals it bitwise on day 0) |
+| `GrowingSurface`: uptake and denitrification take all their N as nitrate (L9) | reproduced; the tank's clamp recorded as `"nutrient_pool_not_tracking"` | `test_calc_crop_uptake_equals_wsimods`; `test_denitrification_equals_wsimods`; `test_growing_spring_flushes_its_pools_twice_keeps_its_signs_and_reaches_its_bands` and `test_growing_decay_keeps_its_signs_carries_its_decay_and_leaves_the_pool_behind` (no column went negative on `growing_spring`'s first 300 days or `growing_decay`'s 100, in WSIMOD or noodl) |
 | `GrowingSurface`: the "nutrient pool not tracking soil tank" check compares a VQIP with itself and never prints (L10) | the event `"nutrient_pool_not_tracking"` where the clamp bites | `test_a_clamped_pull_records_the_event` |
 | `GrowingSurface.adsorption`: the "freundlich flow adjusted" warning tests `extracted - request > FLOAT_ACCURACY`, which `min` makes impossible (L11) | the evident test `request - extracted > FLOAT_ACCURACY`, event `"freundlich_flow_adjusted"` | `test_a_short_pool_records_freundlich_flow_adjusted` |
 | `GrowingSurface.adsorption`: the Newton loop's convergence test reads the previous pass's residual | reproduced (transcribed, not a defect), documented | `test_the_newton_test_lags_one_iteration` |
@@ -1109,22 +1109,53 @@ has to be debugged, not admitted.
   400 days by default and all 1100 under `-m slow`, when the decisions are recorded and every
   branch is asserted (X39, D24); `river_double_discharge` runs its 40 days by default.
 - **The growing surface with its nutrient pool** (3c): `growing_spring` (sown on day 90,
-  harvested on 250, fertiliser, manure, deposition and an `initial_soil_storage`; 540 days by
+  harvested on 250, fertiliser, manure, deposition and an `initial_soil_storage`; 365 days by
   default, its three years under `-m slow`), `growing_autumn` (sown on 280, harvested on 200:
-  the unsorted calendar and the autumn uptake) and `growing_decay` (the 12 default pollutants and
-  `decays` on ammonia and nitrite) agree with WSIMOD bitwise in both modes on every compared
-  series, and their land replays are bitwise, the pool, its two factors, the crop factor and the
-  `et0_coefficient` included. WSIMOD prints round-off "mass balance error" lines for
-  `org-phosphorus` at the land on these cases (about 2e-17 kg; 60, 9 and 11 lines); their store-
-  bounded admission is not in place yet, so these eight parity items (six default and two
-  `-m slow`) are strict expected failures that also assert bitwise values with those lines alone
-  set aside. `deposition_non_additive`
-  runs `surface_deposition`'s surfaces with `ammonia` non-additive (Y43): bitwise, no prints.
-- **Crashes** (`test_case_runs_where_wsimod_crashes_*`): five cases where WSIMOD raises. Three
-  run in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,
-  `nonresidential_demand`). For the other two, a decaying `Groundwater` and `QueueGroundwater`
-  without a `filename` override (`decay_groundwater`, `decay_queue_groundwater`), noodl refuses by
-  name where WSIMOD raises `TypeError`; with the override both run and agree bitwise.
+  the unsorted calendar and the autumn uptake; 300 days by default, 400 under `-m slow`),
+  `growing_decay` (the 12 default pollutants and `decays` on ammonia and nitrite; 100 days by
+  default, 200 under `-m slow`) and `growing_lean_soil` (60 days, pollutant mode: a P-free soil
+  that starts below its wilting point beside a P-rich one) agree with WSIMOD bitwise on every
+  compared series, and their land replays are bitwise, the pool, its two factors, the crop factor
+  and the `et0_coefficient` included. The bookkeeping items (the balance, the parts, the windows,
+  the end of day and quantity-only) run the long cases on a prefix (`Case.bookkeeping`: 250, 60
+  and 60 days). From the recorded decisions (`test_growing_spring_reaches_every_branch`, `-m
+  slow`), every site of the transformation, the uptake, the erosion, the denitrification, the
+  adsorption and the two factors shows both outcomes: on `growing_spring`'s 365 days and its
+  three years, but for ten outcomes it never shows (the wilted soil, a positive dissolved-P
+  increase, the empty pool, the shortcut, no change, desorption, no available water, no eroded P,
+  and the autumn temperature function's two caps), which `growing_lean_soil` shows; the four
+  noodl-only guards are false on every day of both and true only on their crash case's crash day.
+  `deposition_non_additive` runs `surface_deposition`'s surfaces with `ammonia` non-additive
+  (Y43): bitwise, no prints.
+- **The one print admission** (Y35, Y41, D12): on lands with a growing surface, WSIMOD's node
+  check prints round-off "mass balance error for <pollutant> of x in <land>" lines (always
+  `org-phosphorus` or `org-nitrogen`, |x| about 1e-17 kg) when a tank holds a large organic store
+  and the day's flows are small: its `ds_` is a difference of two large stores, its normaliser the
+  flow scale. noodl's own balance closes. `assert_matches_wsimod(..., store_bounded_prints={"land":
+  c})` admits such a line of an additive pollutant where `|x| <= c * eps * S`, with `eps =
+  2.22e-16` and `S` the largest store of that pollutant on the land's surfaces and its three
+  residence tanks at the end of that day or the day before (the initial stores on day 0); a line
+  beyond it, a volume line and any line of an unmapped land still fail
+  (`test_the_store_bound_admits_nothing_else`). The measured maximum of `|x| / (eps S)` is 1.277
+  (`growing_spring`, day 908 of its three years; 0.432 in its first 365 days), 0.404
+  (`growing_autumn`, 400 days), 0.479 (`growing_decay`, 200) and 0.610 (`growing_lean_soil`), so
+  `GROWING_PRINT_C = 2`. Those four cases are mapped (`test_the_store_bounded_prints`: each
+  prints such lines); every other case, the crash cases' days before their crash included, is
+  unmapped and so asserts that it prints none.
+- **Crashes** (`test_case_runs_where_wsimod_crashes*`): ten cases where WSIMOD raises. Three run
+  in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,
+  `nonresidential_demand`). For two, a decaying `Groundwater` and `QueueGroundwater` without a
+  `filename` override (`decay_groundwater`, `decay_queue_groundwater`), noodl refuses by name
+  where WSIMOD raises `TypeError`; with the override both run and agree bitwise. Five are growing
+  surfaces (D13): WSIMOD, run as it is one day at a time, raises `ZeroDivisionError` at the
+  pinned line of `nodes/land.py` on the pinned day; noodl equals it bitwise on the days before,
+  records the guard's event on the crash day, and runs on with finite values and a closed
+  balance. The triggers are ordinary (Y48): `growing_default_depletion` (L3, `:1566`, day 11),
+  and from a tank without inorganic N and zero first-month inputs `growing_no_din` (rain on day
+  0, so `ihacres` pulls through `pull_storage`: L5, `:1460`, day 0), `growing_zero_n` and
+  `growing_nitrite_only` (no rain on day 0, so the transformation divides first: L6, `:1758`, day
+  0) and `growing_empty_soil` (an empty soil, `ET_depletion_factor = 0.5`, dry deposition and a
+  crop sown on the first day: L7, `:1899`, day 1).
 - **Gradients** (`tests/verification/test_wsimod_gradients.py`): 49 entries (22 from 3a, 27 from
   3b), central differences at a relative step of 1e-6, the two perturbed runs' decision outcomes
   identical. The worst relative disagreement is 1.5e-7 (`River.T_wdays [nitrate]`; then
@@ -1144,10 +1175,15 @@ has to be debugged, not admitted.
 | `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s a mode |
 | `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | about 10 s a mode unloaded (22 s, 27 s and 31 s for the branch assertions measured on a shared machine) |
 | `river_double_discharge` | 40 | quantity-only, all pollutants | 0 (WSIMOD's own balance prints on every day; noodl's closes within 2e-16 of scale) | yes | not timed separately |
-| `growing_spring` | 540 | quantity-only, the eight nutrient pollutants | 0 (strict xfail on WSIMOD's round-off prints until their admission) | yes | 21 s, 37 s (shared machine) |
-| `growing_spring` | 1096 | quantity-only, the eight nutrient pollutants | 0 (strict xfail as above) | `-m slow` | 39 s pollutant mode (shared machine) |
-| `growing_autumn` | 400 | quantity-only, the eight nutrient pollutants | 0 (strict xfail as above) | yes | 16 s, 11 s |
-| `growing_decay` | 200 | quantity-only, the 12 default pollutants | 0 (strict xfail as above) | yes | 8 s, 14 s |
+| `growing_spring` | 365 | quantity-only, the eight nutrient pollutants | 0 (WSIMOD's round-off prints admitted, D12) | yes | 14 s, 25 s |
+| `growing_spring` | 1096 | quantity-only, the eight nutrient pollutants | 0 (as above) | `-m slow` | 77 s, 45 s (shared machine) |
+| `growing_spring` branches | 1096, with decisions, and `growing_lean_soil` | the eight nutrient pollutants | every site both ways (above) | `-m slow` | 92 s (shared machine) |
+| `growing_autumn` | 300 (400 `-m slow`) | quantity-only, the eight nutrient pollutants | 0 (as above) | yes | below 13 s, 20 s |
+| `growing_decay` | 100 (200 `-m slow`) | quantity-only, the 12 default pollutants | 0 (as above) | yes | below 13 s a mode |
+| `growing_lean_soil` | 60 | the eight nutrient pollutants | 0 (as above) | yes | below 13 s |
+| `surface_deposition` | 180 (450 `-m slow`) | quantity-only, all pollutants | 0 | yes | below 13 s, 13 s |
+| `growing_no_nitrate` | 365 (540 `-m slow`) | quantity-only, all pollutants | 0 | yes | 16 s, 16 s |
+| five growing crash cases | 10 to 20 | the pollutants of each | 0 on the days before WSIMOD's crash | yes | a few seconds each |
 | `deposition_non_additive` | 90 | quantity-only, all pollutants | 0 | yes | 3 s, 4 s |
 | 49 gradients | 1 to 200 | quantity-only values, pollutant runs | 1.5e-7 relative | 30 of 49 (19 `-m slow`) | 229 s in all |
 
@@ -1166,4 +1202,10 @@ demo parity items 91 to 97 s each), the row took 675 s (11 min 14 s, 5,835 tests
 register over and holds every branch; its default items take about 3 s a mode (with the register
 sums as CPython's own `sum`, X55; 8 s before), and the 1100-day run with the branch assertions
 from the recorded decisions is `-m slow` (about 10 s a mode on an unloaded machine). `pytest -m slow` on the row also
-adds the full `oxford` run, the full per-node replays and the 19 slow gradients.
+adds the full `oxford` run, the full per-node replays and the 19 slow gradients. At the end of
+3c's Task 9b the row took 807 s (6,225 tests, CPU load sampled every 30 s at 0 to 16 %, the
+demo parity items 91 to 97 s each), against 810 s before 3c and 1189 s after Task 9a: the growing
+cases' long horizons moved to `-m slow` (Y68: `growing_spring` 365 of 1096 days,
+`growing_autumn` 300 of 400, `growing_decay` 100 of 200, and with W15 `surface_deposition` 180
+of 450 and `growing_no_nitrate` 365 of 540), and the bookkeeping items run those cases on a
+prefix (`Case.bookkeeping`). Their table times above are from that run.

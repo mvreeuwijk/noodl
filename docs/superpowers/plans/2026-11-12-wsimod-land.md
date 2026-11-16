@@ -139,7 +139,7 @@ Each decision is binding for the implementer.
 - **D21 Calendar of the cases.**
   - Every 3c case's dates start on 2003-10-01 (`_land_dates(n)`), so that a run crosses 29 February 2004.
   - Monthly surface data come from `_monthly(variables: Mapping[str, Callable[[int, int], float]], start: str, months: int) -> dict`, keyed `"YYYY-MM"`.
-  - `growing_spring` has `days=540` and `slow_days=1096` (three years).
+  - `growing_spring` has `days=365` and `slow_days=1096` (three years). Amended by Y68 (Task 9b): the first draft's 540 default days moved the wsimod row past its budget; the common-year L1 shift stays pinned from a WSIMOD capture of the full horizon (`test_growing_spring_spans_the_leap_shift`).
 - **D22 Orchestration variants.** "`apply_irrigation` before `Land.run`" is its own case, `irrigation_early`, with a custom orchestration. The rest of its mapping is `irrigation`'s.
 - **D23 `et0_coef` and `crop_factor` in the results.** `day._SURFACE_FIELDS` and the harness's `_SURFACE_FIELDS` gain `"et0_coef": "et0_coefficient"`, recorded for every non-impervious surface as `record_all` does (`model.py:1150`; a `PerviousSurface`'s is its parameter). `results.surface["crop_factor"]` is noodl's own field, NaN except on growing surfaces, and is never compared with WSIMOD (Y32).
 - **D24 The garden handlers.** `Land.__init__`, after building its surfaces, binds the last `GardenSurface`'s `calculate_irrigation_demand` and `receive_irrigation_demand` as `push_check_handler[GARDEN_TAG]` and `push_set_handler[GARDEN_TAG]` (`land.py:120-128`). Without one, 3a's deny and empty handlers stay.

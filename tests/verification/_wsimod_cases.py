@@ -31,7 +31,7 @@ class Case:
     ``river_double_discharge``)."""
 
     build: Callable[[], dict]  # the mapping
-    days: int  # the default run: 30-120, 400 for river_nutrients (X39), 200-540 growing (D21)
+    days: int  # the default run: 30-120, 400 for river_nutrients (X39), 100-365 growing (D21)
     scale: float  # the largest volume in the forcing
     replay: tuple[str, ...] = ()  # nodes the replay test captures
     replay_arcs: tuple[str, ...] = ()  # user Decay* arcs the arc replay captures (D16)
@@ -46,12 +46,23 @@ class Case:
     # before the crash (``_wsimod_parity.wsimod_until_crash``)
     crash: tuple[str, str] | None = None
     crash_day: int | None = None  # D13: the day WSIMOD raises on, which its test pins
+    # Y68: the prefix the bookkeeping items run (``test_run.py``'s balance, parts, windows and
+    # end-of-day tests, and quantity-only), where a long case's branches add nothing; ``None``:
+    # ``days``
+    bookkeeping_days: int | None = None
+
+    @property
+    def bookkeeping(self) -> int:
+        """The days the bookkeeping items run: ``bookkeeping_days``, else ``days``."""
+        return self.days if self.bookkeeping_days is None else self.bookkeeping_days
 
     def __post_init__(self) -> None:
         if self.crash is not None and self.wsimod:
             raise ValueError("a crash case (D13) has wsimod=False")
         if (self.crash is None) != (self.crash_day is None):
             raise ValueError("a crash case (D13) names its crash and its crash day together")
+        if self.bookkeeping_days is not None and not 0 < self.bookkeeping_days < self.days:
+            raise ValueError("bookkeeping_days is a proper prefix of days (Y68)")
 
 
 # A short pollutant list: one additive, one more additive, one non-additive.
@@ -1386,8 +1397,9 @@ def _growing_no_nitrate() -> dict:
     (``phosphate`` and ``temperature``, no ``nitrate``): the crop calendar and IHACRES only, no
     nutrient pool (``land.py:1276``), and the dry and wet deposition straight into the tank
     (``adjust_vqip_to_liquid`` does nothing without ``nitrate``, ``:1594``). 540 days from
-    2003-10-01: one season, both covers persisting after the harvest, 29 February 2004 and dry
-    spells in which the crop is stressed (``Ks < 1``) on some days and not on others."""
+    2003-10-01 (365 by default): one season, both covers persisting after the harvest, 29
+    February 2004 and dry spells in which the crop is stressed (``Ks < 1``) on some days and not
+    on others."""
     days = _GROWING_DAYS
     dates = _land_dates(days)
     data = _monthly(_DEPOSITION, "2003-10", 19)
@@ -1463,6 +1475,9 @@ _GROWING_INPUTS = (
     "srp-manure",
 )
 _GROWING_SLOW_DAYS = 1096  # D21: three years from 2003-10-01
+# D21 (amended by Y68): growing_spring's default run, one year; L1's common-year shift is pinned
+# from a WSIMOD capture of the full horizon (test_growing_spring_spans_the_leap_shift)
+_GROWING_SPRING_DAYS = 365
 # growing_spring's five crop-factor stages: the factor rises over days 0-90, so the day of year
 # that WSIMOD shifts after 28 February in every year (L1) changes it
 _SPRING_STAGES = {
@@ -1554,9 +1569,10 @@ def _growing_spring() -> dict:
     0.5``, five crop-factor stages, with monthly dry and wet deposition, fertiliser and manure
     over 37 months, an ``initial_soil_storage`` and the eight pollutants: every process of
     ``land.py:1275-1291`` in WSIMOD's order, over three years from 2003-10-01 (29 February
-    2004 and the 1 March days of 2005 and 2006, L1). The default run is the first 540 days (one
-    season and two winters); the full horizon is ``slow``. It pins the call order, the double
-    flushing of the dissolved pools (L8) and the nitrate-only removals (L9)."""
+    2004 and the 1 March days of 2005 and 2006, L1). The default run is the first 365 days
+    (one season, past the harvest on run day 341, Y68); the full horizon is ``slow``. It pins
+    the call order, the double flushing of the dissolved pools (L8) and the nitrate-only
+    removals (L9). Three WSIMOD branches it never reaches are ``growing_lean_soil``'s."""
     return _nutrient_land(
         _growing(
             "wheat",
@@ -1576,7 +1592,8 @@ def _growing_spring() -> dict:
     )
 
 
-_GROWING_AUTUMN_DAYS = 400
+_GROWING_AUTUMN_DAYS = 300  # Y68: past the harvest (run day 291); 400 under slow
+_GROWING_AUTUMN_SLOW_DAYS = 400
 
 
 def _growing_autumn() -> dict:
@@ -1599,12 +1616,13 @@ def _growing_autumn() -> dict:
             crop_factor_stages=[0.4, 1.1, 0.25, 0.25, 0.4],
             crop_factor_stage_dates=[0, 150, 200, 280, 365],
         ),
-        _GROWING_AUTUMN_DAYS,
+        _GROWING_AUTUMN_SLOW_DAYS,
         91,
     )
 
 
-_GROWING_DECAY_DAYS = 200
+_GROWING_DECAY_DAYS = 100  # Y68: past the harvest (run day ~77); 200 under slow
+_GROWING_DECAY_SLOW_DAYS = 200
 
 
 def _growing_decay() -> dict:
@@ -1637,11 +1655,77 @@ def _growing_decay() -> dict:
             },
             **_GROWING_STAGES,
         ),
-        _GROWING_DECAY_DAYS,
+        _GROWING_DECAY_SLOW_DAYS,
         92,
     )
     for key in ("pollutants", "additive_pollutants", "non_additive_pollutants"):
         del mapping[key]  # WSIMOD's default 12 (constants.py:79-92)
+    return mapping
+
+
+_GROWING_LEAN_SOIL_DAYS = 60
+
+
+def _growing_lean_soil() -> dict:
+    """Task 9b: the WSIMOD branches ``growing_spring`` does not reach, on two autumn-sown
+    surfaces (sown on raw day 274, the first date, so a crop from day 1; ``land.py:1346-1349``).
+
+    ``rye`` is lean: its soil water holds no phosphate and its soil no inorganic P
+    (``initial_soil_storage`` with phosphate 0, its organic P in the fast pool), and no ``srp``
+    arrives. It starts below its wilting point (59 mm against 60 mm of a narrow 0.12-0.14 band)
+    and gets no rain for 20 days: the soil moisture factor is 0
+    (``calc_soil_moisture_dependence_factor/wilted``, ``:1845``), so nothing mineralises,
+    adsorption finds no P (``adsorption/empty``, ``:2176``) and the crop has no water to take
+    nutrients from (``calc_crop_uptake/available_water``, ``:1899``). Once the seasonal rain
+    (:func:`_growing_forcing`) wets it, the mineralisation makes the dissolved P's increase
+    positive (``soil_pool_transformation/inorganic_P``, ``:1781``), and with no adsorbed P the
+    Freundlich step takes its shortcut and prints (``adsorption/shortcut``, ``:2191-2195``).
+
+    ``clover`` is rich: 600 kg of adsorbed P desorb (``adsorption/adsorb`` false, ``:2252``).
+    Three hot days (air at 45 degC on days 1-3) warm both soils above 25 degC, which caps the
+    autumn uptake's temperature function at 1 (``calc_crop_uptake/temperature_cap``,
+    ``:1877``)."""
+    months = _GROWING_LEAN_SOIL_DAYS // 28 + 1
+    lean = {
+        key: 0.0 if key[0].startswith("srp-") else value
+        for key, value in _monthly(_GROWING_INPUTS, "2003-10", months).items()
+    }
+    autumn = {"sowing_day": 274, "harvest_day": 250, **_SPRING_STAGES}
+    mapping = _nutrient_land(
+        _growing(
+            "rye",
+            area=1e4,
+            rooting_depth=0.5,
+            field_capacity=0.14,
+            wilting_point=0.12,
+            ET_depletion_factor=0.5,
+            infiltration_capacity=0.01,
+            initial_storage={**_soil_water(590.0, 12.0), "phosphate": 0.0},
+            initial_soil_storage={**_SOIL, "phosphate": 0.0},
+            data_input_dict=lean,
+            **autumn,
+        ),
+        _GROWING_LEAN_SOIL_DAYS,
+        93,
+    )
+    mapping["nodes"][0]["surfaces"].append(
+        _growing(
+            "clover",
+            area=5000.0,
+            rooting_depth=0.5,
+            ET_depletion_factor=0.5,
+            infiltration_capacity=0.01,
+            initial_storage=_soil_water(700.0, 12.0),
+            initial_soil_storage={**_SOIL, "phosphate": 600.0},
+            data_input_dict=_monthly(_GROWING_INPUTS, "2003-10", months),
+            **autumn,
+        )
+    )
+    forcing = mapping["nodes"][0]["data_input_dict"]
+    for k, date in enumerate(mapping["dates"][:20]):
+        forcing[("precipitation", date)] = 0.0
+        if 1 <= k <= 3:
+            forcing[("temperature", date)] = 45.0
     return mapping
 
 
@@ -1696,6 +1780,108 @@ def _growing_default_depletion() -> dict:
         "arcs": [_arc("land_to_brook", "land", "brook"), _arc("brook_to_sea", "brook", "sea")],
         "orchestration": [{"Land": "run"}],
     }
+
+
+# --- the zero-N crash cases (Task 9b; D13, Y48) -------------------------------------------------
+_ZERO_N_DAYS = 10
+
+
+def _zero_n(
+    *,
+    volume: float,
+    rain_on_day_0: bool,
+    nitrite: float = 0.0,
+    dry_deposition: bool = False,
+    sowing_day: int = 90,
+) -> dict:
+    """D13's zero-N recipe: one growing surface (the eight pollutants, from 2003-10-01, raw day
+    274) whose tank holds no ammonia, nitrate or organic N (``nitrite`` only, if any) and no
+    soil store, with zero fertiliser and manure in its first month (``land.py:1649-1710``) and
+    no deposition unless ``dry_deposition`` (``nhx-dry`` present, ``:375-376``; the dry data
+    non-zero, the wet zero). It rains 10 mm on day 0 when ``rain_on_day_0``, on none of days
+    1-4 and on every day from day 5; ``ET_depletion_factor = 0.5`` keeps L3 away. The day's
+    calls run in WSIMOD's order (``:1275-1291``), so which division raises first is the
+    recipe's."""
+    dates = _land_dates(_ZERO_N_DAYS)
+    variables = (*_DEPOSITION, *_GROWING_INPUTS[6:]) if dry_deposition else _GROWING_INPUTS[6:]
+    data = _monthly(variables, "2003-10", 1)
+    for key in data:
+        if not (dry_deposition and key[0].endswith("-dry")):
+            data[key] = 0.0
+    water = _soil_water(volume)
+    water.update({"ammonia": 0.0, "nitrate": 0.0, "org-nitrogen": 0.0, "nitrite": nitrite})
+    forcing = {}
+    for k, date in enumerate(dates):
+        wet = (k == 0 and rain_on_day_0) or k >= 5
+        forcing[("precipitation", date)] = 0.01 if wet else 0.0
+        forcing[("et0", date)] = 0.002
+        forcing[("temperature", date)] = 10.0 + (k % 3)
+    surface = _growing(
+        "wheat",
+        area=1e4,
+        rooting_depth=0.5,
+        ET_depletion_factor=0.5,
+        sowing_day=sowing_day,
+        harvest_day=250,
+        infiltration_capacity=0.02,
+        initial_storage=water,
+        data_input_dict=data,
+        **_SPRING_STAGES,
+    )
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [surface],
+                forcing,
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+def _growing_no_din() -> dict:
+    """L5: rain on day 0 passes through the soil, so ``ihacres`` pulls the subsurface flow
+    from the tank (``land.py:985-996``) and ``pull_storage`` splits the extracted DIN by the
+    tank's ``nitrate + ammonia + nitrite = 0`` (``:1459-1485``): ``ZeroDivisionError`` at
+    ``:1460``. noodl sets the species to 0 and records ``"pull_storage_no_din"``."""
+    return _zero_n(volume=1400.0, rain_on_day_0=True)
+
+
+def _growing_zero_n() -> dict:
+    """L6 (Y48): no rain on day 0, so ``ihacres`` evaporates instead of pulling, and the first
+    zero DIN met is ``soil_pool_transformation``'s ``nitrate / (nitrate + ammonia)``
+    (``land.py:1758``). noodl uses the proportion 0 and records ``"transformation_no_din"``."""
+    return _zero_n(volume=1400.0, rain_on_day_0=False)
+
+
+def _growing_nitrite_only() -> dict:
+    """L6 with a tank holding only nitrite: ``pull_storage``'s denominator counts nitrite, the
+    transformation's ignores it (``land.py:1758``), which raises as in ``growing_zero_n``."""
+    return _zero_n(volume=1400.0, rain_on_day_0=False, nitrite=0.25)
+
+
+def _growing_empty_soil() -> dict:
+    """L7 (Y48): an empty tank (``V = 0``) sown on day 274 (the first date, so
+    ``days_after_sow`` is 0 there and 1 on day 1); the dry deposition puts N into the tank at
+    volume 0 (call order 2, ``land.py:375-376``, ``:2267-2288``), so the transformation's
+    proportion is defined, and on day 1 the crop uptake divides by the volume (``:1899``).
+    ``ET_depletion_factor = 0.5`` keeps L3 away (Y48); no rain before day 5. noodl takes no
+    uptake and records ``"crop_uptake_dry_soil"``."""
+    return _zero_n(volume=0.0, rain_on_day_0=False, dry_deposition=True, sowing_day=274)
 
 
 def _land_percolation_threshold() -> dict:
@@ -2868,34 +3054,56 @@ CASES: dict[str, Case] = {
     ),
     "surface_deposition": Case(
         build=_surface_deposition,
-        days=_SURFACE_DEPOSITION_DAYS,
+        # Task 9b (W15): 180 days by default (six month boundaries, the year end and 29
+        # February 2004, day 151); the 15 months under slow; the bookkeeping on 90
+        days=180,
         scale=300.0,
         replay=("suburb",),
+        slow_days=_SURFACE_DEPOSITION_DAYS,
+        bookkeeping_days=90,
     ),
     "growing_no_nitrate": Case(
         build=_growing_no_nitrate,
-        days=_GROWING_DAYS,
+        # Task 9b (W15): one year by default, past the harvest (run day 341); 540 under slow;
+        # the bookkeeping on 250 (sown on run day 182)
+        days=365,
         scale=2000.0,
         replay=("land",),
+        slow_days=_GROWING_DAYS,
+        bookkeeping_days=250,
     ),
     "growing_spring": Case(
         build=_growing_spring,
-        days=_GROWING_DAYS,
+        days=_GROWING_SPRING_DAYS,
         scale=2000.0,
         replay=("land",),
         slow_days=_GROWING_SLOW_DAYS,
+        bookkeeping_days=250,  # Y68: sown on 182, the uptake caps by 217
     ),
     "growing_autumn": Case(
         build=_growing_autumn,
         days=_GROWING_AUTUMN_DAYS,
         scale=2000.0,
         replay=("land",),
+        slow_days=_GROWING_AUTUMN_SLOW_DAYS,
+        bookkeeping_days=60,
     ),
     "growing_decay": Case(
         build=_growing_decay,
         days=_GROWING_DECAY_DAYS,
         scale=2000.0,
         replay=("land",),
+        slow_days=_GROWING_DECAY_SLOW_DAYS,
+        bookkeeping_days=60,
+    ),
+    "growing_lean_soil": Case(
+        build=_growing_lean_soil,
+        days=_GROWING_LEAN_SOIL_DAYS,
+        scale=2000.0,
+        replay=("land",),
+        # pollutants only: WSIMOD prints its shortcut warning, the event of noodl's pool, which
+        # a quantity-only run does not have
+        modes=("pollutants",),
     ),
     "deposition_non_additive": Case(
         build=_deposition_non_additive,
@@ -2910,6 +3118,44 @@ CASES: dict[str, Case] = {
         wsimod=False,
         crash=("ZeroDivisionError", "land.py:1566"),
         crash_day=11,
+    ),
+    # D13, Y48: the zero-N crashes (L5-L7), nitrate cases, so pollutants only: a quantity-only
+    # run has no pool, hence neither the division nor its event
+    "growing_no_din": Case(
+        build=_growing_no_din,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1460"),
+        crash_day=0,
+    ),
+    "growing_zero_n": Case(
+        build=_growing_zero_n,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1758"),
+        crash_day=0,
+    ),
+    "growing_nitrite_only": Case(
+        build=_growing_nitrite_only,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1758"),
+        crash_day=0,
+    ),
+    "growing_empty_soil": Case(
+        build=_growing_empty_soil,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1899"),
+        crash_day=1,
     ),
     "land_percolation_threshold": Case(
         build=_land_percolation_threshold,
