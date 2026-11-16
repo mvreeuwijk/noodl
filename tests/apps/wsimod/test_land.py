@@ -1746,3 +1746,23 @@ def test_an_override_on_a_renamed_surface_is_found_by_its_old_name():
     over = _surface_override(_dep_mapping(new), surface="renamed", data_input_dict=dict(new))
     surface = read_wsimod_config(over).nodes[0].surfaces[0]
     assert surface.name == "renamed" and len(surface.data) == len(new)
+
+
+def test_a_load_override_leaves_no_trace_in_wsimods_defaults():
+    """L14: WSIMOD's load override mutates ``Surface.__init__``'s shared default ``{}``; the
+    package's autouse fixture restores it, so the next build starts pristine."""
+    pytest.importorskip("wsimod")
+    from wsimod.nodes.land import Surface
+
+    from tests.verification._wsimod_reference import (
+        _CONSTRUCTOR_DEFAULTS,
+        _restore_constructor_defaults,
+        wsimod_model,
+    )
+
+    over = _surface_override(_dep_mapping({}), pollutant_load={"phosphate": 1e-6})
+    wsimod_model(over)
+    assert Surface.__init__.__defaults__ != _CONSTRUCTOR_DEFAULTS[Surface.__init__][0]  # mutated
+    _restore_constructor_defaults()  # what the fixture does after each test
+    assert Surface.__init__.__defaults__ == _CONSTRUCTOR_DEFAULTS[Surface.__init__][0]
+    assert Surface.__init__.__defaults__[-1] is not None
