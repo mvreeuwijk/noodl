@@ -1520,3 +1520,613 @@ def test_the_harness_captures_and_replays_the_pool():
     plain = wsimod_model(_mapping([_complete()], lists=_LISTS)).nodes["land"]
     plain.monthyear = to_datetime("2000-01")
     assert not [k for k in call_forcing(plain) if k.startswith("forcing.surfaces.")]
+
+
+# --- the soil factors, the transformation, crop uptake and denitrification (Task 7) -------------
+# land.py:1744-1926, :2096-2152. Every fixture is random, so that an operation taken in another
+# order (an association, a factor moved) gives another float, and is compared bitwise against a
+# live WSIMOD GrowingSurface.
+_SOIL_SCALARS = (
+    "satact",
+    "thetaupp",
+    "thetalow",
+    "thetapow",
+    "uptake1",
+    "uptake2",
+    "uptake3",
+    "uptake_PNratio",
+    "limpar",
+    "exppar",
+    "hsatINs",
+    "denpar",
+)
+_SOIL_BUILT = ("area", "rooting_depth", "field_capacity", "wilting_point")
+_SOIL_PROCESSES = (
+    "calc_temperature_dependence_factor",
+    "calc_soil_moisture_dependence_factor",
+    "soil_pool_transformation",
+    "calc_crop_uptake",
+    "denitrification",
+)
+_RATES = ("degrhpar", "dishpar", "minfpar", "disfpar", "immobdpar")
+S7 = "node:land/surfaces.g"
+
+
+def _soil_parameters(rng) -> dict:
+    return {
+        "area": rng.uniform(5.0, 50.0),
+        "rooting_depth": rng.uniform(0.4, 1.6),
+        "field_capacity": rng.uniform(0.25, 0.39),
+        "wilting_point": rng.uniform(0.05, 0.2),
+        "satact": rng.uniform(0.3, 0.9),
+        "thetaupp": rng.uniform(0.05, 0.2),
+        "thetalow": rng.uniform(0.04, 0.15),
+        "thetapow": rng.uniform(0.6, 2.4),
+        "uptake1": rng.uniform(5.0, 25.0),
+        "uptake2": rng.uniform(0.5, 3.0),
+        "uptake3": rng.uniform(0.005, 0.05),
+        "uptake_PNratio": rng.uniform(0.05, 0.3),
+        "limpar": rng.uniform(0.4, 0.8),
+        "exppar": rng.uniform(1.2, 3.1),
+        "hsatINs": rng.uniform(0.3, 3.0),
+        "denpar": rng.uniform(0.005, 0.05),
+    }
+
+
+def _soil_pair(parameters: dict, **structure):
+    """WSIMOD's surface (its built parameters through the constructor, the rest set as
+    attributes, as ``apply_overrides`` does) and noodl's, from the same values."""
+    built = {k: parameters[k] for k in _SOIL_BUILT if k != "area" and k in parameters}
+    theirs = _wsimod_nutrient(
+        {"volume": 1.0}, area=parameters.get("area", 1.0), **built, **structure
+    )
+    for name in _SOIL_SCALARS:
+        if name in parameters:
+            setattr(theirs, name, parameters[name])
+    land = _nutrient_land(**parameters, **structure)
+    return theirs, land, land.surfaces[0]
+
+
+def _set_state(theirs, ours, tank, pools, *, tdf=None, smdf=None, days=None) -> None:
+    theirs.storage = dict(tank)
+    ours.storage = NUT.to_vqip(tank)
+    _set_their_pools(theirs, pools)
+    ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+    if tdf is not None:
+        theirs.nutrient_pool.temperature_dependence_factor = tdf
+        ours.nutrient_pool.temperature_dependence_factor = torch.tensor(tdf, dtype=F64)
+    if smdf is not None:
+        theirs.nutrient_pool.soil_moisture_dependence_factor = smdf
+        ours.nutrient_pool.soil_moisture_dependence_factor = torch.tensor(smdf, dtype=F64)
+    if days is not None:
+        theirs.days_after_sow = None if days < 0 else days
+        ours.days_after_sow = torch.tensor(float(days), dtype=F64)
+
+
+def _assert_same(theirs, ours, their_pair, our_pair, label) -> None:
+    for their, our in zip(their_pair, our_pair, strict=True):
+        assert torch.equal(our, _vector(their)), label
+    assert torch.equal(ours.storage, _vector(theirs.storage)), label
+    assert torch.equal(ours.nutrient_pool.storage, _their_pools(theirs)), label
+
+
+def _seen(ctx, seen: dict) -> None:
+    for d in ctx.decisions:
+        if bool(d.active):
+            seen.setdefault(d.site, set()).add(bool(d.outcome))
+
+
+def test_the_soil_processes_follow_wsimods_list():
+    """D20: ``processes`` is WSIMOD's (``land.py:1283-1291``) without the later tasks' erosion
+    and adsorption, so each process is at its place; the factors have no part, the other three
+    have theirs (Y57)."""
+    from noodl.apps.wsimod.land import NO_PART, PART_NAMES
+
+    theirs, _, ours = _soil_pair({})
+    names = [f.__name__ for f in theirs.processes if f.__name__ not in ("erosion", "adsorption")]
+    assert [f.__name__ for f in ours.processes] == names
+    assert names[1:] == list(_SOIL_PROCESSES)
+    assert {"calc_temperature_dependence_factor", "calc_soil_moisture_dependence_factor"} <= NO_PART
+    assert PART_NAMES["soil_pool_transformation"] == "GrowingSurface.soil_pool_transformation"
+    assert PART_NAMES["calc_crop_uptake"] == "GrowingSurface.calc_crop_uptake"
+    assert PART_NAMES["denitrification"] == "GrowingSurface.denitrification"
+
+
+def test_the_soil_factors_equal_wsimods():
+    """``land.py:1813-1856`` (L12, Y19), bitwise, on random parameters, every temperature of
+    ``{-1, 0, 2.5, 4.9, 5, 5.000001, 15, 25}`` and soil moisture at, between and beyond the
+    wilting point and field capacity. The temperature factor jumps at 5 °C and is larger at
+    4.9 °C than at 15 °C; ``min(1, wp_comp, fc_comp)`` is Python's, its two decisions in
+    Python's order, each ``b < a``."""
+    rng = random.Random(31)
+    temperatures = (-1.0, 0.0, 2.5, 4.9, 5.0, 5.000001, 15.0, 25.0)
+    seen: dict = {}
+    for _ in range(4):
+        parameters = _soil_parameters(rng)
+        theirs, land, ours = _soil_pair(parameters)
+        fc_m, wp_m, area = theirs.field_capacity_m, theirs.wilting_point_m, parameters["area"]
+        assert float(ours.field_capacity_m) == fc_m and float(ours.wilting_point_m) == wp_m
+        moistures = [wp_m * 0.5, wp_m, fc_m, fc_m * 1.2]
+        moistures += [rng.uniform(wp_m, fc_m) for _ in range(25)]
+        for temperature in (*temperatures, rng.uniform(-3.0, 30.0)):
+            for smc in moistures:
+                tank = {**_random_tank(rng, volume=smc * area), "temperature": temperature}
+                _set_state(theirs, ours, tank, [[0.0, 0.0]] * 5)
+                ctx = _nut_ctx(land)
+                empty = theirs.empty_vqip()
+                assert theirs.calc_temperature_dependence_factor() == (empty, empty)
+                assert theirs.calc_soil_moisture_dependence_factor() == (empty, empty)
+                for name in _SOIL_PROCESSES[:2]:
+                    in_, out_ = getattr(ours, name)(active=TRUE)
+                    assert not in_.any() and not out_.any()
+                pool, their_pool = ours.nutrient_pool, theirs.nutrient_pool
+                label = (temperature, smc)
+                tdf = float(pool.temperature_dependence_factor)
+                assert tdf == their_pool.temperature_dependence_factor, label
+                smdf = float(pool.soil_moisture_dependence_factor)
+                assert smdf == their_pool.soil_moisture_dependence_factor, label
+                for d in ctx.decisions:  # the three-way min's decisions are each b < a
+                    if d.site.endswith("/min:wp") and bool(d.active):
+                        wp = theirs.storage["volume"] / area - wp_m
+                        wp_comp = wp / (parameters["thetalow"] * parameters["rooting_depth"])
+                        wp_comp = wp_comp ** parameters["thetapow"]
+                        assert bool(d.outcome) == (wp_comp < 1)
+                _seen(ctx, seen)
+        for _ in range(100):  # random temperatures: (T - 20) / 10 and Python's 2 ** x
+            temperature = rng.uniform(-3.0, 40.0)
+            _set_state(
+                theirs, ours, {**_random_tank(rng), "temperature": temperature}, [[0, 0]] * 5
+            )
+            ctx = _nut_ctx(land)
+            theirs.calc_temperature_dependence_factor()
+            ours.calc_temperature_dependence_factor(active=TRUE)
+            their_factor = theirs.nutrient_pool.temperature_dependence_factor
+            assert float(ours.nutrient_pool.temperature_dependence_factor) == their_factor
+    for branch in ("saturated", "wilted", "min:wp", "min:fc"):
+        assert seen[f"{S7}/calc_soil_moisture_dependence_factor/{branch}"] == {True, False}
+    for branch in ("warm", "thawed"):
+        assert seen[f"{S7}/calc_temperature_dependence_factor/{branch}"] == {True, False}
+    # L12: the values either side of 5 °C, and the ties of the moisture factor (area 2: exact)
+    theirs, land, ours = _soil_pair({"area": 2.0, "rooting_depth": 0.9})
+    factors = {}
+    for temperature in temperatures:
+        _set_state(theirs, ours, {**_random_tank(rng), "temperature": temperature}, [[0, 0]] * 5)
+        _nut_ctx(land)
+        ours.calc_temperature_dependence_factor(active=TRUE)
+        factors[temperature] = float(ours.nutrient_pool.temperature_dependence_factor)
+    assert factors[-1.0] == factors[0.0] == 0.0 and factors[2.5] == 0.5
+    assert factors[4.9] == 4.9 / 5 and factors[5.0] == 1.0
+    assert factors[5.000001] == 2 ** ((5.000001 - 20) / 10)
+    assert factors[15.0] == 2 ** (-0.5) and factors[15.0] < factors[4.9]
+    assert factors[25.0] == 2**0.5
+    for smc, expected in ((ours.field_capacity_m, 0.6), (ours.wilting_point_m, 0.0)):
+        volume = float(smc) * 2.0
+        assert volume / 2.0 == float(smc)
+        _set_state(theirs, ours, _random_tank(rng, volume=volume), [[0, 0]] * 5)
+        ctx = _nut_ctx(land)
+        ours.calc_soil_moisture_dependence_factor(active=TRUE)
+        theirs.calc_soil_moisture_dependence_factor()
+        assert float(ours.nutrient_pool.soil_moisture_dependence_factor) == expected
+        assert theirs.nutrient_pool.soil_moisture_dependence_factor == expected
+
+
+def _random_pools(rng, *, scale=1.0) -> list[list[float]]:
+    return [[rng.uniform(0.0, scale), rng.uniform(0.0, scale)] for _ in POOLS]
+
+
+def _random_rates(rng, theirs, ours) -> None:
+    rates = {name: (rng.uniform(0.0, 0.6), rng.uniform(0.0, 0.6)) for name in _RATES}
+    for name, (n, p) in rates.items():
+        setattr(theirs.nutrient_pool, name, {"N": n, "P": p})
+    pool = ours.nutrient_pool
+    pool.bind(
+        {
+            "fraction_manure_to_dissolved_inorganic": pool.fraction_manure_to_dissolved_inorganic,
+            "fraction_dry_n_to_dissolved_inorganic": pool.fraction_dry_n_to_dissolved_inorganic,
+            **{name: torch.tensor(pair, dtype=F64) for name, pair in rates.items()},
+        }
+    )
+
+
+def test_soil_pool_transformation_equals_wsimods():
+    """``land.py:1744-1811`` with ``np.py:396-481``, bitwise, on 300 random tanks, pools, rates
+    and factors: each of the four signs both ways, an increase of exactly 0 (a zero factor)
+    taking the ``else`` branches (rule 6), and tanks smaller than the ``out_`` (clamped)."""
+    rng = random.Random(37)
+    theirs, land, ours = _soil_pair(_soil_parameters(rng))
+    seen: dict = {}
+    zero = clamped = 0
+    for k in range(300):
+        tank = _random_tank(rng)
+        if k % 5 == 0:
+            tank.update(ammonia=rng.uniform(0.0, 1e-3), phosphate=rng.uniform(0.0, 1e-3))
+        tdf = 0.0 if k % 17 == 0 else rng.uniform(0.0, 1.0)
+        _set_state(theirs, ours, tank, _random_pools(rng), tdf=tdf, smdf=rng.uniform(0.0, 1.0))
+        _random_rates(rng, theirs, ours)
+        ctx = _nut_ctx(land)
+        their = theirs.soil_pool_transformation()
+        ours_ = ours.soil_pool_transformation(active=TRUE)
+        _assert_same(theirs, ours, their, ours_, k)
+        zero += tdf == 0.0
+        clamped += bool(ctx.events["nutrient_pool_not_tracking"]["land"])
+        if tdf == 0.0:
+            for branch in ("inorganic_N", "organic_N", "inorganic_P", "organic_P"):
+                (d,) = [d for d in ctx.decisions if d.site.endswith(f"transformation/{branch}")]
+                assert not bool(d.outcome) and float(d.margin) == 0.0
+            assert not ours_[0].any()
+        _seen(ctx, seen)
+        assert not bool(ctx.events["transformation_no_din"]["land"])
+    for branch in ("inorganic_N", "organic_N", "inorganic_P", "organic_P"):
+        assert seen[f"{S7}/soil_pool_transformation/{branch}"] == {True, False}
+    assert zero and clamped
+
+
+def test_the_transformation_without_din_sends_the_change_to_ammonia():
+    """L6, Y18: ``nitrate + ammonia = 0``. WSIMOD raises ``ZeroDivisionError`` at
+    ``land.py:1758``; noodl uses the proportion 0, so the whole change in dissolved inorganic N
+    is ammonia, and records ``"transformation_no_din"``."""
+    import traceback
+
+    rng = random.Random(43)
+    theirs, land, ours = _soil_pair(_soil_parameters(rng))
+    for sign, rates in ((1, (0.5, 0.0)), (-1, (0.0, 0.5))):  # mineralisation, immobilisation
+        tank = {**_random_tank(rng), "nitrate": 0.0, "ammonia": 0.0}
+        _set_state(theirs, ours, tank, _random_pools(rng), tdf=0.7, smdf=0.8)
+        _random_rates(rng, theirs, ours)
+        theirs.nutrient_pool.minfpar = {"N": rates[0], "P": 0.1}
+        theirs.nutrient_pool.immobdpar = {"N": rates[1], "P": 0.1}
+        values = {
+            name: getattr(ours.nutrient_pool, name)
+            for name in (*_RATES, "fraction_manure_to_dissolved_inorganic")
+        }
+        values.update(
+            minfpar=torch.tensor([rates[0], 0.1], dtype=F64),
+            immobdpar=torch.tensor([rates[1], 0.1], dtype=F64),
+            fraction_dry_n_to_dissolved_inorganic=torch.tensor(0.9, dtype=F64),
+        )
+        ours.nutrient_pool.bind(values)
+        with pytest.raises(ZeroDivisionError) as raised:
+            theirs.soil_pool_transformation()
+        frame = traceback.extract_tb(raised.value.__traceback__)[-1]
+        assert frame.filename.endswith("land.py") and frame.lineno == 1758
+        ctx = _nut_ctx(land)
+        before = ours.nutrient_pool.storage.clone()
+        in_, out_ = ours.soil_pool_transformation(active=TRUE)
+        change = ours.nutrient_pool.storage[DI, 0] - before[DI, 0]
+        assert bool(ctx.events["transformation_no_din"]["land"])
+        tracking = bool(ctx.events["nutrient_pool_not_tracking"]["land"])
+        if sign > 0:  # the increase enters, all of it as ammonia
+            assert float(in_[NUT.column("nitrate")]) == 0.0
+            assert float(in_[NUT.column("ammonia")]) == float(change) > 0.0
+            assert not tracking
+        else:  # the decrease is requested as ammonia, which the tank does not have: clamped
+            assert float(change) < 0.0
+            assert float(out_[NUT.column("nitrate")]) == float(out_[NUT.column("ammonia")]) == 0
+            assert tracking
+        assert torch.isfinite(in_).all() and torch.isfinite(out_).all()
+
+
+def test_a_clamped_pull_records_the_event():
+    """L10 (D19): an ``out_`` larger than the tank's column. ``pull_pollutants`` clamps, the
+    returned ``out_`` is the clamped one (WSIMOD's too: it mutates its argument, so its
+    ``compare_vqip`` is dead), and ``"nutrient_pool_not_tracking"`` is true. With the tank
+    above the request it is false."""
+    rng = random.Random(47)
+    theirs, land, ours = _soil_pair(_soil_parameters(rng))
+    for small in (True, False):
+        tank = _random_tank(rng)
+        tank.update(nitrate=1e-7, ammonia=1e-7) if small else tank.update(nitrate=5.0, ammonia=5.0)
+        pools = _random_pools(rng)
+        pools[DI] = [2.0, 0.01]
+        _set_state(theirs, ours, tank, pools, tdf=0.9, smdf=0.9)
+        _random_rates(rng, theirs, ours)
+        theirs.nutrient_pool.immobdpar["N"] = 0.5
+        ours.nutrient_pool.immobdpar = torch.tensor(
+            [0.5, float(ours.nutrient_pool.immobdpar[1])], dtype=F64
+        )
+        ctx = _nut_ctx(land)
+        their = theirs.soil_pool_transformation()
+        in_, out_ = ours.soil_pool_transformation(active=TRUE)
+        _assert_same(theirs, ours, their, (in_, out_), small)
+        ammonia = float(out_[NUT.column("ammonia")])
+        assert bool(ctx.events["nutrient_pool_not_tracking"]["land"]) is small
+        if small:
+            for name in ("nitrate", "ammonia"):
+                assert float(out_[NUT.column(name)]) == 1e-7
+                assert float(ours.storage[NUT.column(name)]) == 0.0
+        else:
+            assert ammonia > 1e-3
+
+
+def _uptake_scale(parameters, days, autumn) -> float:
+    """The size of the day's common uptake (only to scale the random pools)."""
+    u1, u2, u3 = (parameters[f"uptake{i}"] for i in (1, 2, 3))
+    d = days - 25 if autumn else days
+    par = (u1 - u2) * math.exp(-u3 * d)
+    total = u2 + par
+    shape = u1 * u2 * u3 * par / total**2 if total > 0 else 0.0
+    return abs(shape) * 1e-3 * parameters["area"] + 1e-6
+
+
+@pytest.mark.parametrize("season", ["spring", "autumn"])
+def test_calc_crop_uptake_equals_wsimods(season):
+    """``land.py:1858-1926``, bitwise, on random parameters, days, temperatures, tanks and
+    pools: every cap binds on some draw and not on others, autumn's ``temp_func = max(0,
+    min(1, (T - 5) / 20))`` and ``days_after_sow - 25``, ``uptake_par + uptake2 <= 0``
+    skipping the shape (a negative ``uptake1``), no crop (``None`` and the sowing day 0), the
+    available water ``max`` both ways. All the uptake leaves as nitrate, and the dissolved
+    inorganic pool is extracted P first, then N."""
+    autumn = season == "autumn"
+    rng = random.Random(53 if autumn else 59)
+    seen: dict = {}
+    order_checked = False
+    for j in range(6):
+        parameters = _soil_parameters(rng)
+        if j == 5:
+            parameters["uptake1"] = -rng.uniform(2.0, 6.0)
+        theirs, land, ours = _soil_pair(parameters, sowing_day=250 if autumn else 90)
+        assert theirs.autumn_sow is autumn and ours.autumn_sow is autumn
+        wp_volume = theirs.wilting_point_m * parameters["area"]
+        for k in range(60):
+            days = (-1, 0)[k] if k < 2 else rng.randint(1, 40 if k % 3 else 300)
+            temperature = rng.uniform(-5.0, 32.0)
+            tank = {**_random_tank(rng, volume=wp_volume * rng.uniform(0.6, 1.6))}
+            tank["temperature"] = temperature
+            scale = _uptake_scale(parameters, max(days, 1), autumn)
+            pools = _random_pools(rng)
+            pools[DI] = [scale * rng.uniform(0.0, 4.0), scale * rng.uniform(0.0, 1.0)]
+            if k % 4 == 0:
+                tank["nitrate"] = scale * rng.uniform(0.0, 0.2)  # the tank clamps
+            _set_state(theirs, ours, tank, pools, days=days)
+            ctx = _nut_ctx(land)
+            their = theirs.calc_crop_uptake()
+            in_, out_ = ours.calc_crop_uptake(active=TRUE)
+            _assert_same(theirs, ours, their, (in_, out_), (j, k))
+            assert not in_.any()
+            others = [n for n in NUT.names if n not in ("nitrate", "phosphate")]
+            assert not any(float(out_[NUT.column(n)]) for n in others)
+            sites = [d.site for d in ctx.decisions if "dissolved_inorganic_pool/extract" in d.site]
+            if sites:
+                di = f"{S7}.nutrient_pool.dissolved_inorganic_pool/extract"
+                assert sites == [f"{di}/clip:P", f"{di}/clip:N"]
+                order_checked = True
+            _seen(ctx, seen)
+            assert not bool(ctx.events["crop_uptake_dry_soil"]["land"])
+    branches = ["crop", "shape", "available_water", "cap:P", "cap:N", "dry_soil"]
+    if autumn:
+        branches += ["temperature_cap", "temperature_floor"]
+    else:
+        assert not [s for s in seen if "temperature_" in s]
+    for branch in branches:
+        expected = {False} if branch == "dry_soil" else {True, False}
+        assert seen[f"{S7}/calc_crop_uptake/{branch}"] == expected, branch
+    assert seen[f"{S7}/pull_pollutants/clip:nitrate"] == {True, False}
+    assert order_checked
+    if autumn:  # the tie uptake_par + uptake2 == 0 (uptake1 = 0, d = 25 - 25) skips the shape
+        theirs, land, ours = _soil_pair({**_soil_parameters(rng), "uptake1": 0.0}, sowing_day=250)
+        tank = {**_random_tank(rng), "temperature": 15.0}
+        _set_state(theirs, ours, tank, _random_pools(rng, scale=1e-3), days=25)
+        ctx = _nut_ctx(land)
+        their = theirs.calc_crop_uptake()
+        in_, out_ = ours.calc_crop_uptake(active=TRUE)
+        _assert_same(theirs, ours, their, (in_, out_), "tie")
+        (d,) = [d for d in ctx.decisions if d.site == f"{S7}/calc_crop_uptake/shape"]
+        assert not bool(d.outcome) and float(d.margin) == 0.0 and not out_.any()
+
+
+def test_crop_uptake_from_an_empty_soil_is_zero():
+    """L7, Y18: ``V = 0`` with a crop (``ET_depletion_factor = 0.5``, ``days_after_sow = 1``).
+    WSIMOD raises ``ZeroDivisionError`` at ``land.py:1899``; noodl gives ``N_max = P_max = 0``,
+    so nothing is taken up, and ``"crop_uptake_dry_soil"`` is true."""
+    import traceback
+
+    rng = random.Random(61)
+    parameters = {"ET_depletion_factor": 0.5, **_soil_parameters(rng)}
+    theirs, land, ours = _soil_pair(parameters)
+    theirs.ET_depletion_factor = 0.5
+    tank = {**_random_tank(rng, volume=0.0)}
+    pools = _random_pools(rng)
+    _set_state(theirs, ours, tank, pools, days=1)
+    with pytest.raises(ZeroDivisionError) as raised:
+        theirs.calc_crop_uptake()
+    frame = traceback.extract_tb(raised.value.__traceback__)[-1]
+    assert frame.filename.endswith("land.py") and frame.lineno == 1899
+    ctx = _nut_ctx(land)
+    in_, out_ = ours.calc_crop_uptake(active=TRUE)
+    assert not in_.any() and not out_.any()
+    assert torch.equal(ours.nutrient_pool.storage, torch.tensor(pools, dtype=F64))
+    assert bool(ctx.events["crop_uptake_dry_soil"]["land"])
+    (d,) = [d for d in ctx.decisions if d.site == f"{S7}/calc_crop_uptake/dry_soil"]
+    assert bool(d.outcome)
+
+
+def test_denitrification_equals_wsimods():
+    """``land.py:2096-2152``, bitwise, on random parameters, soils from below ``limpar`` to above
+    field capacity, tanks and pools: each branch, the clamped nitrate, and nothing at all where
+    ``smc / fc_m <= limpar``. At ``smc == fc_m`` (area 2: exact) the ratio branch is taken and
+    ``f == 1.0``."""
+    rng = random.Random(67)
+    seen: dict = {}
+    dry = 0
+    for _ in range(5):
+        parameters = _soil_parameters(rng)
+        theirs, land, ours = _soil_pair(parameters)
+        fc_volume = theirs.field_capacity_m * parameters["area"]
+        for k in range(60):
+            tank = _random_tank(rng, volume=fc_volume * rng.uniform(0.3, 1.3))
+            if k % 6 == 0:
+                tank["nitrate"] = rng.uniform(0.0, 1e-4)
+            pools = _random_pools(rng)
+            _set_state(theirs, ours, tank, pools, tdf=rng.uniform(0.0, 1.5))
+            ctx = _nut_ctx(land)
+            their = theirs.denitrification()
+            in_, out_ = ours.denitrification(active=TRUE)
+            _assert_same(theirs, ours, their, (in_, out_), k)
+            if tank["volume"] / parameters["area"] / theirs.field_capacity_m <= theirs.limpar:
+                dry += 1
+                assert not out_.any()
+                assert torch.equal(ours.nutrient_pool.storage, torch.tensor(pools, dtype=F64))
+            _seen(ctx, seen)
+    assert seen[f"{S7}/denitrification/saturated"] == {True, False}
+    assert seen[f"{S7}/denitrification/moist"] == {True, False}
+    assert seen[f"{S7}/pull_pollutants/clip:nitrate"] == {True, False}
+    assert dry
+    # the tie: smc == fc_m takes the ratio branch, ((1 - limpar) / (1 - limpar)) ** exppar = 1.0
+    parameters = {**_soil_parameters(rng), "area": 2.0}
+    theirs, land, ours = _soil_pair(parameters)
+    volume = theirs.field_capacity_m * 2.0
+    assert volume / 2.0 == theirs.field_capacity_m
+    pools = _random_pools(rng)
+    tank = {**_random_tank(rng, volume=volume), "nitrate": 5.0}  # no clamp
+    _set_state(theirs, ours, tank, pools, tdf=0.8)
+    ctx = _nut_ctx(land)
+    their = theirs.denitrification()
+    in_, out_ = ours.denitrification(active=TRUE)
+    _assert_same(theirs, ours, their, (in_, out_), "tie")
+    decisions = {d.site.rsplit("/", 1)[1]: bool(d.outcome) for d in ctx.decisions}
+    assert decisions["saturated"] is False and decisions["moist"] is True
+    limpar, exppar = parameters["limpar"], parameters["exppar"]
+    assert ((1.0 - limpar) / (1 - limpar)) ** exppar == 1.0
+    din = pools[DI][0]
+    conc = din / volume * 1e3
+    expected = din * (conc / (conc + parameters["hsatINs"])) * 1.0 * 0.8 * parameters["denpar"]
+    assert float(out_[NUT.column("nitrate")]) == expected
+
+
+def test_a_batch_of_soil_processes_equals_wsimods_instances():
+    """64 instances with their own parameters, tanks, pools and crop days, one of them masked:
+    the five processes in WSIMOD's order on the batch equal, instance by instance, a live
+    WSIMOD surface running the same five (bitwise), and the masked instance is unchanged.
+    Python's ``**`` and ``exp`` are evaluated per instance (torch's batched ``pow`` and ``exp``
+    can differ from them in the last bit)."""
+    rng = random.Random(71)
+    n = 64
+    draws = [_soil_parameters(rng) for _ in range(n)]
+    tanks, pools, days = [], [], []
+    for parameters in draws:
+        fc_volume = parameters["field_capacity"] * parameters["rooting_depth"] * parameters["area"]
+        tanks.append({**_random_tank(rng, volume=fc_volume * rng.uniform(0.5, 1.2))})
+        tanks[-1]["temperature"] = rng.uniform(1.0, 25.0)
+        pools.append(_random_pools(rng, scale=0.01))
+        days.append(rng.randint(1, 200))
+    active = torch.ones(n, dtype=torch.bool)
+    active[2] = False
+    land = _nutrient_land()
+    ours = land.surfaces[0]
+    ours.bind({k: torch.tensor([p[k] for p in draws], dtype=F64) for k in draws[0]})
+    ours.storage = torch.stack([NUT.to_vqip(t) for t in tanks])
+    ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+    ours.days_after_sow = torch.tensor(days, dtype=F64)
+    land.ctx = Ctx(NUT, FA, torch.Size((n,)), day=0, node_names=["land"])
+    results = [getattr(ours, name)(active=active) for name in _SOIL_PROCESSES]
+    for i in range(n):
+        if not bool(active[i]):
+            assert torch.equal(ours.storage[i], NUT.to_vqip(tanks[i]))
+            assert torch.equal(ours.nutrient_pool.storage[i], torch.tensor(pools[i], dtype=F64))
+            continue
+        theirs, _, _ = _soil_pair(draws[i])
+        theirs.storage = dict(tanks[i])
+        _set_their_pools(theirs, pools[i])
+        theirs.days_after_sow = days[i]
+        for name, (in_, out_) in zip(_SOIL_PROCESSES, results, strict=True):
+            their_in, their_out = getattr(theirs, name)()
+            assert torch.equal(in_[i], _vector(their_in)), (i, name)
+            assert torch.equal(out_[i], _vector(their_out)), (i, name)
+        assert torch.equal(ours.storage[i], _vector(theirs.storage)), i
+        assert torch.equal(ours.nutrient_pool.storage[i], _their_pools(theirs)), i
+
+
+def test_the_batched_factors_are_pythons_per_instance():
+    """The two factors and denitrification on a batch of 2000 soils equal WSIMOD's, instance by
+    instance: torch's batched ``pow`` differs from Python's ``2 ** x``, ``x ** thetapow`` and
+    ``x ** exppar`` in the last bit on about 1.6 % of values, so ``pow_python`` evaluates each
+    instance (Approach rule 1)."""
+    rng = random.Random(79)
+    parameters = _soil_parameters(rng)
+    theirs, land, ours = _soil_pair(parameters)
+    n, area = 2000, parameters["area"]
+    fc_m, wp_m = theirs.field_capacity_m, theirs.wilting_point_m
+    temperatures = [rng.uniform(-2.0, 40.0) for _ in range(n)]
+    volumes = [rng.uniform(wp_m * 0.9, fc_m * 1.1) * area for _ in range(n)]
+    pools = [_random_pools(rng) for _ in range(n)]
+    tank = {**_random_tank(rng), "nitrate": 5.0}
+    ours.storage = torch.stack(
+        [
+            NUT.to_vqip({**tank, "temperature": t, "volume": v})
+            for t, v in zip(temperatures, volumes, strict=True)
+        ]
+    )
+    land.ctx = Ctx(NUT, FA, torch.Size((n,)), day=0, node_names=["land"])
+    active = torch.ones(n, dtype=torch.bool)
+    ours.calc_temperature_dependence_factor(active=active)
+    ours.calc_soil_moisture_dependence_factor(active=active)
+    ours.nutrient_pool.storage = torch.tensor(pools, dtype=F64)
+    _, out_ = ours.denitrification(active=active)
+    tdf = ours.nutrient_pool.temperature_dependence_factor.tolist()
+    smdf = ours.nutrient_pool.soil_moisture_dependence_factor.tolist()
+    for i, (temperature, volume) in enumerate(zip(temperatures, volumes, strict=True)):
+        theirs.storage = {**tank, "temperature": temperature, "volume": volume}
+        theirs.calc_temperature_dependence_factor()
+        theirs.calc_soil_moisture_dependence_factor()
+        assert tdf[i] == theirs.nutrient_pool.temperature_dependence_factor, i
+        assert smdf[i] == theirs.nutrient_pool.soil_moisture_dependence_factor, i
+        _set_their_pools(theirs, pools[i])
+        assert torch.equal(out_[i], _vector(theirs.denitrification()[1])), i
+        assert torch.equal(ours.nutrient_pool.storage[i], _their_pools(theirs)), i
+
+
+def test_gradcheck_on_the_factors_and_uptake():
+    """Spec, Verification 4: the gradients of the two factors (through ``2 ** x``, ``T / 5`` and
+    ``** thetapow``) and of the uptake (through ``exp`` and ``** 2``), away from 0 °C, 5 °C and
+    the caps."""
+    land = _nutrient_land(area=20.0, sowing_day=90)
+    ours = land.surfaces[0]
+    base = {**_random_tank(random.Random(73), volume=6.0)}
+
+    def factors(temperature, volume, thetapow):
+        ours.bind({"thetapow": thetapow})
+        tank = NUT.to_vqip(base)
+        hot = torch.zeros(1 + NUT.K, dtype=torch.bool)
+        hot[NUT.column("temperature")] = True
+        hot0 = torch.zeros(1 + NUT.K, dtype=torch.bool)
+        hot0[0] = True
+        tank = torch.where(hot, temperature, torch.where(hot0, volume, tank))
+        ours.storage = tank
+        pool = ours.nutrient_pool
+        pool.temperature_dependence_factor = torch.tensor(0.0, dtype=F64)
+        pool.soil_moisture_dependence_factor = torch.tensor(0.0, dtype=F64)
+        _nut_ctx(land)
+        ours.calc_temperature_dependence_factor(active=TRUE)
+        ours.calc_soil_moisture_dependence_factor(active=TRUE)
+        return pool.temperature_dependence_factor, pool.soil_moisture_dependence_factor
+
+    wp_volume = float(ours.wilting_point_m) * 20.0
+    fc_volume = float(ours.field_capacity_m) * 20.0
+    for temperature in (2.3, 12.7):
+        inputs = (
+            torch.tensor(temperature, dtype=F64, requires_grad=True),
+            torch.tensor((wp_volume + fc_volume) / 2, dtype=F64, requires_grad=True),
+            torch.tensor(1.7, dtype=F64, requires_grad=True),
+        )
+        assert torch.autograd.gradcheck(factors, inputs)
+
+    def uptake(u1, u2, u3, din, dip):
+        ours.bind({"uptake1": u1, "uptake2": u2, "uptake3": u3})
+        ours.storage = NUT.to_vqip({**base, "nitrate": 1.0, "phosphate": 1.0})
+        ours.nutrient_pool.storage = torch.stack(
+            [torch.stack([din, dip]) if i == DI else torch.zeros(2, dtype=F64) for i in range(5)]
+        )
+        ours.days_after_sow = torch.tensor(30.0, dtype=F64)
+        _nut_ctx(land)
+        _, out_ = ours.calc_crop_uptake(active=TRUE)
+        return out_[NUT.column("nitrate")], out_[NUT.column("phosphate")]
+
+    inputs = tuple(
+        torch.tensor(v, dtype=F64, requires_grad=True) for v in (15.0, 1.3, 0.02, 1.0, 1.0)
+    )
+    assert torch.autograd.gradcheck(uptake, inputs)
+    # the caps: a small pool binds both, and the gradient reaches the pool
+    inputs = tuple(
+        torch.tensor(v, dtype=F64, requires_grad=True) for v in (15.0, 1.3, 0.02, 1e-4, 1e-5)
+    )
+    assert torch.autograd.gradcheck(uptake, inputs)

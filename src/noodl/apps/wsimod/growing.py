@@ -1,4 +1,5 @@
-"""``GrowingSurface`` (``wsimod/nodes/land.py:1082-1572``): the crop calendar and the crop cover.
+"""``GrowingSurface`` (``wsimod/nodes/land.py:1082-2312``): the crop calendar, the crop cover, the
+nutrient pool and the soil processes.
 
 A growing surface is a :class:`~noodl.apps.wsimod.land.PerviousSurface` whose physical depth is its
 ``rooting_depth`` (``:1192``, ``:1251``), with a sowing and harvest calendar, a crop factor, a crop
@@ -15,10 +16,21 @@ the surface's ``inflows`` (``:1275``) and writes the day's ``et0_coefficient``
 ``adjust_vqip_to_liquid`` (``:1574-1603``); its outputs so far are ``pull_storage``
 (``:1433-1493``), whose nutrient columns leave in the pool's proportions, and
 ``effective_precipitation_flushing`` (``:1605-1647``), which extracts the same outflows from the
-dissolved pools a second time (L8, reproduced: Y16, Y45). The soil processes after
-``calculate_soil_temperature`` are later tasks (D20). A tank with no inorganic N gives the three
-N species 0 in ``pull_storage``, where WSIMOD raises ``ZeroDivisionError`` (``:1460``; L5, Y18;
-the decision ``S/pull_storage/no_din`` and the event ``"pull_storage_no_din"``).
+dissolved pools a second time (L8, reproduced: Y16, Y45). A tank with no inorganic N gives the
+three N species 0 in ``pull_storage``, where WSIMOD raises ``ZeroDivisionError`` (``:1460``; L5,
+Y18; the decision ``S/pull_storage/no_din`` and the event ``"pull_storage_no_din"``).
+
+**The soil processes** run after ``calculate_soil_temperature``, in WSIMOD's list
+(``:1283-1291``; erosion and adsorption are later tasks, D20): the temperature and soil-moisture
+factors of the day (``:1813-1856``; the temperature factor jumps at 5 °C, L12, Y19), the pool's
+transformations scaled back into the tank (``:1744-1811``), crop uptake (``:1858-1926``) and
+denitrification (``:2096-2152``). Uptake and denitrification take all their N as nitrate (L9).
+Each pulls from the tank through :meth:`GrowingSurface._pull_tracked`, whose clamp records
+``"nutrient_pool_not_tracking"`` (L10). Python's ``**`` and ``exp`` are evaluated per instance
+(``pow_python``, ``exp_python``). Two zero denominators are guarded: ``nitrate + ammonia = 0`` in
+the transformation (proportion 0, ``"transformation_no_din"``, L6) and ``V = 0`` in the uptake
+(no available uptake, ``"crop_uptake_dry_soil"``, L7), where WSIMOD raises
+``ZeroDivisionError``.
 
 **The calendar is built at build time** (spec, Approach rule 2, D7).
 :meth:`GrowingSurface.set_dates` evaluates, for every date of the network and in WSIMOD's own
@@ -61,8 +73,13 @@ persist outside the season until the harvest resets them (``(...)`` tensors, wri
 caller's ``active`` mask). The decisions are ``S/calc_crop_cover/{unsown,crop,depletion,unstressed,
 stress_floor,stress_zero_denominator}``, ``S`` being ``node:N/surfaces.<s>``; with the pool,
 ``S/pull_storage/{empty,clip,no_din}`` and ``S/adjust_vqip_to_liquid/{N,P}`` (``call`` counts the
-dry, wet, fertiliser and manure calls in that order), and the pool's own
-``S.nutrient_pool.<pool>/extract/clip:<N|P>``.
+dry, wet, fertiliser and manure calls in that order), the pool's own
+``S.nutrient_pool.<pool>/extract/clip:<N|P>``, and the soil processes'
+``S/calc_temperature_dependence_factor/{warm,thawed}``,
+``S/calc_soil_moisture_dependence_factor/{saturated,wilted,min:wp,min:fc}``,
+``S/soil_pool_transformation/{no_din,inorganic_N,organic_N,inorganic_P,organic_P}``,
+``S/calc_crop_uptake/{crop,temperature_cap,temperature_floor,shape,available_water,dry_soil,cap:P,
+cap:N}`` and ``S/denitrification/{saturated,moist}``.
 """
 
 from __future__ import annotations
@@ -77,7 +94,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.constants import SURFACE_INPUTS
+from noodl.apps.wsimod.constants import G_M2_TO_KG_M2, KG_M3_TO_MG_L, SURFACE_INPUTS
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.land import SURFACE_CLASSES, PerviousSurface, month_start, runs_nutrients
 from noodl.apps.wsimod.nutrient_pool import (
@@ -89,7 +106,15 @@ from noodl.apps.wsimod.nutrient_pool import (
     NUTRIENT_POOL_SCALARS,
     NutrientPool,
 )
-from noodl.apps.wsimod.vqip import Pollutants, extract_vqip, safe_den, v_change_vqip, write
+from noodl.apps.wsimod.storage import exp_python
+from noodl.apps.wsimod.vqip import (
+    Pollutants,
+    extract_vqip,
+    pow_python,
+    safe_den,
+    v_change_vqip,
+    write,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import SurfaceSpec, WsimodNetwork
@@ -307,8 +332,9 @@ def _f64(x) -> Tensor:
 
 
 class GrowingSurface(PerviousSurface):
-    """``GrowingSurface`` (``land.py:1082-2312``): construction, overrides, the crop calendar and
-    ``calc_crop_cover`` (see the module text).
+    """``GrowingSurface`` (``land.py:1082-2312``): construction, overrides, the crop calendar,
+    ``calc_crop_cover``, the nutrient pool's inputs and outputs and the soil processes (see the
+    module text).
 
     Parameters (``parameter_defaults``): :class:`~noodl.apps.wsimod.land.PerviousSurface`'s without
     ``depth`` (its physical depth is ``rooting_depth``) and ``et0_coefficient`` (overwritten every
@@ -379,6 +405,15 @@ class GrowingSurface(PerviousSurface):
             self._fill_pool(_soil_storage(structure.get("initial_soil_storage"), where))
             # :1278-1281 (residue stays unwired, :1281)
             self.inflows += [self.effective_precipitation_flushing, self.fertiliser, self.manure]
+            # :1283-1291, after calculate_soil_temperature; erosion (between the uptake and
+            # denitrification) and adsorption (last) are later tasks (D20)
+            self.processes += [
+                self.calc_temperature_dependence_factor,
+                self.calc_soil_moisture_dependence_factor,
+                self.soil_pool_transformation,
+                self.calc_crop_uptake,
+                self.denitrification,
+            ]
 
     def _fill_pool(self, soil: Mapping | None) -> None:
         """``land.py:1293-1324``: the dissolved pools from the tank's storage, then the solid
@@ -874,6 +909,262 @@ class GrowingSurface(PerviousSurface):
         into the dissolved inorganic pool and the rest into the fast pool (``allocate_manure``,
         ``np.py:267-290``); the tank gets the dissolved share."""
         return self._applied("manure", self.nutrient_pool.allocate_manure, active=active)
+
+    # --- the soil processes (land.py:1744-1926, :2096-2152) -----------------------------------
+    def _pull_tracked(self, out_: Tensor, *, active: Tensor) -> Tensor:
+        """D19: :meth:`Tank.pull_pollutants` of ``out_`` (``:1806``, ``:1920``, ``:2148``,
+        ``:2250``), returning the clamped VQIP, as WSIMOD's mutated argument is. WSIMOD's check
+        ``compare_vqip(out_, out2_)`` compares that object with itself and never prints (L10);
+        its evident intent is the event ``"nutrient_pool_not_tracking"``, recorded where a clamp
+        removed more than ``FLOAT_ACCURACY`` from any column (Y16)."""
+        active = torch.as_tensor(active, dtype=torch.bool)
+        clamped = self.pull_pollutants(out_, active=active)
+        lost = ((out_ - clamped) > self.ctx.fa).any(dim=-1)
+        self.ctx.event("nutrient_pool_not_tracking", self.parent.name, active & lost)
+        return clamped
+
+    def _smc(self) -> Tensor:
+        """``get_smc`` (``land.py:895-903``): ``storage["volume"] / area``."""
+        return self.storage[..., 0] / self.area
+
+    def calc_temperature_dependence_factor(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1813-1831``: the pool's ``temperature_dependence_factor`` from the soil
+        storage's temperature ``T`` (after ``calculate_soil_temperature``): ``2 ** ((T - 20) /
+        10)`` where ``T > 5`` (``warm``), ``T / 5`` where ``0 < T <= 5`` (``thawed``), else 0.
+
+        The factor jumps at 5 °C, from 1 to ``2 ** -1.5``, so it is larger at 4.9 °C than at
+        15 °C: HYPE, and WSIMOD's own River, use the product ``2 ** ((T - 20) / 10) * T / 5``
+        below 5 °C (L12). Reproduced (Y19). Nothing enters or leaves the tank."""
+        ctx, pool = self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("calc_temperature_dependence_factor")
+        site = f"{self.site}/calc_temperature_dependence_factor"
+        temperature = self.storage[..., self.p.column("temperature")]
+        warm = ctx.decide(f"{site}/warm", temperature, ">", 5.0, active=active, call=call)
+        thawed = ctx.decide(
+            f"{site}/thawed", temperature, ">", 0.0, active=active & ~warm, call=call
+        )
+        # 2 ** x per instance (Python's pow); a cold instance raises 2 to 0 (unused)
+        exponent = torch.where(warm, (temperature - 20) / 10, torch.zeros_like(temperature))
+        factor = torch.where(
+            warm,
+            pow_python(2.0, exponent),
+            torch.where(thawed, temperature / 5, torch.zeros_like(temperature)),
+        )
+        pool.temperature_dependence_factor = write(
+            active, factor, pool.temperature_dependence_factor
+        )
+        return ctx.empty(), ctx.empty()
+
+    def calc_soil_moisture_dependence_factor(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1833-1856``: the pool's ``soil_moisture_dependence_factor`` from ``smc``:
+        ``satact`` where ``smc >= field_capacity_m`` (``saturated``), 0 where ``smc <=
+        wilting_point_m`` (``wilted``), else ``min(1, wp_comp, fc_comp)`` with ``fc_comp = (1 -
+        satact) * ((fc_m - smc) / (thetaupp * rooting_depth)) ** thetapow + satact`` and
+        ``wp_comp = ((smc - wp_m) / (thetalow * rooting_depth)) ** thetapow``. Python's ``min``
+        takes the first of the smallest: ``min:wp`` is ``wp_comp < 1`` and ``min:fc`` is
+        ``fc_comp`` below that. Nothing enters or leaves the tank."""
+        ctx, pool = self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("calc_soil_moisture_dependence_factor")
+        site = f"{self.site}/calc_soil_moisture_dependence_factor"
+        smc = self._smc()
+        fc_m, wp_m = self.field_capacity_m, self.wilting_point_m
+        saturated = ctx.decide(f"{site}/saturated", smc, ">=", fc_m, active=active, call=call)
+        wilted = ctx.decide(
+            f"{site}/wilted", smc, "<=", wp_m, active=active & ~saturated, call=call
+        )
+        between = active & ~saturated & ~wilted
+        rooting_depth, power = self._param("rooting_depth"), self._param("thetapow")
+        satact = self._param("satact")
+        one = torch.ones_like(smc)
+        # the bases are positive where they are used; elsewhere 1 (Python's ** of a negative
+        # base would be complex)
+        fc_diff = fc_m - smc
+        fc_comp = pow_python(
+            torch.where(between, fc_diff / (self._param("thetaupp") * rooting_depth), one), power
+        )
+        fc_comp = (1 - satact) * fc_comp + satact
+        wp_diff = smc - wp_m
+        wp_comp = pow_python(
+            torch.where(between, wp_diff / (self._param("thetalow") * rooting_depth), one), power
+        )
+        smallest = dmin(ctx, f"{site}/min:wp", 1.0, wp_comp, active=between, call=call)
+        smallest = dmin(ctx, f"{site}/min:fc", smallest, fc_comp, active=between, call=call)
+        factor = torch.where(
+            saturated, satact + torch.zeros_like(smc), torch.where(wilted, 0 * one, smallest)
+        )
+        pool.soil_moisture_dependence_factor = write(
+            active, factor, pool.soil_moisture_dependence_factor
+        )
+        return ctx.empty(), ctx.empty()
+
+    def soil_pool_transformation(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1744-1811``: ``nitrate_proportion = nitrate / (nitrate + ammonia)`` of the
+        tank (nitrite ignored), the pool's five transformations (``np.py:396-450``), then each
+        increase into the tank: an increase in dissolved inorganic N above 0 (``inorganic_N``)
+        enters as ``in_.nitrate = inc * proportion`` and ``in_.ammonia = inc * (1 -
+        proportion)``, otherwise ``-inc`` times the same leaves in ``out_``; likewise the
+        organic N (``organic_N``), the phosphate (``inorganic_P``) and the organic P
+        (``organic_P``), each whole. An increase of exactly 0 takes the ``else`` branch (``out_``
+        gets ``-0.0``, rule 6). ``in_`` is forced in and ``out_`` pulled
+        (:meth:`_pull_tracked`, clamped); returns both.
+
+        ``nitrate + ammonia = 0`` (``no_din``): WSIMOD raises ``ZeroDivisionError``
+        (``:1758``); noodl uses the proportion 0, which sends the change to ammonia, the product
+        of mineralisation, and records ``"transformation_no_din"`` (L6, Y18)."""
+        p, ctx, pool = self.p, self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("soil_pool_transformation")
+        site = f"{self.site}/soil_pool_transformation"
+        storage = self.storage
+        # :1758-1760
+        nitrate = storage[..., p.column("nitrate")]
+        din = nitrate + storage[..., p.column("ammonia")]
+        no_din = ctx.decide(f"{site}/no_din", din, "==", 0.0, active=active, call=call)
+        ctx.event("transformation_no_din", self.parent.name, active & no_din)
+        proportion = torch.where(no_din, torch.zeros_like(din), nitrate / safe_den(din))
+        # np.py:396-450
+        inorganic, organic = pool.soil_pool_transformation(active=active)
+        # :1770-1802
+        ins, outs = {}, {}
+        for branch, increase, names in (
+            ("inorganic_N", inorganic[..., 0], ("nitrate", "ammonia")),
+            ("organic_N", organic[..., 0], ("org-nitrogen",)),
+            ("inorganic_P", inorganic[..., 1], ("phosphate",)),
+            ("organic_P", organic[..., 1], ("org-phosphorus",)),
+        ):
+            up = ctx.decide(f"{site}/{branch}", increase, ">", 0.0, active=active, call=call)
+            zero = torch.zeros_like(increase)
+            if branch == "inorganic_N":
+                parts = {"nitrate": proportion, "ammonia": 1 - proportion}
+                into = {n: increase * share for n, share in parts.items()}
+                out = {n: -increase * share for n, share in parts.items()}
+            else:
+                into, out = {names[0]: increase}, {names[0]: -increase}
+            for name in names:
+                ins[name] = torch.where(up, into[name], zero)
+                outs[name] = torch.where(up, zero, out[name])
+        in_ = self._with_columns(ctx.empty(), ins)
+        out_ = self._with_columns(ctx.empty(), outs)
+        # :1805-1806
+        self.push_storage(in_, force=True, active=active)
+        out_ = self._pull_tracked(out_, active=active)
+        return in_, out_
+
+    def calc_crop_uptake(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1858-1926``. With a crop (``days_after_sow > 0``, WSIMOD's truthy
+        ``days_after_sow``; ``crop``):
+
+        - ``temp_func`` is 1, or for an autumn-sown crop (structural) ``max(0, min(1, (T - 5) /
+          20))`` of the soil storage's temperature (``temperature_cap``, ``temperature_floor``)
+          with ``d = days_after_sow - 25``;
+        - ``uptake_par = (uptake1 - uptake2) * exp(-uptake3 * d)``, and where ``uptake_par +
+          uptake2 > 0`` (``shape``) ``N = uptake1 * uptake2 * uptake3 * uptake_par / (uptake2 +
+          uptake_par) ** 2``, else 0; then ``N *= temp_func * G_M2_TO_KG_M2 * area`` and ``P =
+          N * uptake_PNratio``;
+        - the available uptake ``max(0, V - wilting_point_m * area) / V`` (``available_water``)
+          times the dissolved inorganic pool's N and P;
+        - ``{"P": min(P, P_max), "N": min(N, N_max)}`` (``cap:P``, ``cap:N``) is extracted from
+          the dissolved inorganic pool in that order, P first, and leaves the tank as nitrate
+          and phosphate (:meth:`_pull_tracked`; all the N as nitrate, L9).
+
+        ``V = 0`` with a crop (``dry_soil``): WSIMOD raises ``ZeroDivisionError`` (``:1899``,
+        reachable with ``ET_depletion_factor < 1``); noodl makes the available uptake 0, there
+        being no water, and records ``"crop_uptake_dry_soil"`` (L7, Y18). Without a crop both
+        VQIPs are empty."""
+        p, ctx, pool = self.p, self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("calc_crop_uptake")
+        site = f"{self.site}/calc_crop_uptake"
+        days = self.days_after_sow
+        crop = active & ctx.decide(f"{site}/crop", days, ">", 0.0, active=active, call=call)
+        temperature = self.storage[..., p.column("temperature")]
+        if self.autumn_sow:  # :1877-1881
+            capped = dmin(
+                ctx, f"{site}/temperature_cap", 1.0, (temperature - 5) / 20, active=crop, call=call
+            )
+            temp_func = dmax(ctx, f"{site}/temperature_floor", 0.0, capped, active=crop, call=call)
+            days = days - 25
+        else:
+            temp_func = _f64(1.0)
+        # :1884-1896
+        uptake1, uptake2 = self._param("uptake1"), self._param("uptake2")
+        uptake3 = self._param("uptake3")
+        uptake_par = (uptake1 - uptake2) * exp_python(-uptake3 * days)
+        shape = ctx.decide(f"{site}/shape", uptake_par + uptake2, ">", 0.0, active=crop, call=call)
+        total = torch.where(shape, uptake2 + uptake_par, torch.ones_like(uptake_par))
+        common_n = uptake1 * uptake2 * uptake3 * uptake_par / pow_python(total, 2.0)
+        common_n = torch.where(shape, common_n, torch.zeros_like(common_n))
+        common_n = common_n * (temp_func * G_M2_TO_KG_M2 * self.area)
+        common_p = common_n * self._param("uptake_PNratio")
+        # :1898-1907
+        volume = self.storage[..., 0]
+        available = dmax(
+            ctx,
+            f"{site}/available_water",
+            0.0,
+            volume - self.wilting_point_m * self.area,
+            active=crop,
+            call=call,
+        )
+        dry = ctx.decide(f"{site}/dry_soil", volume, "==", 0.0, active=crop, call=call)
+        ctx.event("crop_uptake_dry_soil", self.parent.name, crop & dry)
+        share = torch.where(dry, torch.zeros_like(volume), available / safe_den(volume))
+        stored = pool.storage[..., DI, :]
+        max_n, max_p = share * stored[..., 0], share * stored[..., 1]
+        # :1909-1913
+        uptake_p = dmin(ctx, f"{site}/cap:P", common_p, max_p, active=crop, call=call)
+        uptake_n = dmin(ctx, f"{site}/cap:N", common_n, max_n, active=crop, call=call)
+        request = torch.stack(torch.broadcast_tensors(uptake_n, uptake_p), dim=-1)
+        taken = pool.extract(DI, request, active=crop, order=("P", "N"))
+        # :1915-1920
+        out_ = self._with_columns(
+            ctx.empty(), {"nitrate": taken[..., 0], "phosphate": taken[..., 1]}
+        )
+        out_ = self._pull_tracked(out_, active=crop)
+        return ctx.empty(), torch.where(crop[..., None], out_, ctx.empty())
+
+    def denitrification(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:2096-2152``: the moisture dependence ``f`` is 1 where ``smc >
+        field_capacity_m`` (``saturated``), ``((smc / fc_m - limpar) / (1 - limpar)) ** exppar``
+        where ``smc / fc_m > limpar`` (``moist``; at ``smc == fc_m`` this is ``1.0``), and
+        otherwise both VQIPs are empty. ``din_conc = DI.N / V * KG_M3_TO_MG_L``, ``h = din_conc
+        / (din_conc + hsatINs)`` and ``DI.N * h * f * temperature_dependence_factor * denpar``
+        is extracted from the dissolved inorganic pool (``{N, P: 0}``) and leaves the tank as
+        nitrate (:meth:`_pull_tracked`; all the N as nitrate, L9)."""
+        ctx, pool = self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("denitrification")
+        site = f"{self.site}/denitrification"
+        smc, fc_m = self._smc(), self.field_capacity_m
+        saturated = ctx.decide(f"{site}/saturated", smc, ">", fc_m, active=active, call=call)
+        ratio = smc / fc_m
+        limpar = self._param("limpar")
+        moist = ctx.decide(
+            f"{site}/moist", ratio, ">", limpar, active=active & ~saturated, call=call
+        )
+        run = active & (saturated | moist)
+        base = torch.where(
+            ~saturated & moist, (ratio - limpar) / safe_den(1 - limpar), torch.ones_like(ratio)
+        )
+        dependence = torch.where(
+            saturated, torch.ones_like(ratio), pow_python(base, self._param("exppar"))
+        )
+        # :2119-2135
+        volume = self.storage[..., 0]
+        din = pool.storage[..., DI, 0]
+        concentration = din / safe_den(volume) * KG_M3_TO_MG_L
+        half_saturation = concentration / safe_den(concentration + self._param("hsatINs"))
+        denitrified = din * half_saturation * dependence * pool.temperature_dependence_factor
+        denitrified = denitrified * self._param("denpar")
+        # :2136-2140, the request {N: dN, P: 0}
+        request = torch.stack([denitrified, torch.zeros_like(denitrified)], dim=-1)
+        taken = pool.extract(DI, request, active=run)
+        # :2144-2152
+        out_ = self._with_columns(ctx.empty(), {"nitrate": taken[..., 0]})
+        out_ = self._pull_tracked(out_, active=run)
+        return ctx.empty(), torch.where(run[..., None], out_, ctx.empty())
 
 
 SURFACE_CLASSES["GrowingSurface"] = GrowingSurface

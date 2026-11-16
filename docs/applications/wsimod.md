@@ -264,8 +264,8 @@ override. Its constructor keywords are `rooting_depth`, `ET_depletion_factor`,
 `initial_soil_storage`; the 25 attributes WSIMOD sets in `__init__` (`land.py:1186-1250`) are
 reachable through overrides only, 31 names with `rooting_depth` (`:1376-1431`). With `nitrate`
 among the pollutants the surface also keeps a nutrient pool, fed by deposition, fertiliser and
-manure and drained by its outflows (below). The soil processes of the pool (the transformation,
-crop uptake, erosion, denitrification and adsorption) are the next tasks of sub-project 3c.
+manure and drained by its outflows and its soil processes (below): the transformation, crop
+uptake and denitrification. Erosion and adsorption are the next tasks of sub-project 3c.
 
 `calc_crop_cover` (`land.py:1514-1572`) runs first on the surface each day. It sows on
 `sowing_day` and harvests on `harvest_day` (the raw day of the year), interpolates the crop
@@ -378,6 +378,52 @@ part (so dry phosphate reaches the tank as `0`). A non-positive `dep` (negative 
 scaled: the pool and the tank both receive the negative mass, as in WSIMOD. The mass balance
 parts are `"GrowingSurface.fertiliser"` and `"GrowingSurface.manure"`; the deposition parts are
 the dissolved share.
+
+**The soil processes** run after the soil temperature (`calculate_soil_temperature`), in
+WSIMOD's order (`land.py:1283-1291`):
+
+- **The temperature factor** (`:1813-1831`) of the soil storage's temperature `T`:
+  `2 ** ((T - 20) / 10)` above 5 °C, `T / 5` on `(0, 5]` and 0 below. It **jumps at 5 °C**, from
+  1 just below to `2 ** -1.5 = 0.354` just above, so it is larger at 4.9 °C (0.98) than at
+  15 °C (0.707): HYPE, and WSIMOD's own River, use the product `2 ** ((T - 20) / 10) * T / 5`
+  below 5 °C (L12). Reproduced, so a soil warming through 5 °C slows its transformations and
+  denitrification abruptly; a gradient with respect to the temperature does not see the jump.
+- **The soil-moisture factor** (`:1833-1856`) of `smc = V / area`: `satact` at or above field
+  capacity, 0 at or below the wilting point, and between them `min(1, wp_comp, fc_comp)`, two
+  power laws in `thetapow` that rise from the wilting point and fall towards `satact` at field
+  capacity.
+- **The transformation** (`:1744-1811`, `np.py:396-481`): the pool's five transformations
+  (humus to fast, humus and fast to dissolved organic, fast to dissolved inorganic and the
+  immobilisation back), each `rate * factors * store`, and the net change of each dissolved pool
+  then enters or leaves the tank. The inorganic N is split between `nitrate` and `ammonia` in the
+  tank's proportion of the two (nitrite is ignored). A tank with neither makes WSIMOD divide by
+  zero (`ZeroDivisionError` at `:1758`, on the first day of a growing surface started from a
+  tank without inorganic N in a winter month); noodl gives the whole change to `ammonia`, the
+  product of mineralisation, and records `"transformation_no_din"` (L6).
+- **Crop uptake** (`:1858-1926`), where a crop grows (`days_after_sow > 0`): HYPE's logistic
+  uptake in `uptake1`, `uptake2` and `uptake3` (with, for an autumn-sown crop, a temperature
+  factor `max(0, min(1, (T - 5) / 20))` and the days counted from 25 after sowing), capped at the
+  dissolved inorganic pool's N and P above the wilting point, `max(0, V - wilting_point_m *
+  area) / V` of each. The P is taken first, then the N. A crop on a soil with no water makes
+  WSIMOD divide by zero (`:1899`, reachable with `ET_depletion_factor < 1`); noodl takes up
+  nothing and records `"crop_uptake_dry_soil"` (L7).
+- **Denitrification** (`:2096-2152`), on a soil wetter than `limpar` of field capacity: a factor
+  1 above field capacity and `((smc / fc_m - limpar) / (1 - limpar)) ** exppar` below (1.0 at
+  field capacity itself), a half-saturation factor of the dissolved inorganic N's concentration
+  and the temperature factor, times `denpar`. The nitrogen leaves the model.
+
+**Uptake and denitrification take all their nitrogen as `nitrate`** (`:1917`, `:2145`), though
+the pool's dissolved inorganic N stands for nitrate, ammonia and nitrite together (L9). When the
+tank holds less nitrate than that, its `pull_pollutants` clamps the removal at what the tank has,
+while the pool has lost it all: the tank and the pool drift further apart, as with flushing (L8).
+The removals the tank records (the mass balance parts `"GrowingSurface.soil_pool_transformation"`,
+`"GrowingSurface.calc_crop_uptake"` and `"GrowingSurface.denitrification"`) are the clamped
+ones, so the balance closes. WSIMOD means to print "nutrient pool not tracking soil tank" when
+a clamp bites, but its check compares the clamped VQIP with itself (`pull_pollutants` returns
+its own argument) and never prints (L10). noodl records what it meant: the event
+`"nutrient_pool_not_tracking"`, wherever a clamp of the transformation, the uptake or
+denitrification removed more than `FLOAT_ACCURACY` from a column. It is the event to watch
+for the pool–tank gap.
 
 The pool's seven parameters are drivers with WSIMOD's defaults (`np.py:16-23`):
 `"wsimod.GrowingSurface.nutrient_pool.<p>"` `(..., n, 2)`, columns `("N", "P")`, for `degrhpar`,
@@ -605,7 +651,7 @@ print(round(float(balance.inflow[0, 0]), 4), round(float(balance.storage_change[
 [('river', 'tank')] [0.1389, 0.1275, 0.1101, 0.1043, 0.2316]
 ['Catchment.flow', 'Catchment.unrouted', 'Waste.total_in', 'dropped']
 True
-['crop_water_stress_zero_denominator', 'decay_arc_order_unknown', 'demand_deficit'] (5, 3)
+['crop_uptake_dry_soil', 'crop_water_stress_zero_denominator', 'decay_arc_order_unknown'] (5, 3)
 120.0 0.1389
 ```
 
@@ -647,8 +693,12 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   directions, so its decayed term's order of addition may differ from WSIMOD's in the last
   bit, D21) and `"river_nitrogen_lost"` (a River's mineralisation with no dissolved nitrogen
   destroyed nitrogen, X15), `"crop_water_stress_zero_denominator"` (a growing surface's stress
-  coefficient divided by zero, L3) and `"pull_storage_no_din"` (a growing surface's tank had no
-  inorganic nitrogen to split a pull over, L5). The arc-keyed event, `"decay_arc_order_unknown"`, is keyed by arc,
+  coefficient divided by zero, L3), `"pull_storage_no_din"` (a growing surface's tank had no
+  inorganic nitrogen to split a pull over, L5), `"nutrient_pool_not_tracking"` (a growing
+  surface's tank had less than its pool removed, and the removal was clamped, L9, L10),
+  `"transformation_no_din"` (the tank had neither nitrate nor ammonia to split the
+  transformation's change over, L6) and `"crop_uptake_dry_soil"` (a crop on a soil with no
+  water, L7). The arc-keyed event, `"decay_arc_order_unknown"`, is keyed by arc,
   `(..., T, n_arcs)`, and `WsimodDay.event_columns(condition)` names the columns (X48);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
   that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
@@ -812,6 +862,11 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface`: the configured `et0_coefficient` is overwritten (L22) | listed in `model.unread` | `test_a_growing_et0_coefficient_is_unread` |
 | `GrowingSurface.pull_storage` divides by the tank's inorganic nitrogen (L5) | the three species 0, event `"pull_storage_no_din"` | `test_pull_storage_without_din_gives_no_species` |
 | `GrowingSurface`: `effective_precipitation_flushing` extracts the outflows' nutrients from the pools that `pull_storage` already extracted them from (L8) | reproduced, documented | `test_flushing_extracts_the_outflows_again` |
+| `GrowingSurface.soil_pool_transformation` divides by the tank's `nitrate + ammonia` (L6) | proportion 0 (the change goes to ammonia), event `"transformation_no_din"` | `test_the_transformation_without_din_sends_the_change_to_ammonia` |
+| `GrowingSurface.calc_crop_uptake` divides by the tank's volume (L7) | no available uptake, event `"crop_uptake_dry_soil"` | `test_crop_uptake_from_an_empty_soil_is_zero` |
+| `GrowingSurface`: uptake and denitrification take all their N as nitrate (L9) | reproduced; the tank's clamp recorded as `"nutrient_pool_not_tracking"` | `test_calc_crop_uptake_equals_wsimods`; `test_denitrification_equals_wsimods` |
+| `GrowingSurface`: the "nutrient pool not tracking soil tank" check compares a VQIP with itself and never prints (L10) | the event `"nutrient_pool_not_tracking"` where the clamp bites | `test_a_clamped_pull_records_the_event` |
+| `GrowingSurface`: the soil temperature factor is `T / 5` below 5 °C, not HYPE's product, so it jumps at 5 °C (L12) | reproduced, documented | `test_the_soil_factors_equal_wsimods` |
 | `GrowingSurface`: a float `initial_soil_storage`, which the docstring allows, raises `TypeError` (L16) | refused | `test_initial_soil_storage_refusals` |
 | `NutrientPool`: its parameters cannot be configured (L20) | drivers with WSIMOD's defaults; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` |
 | `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]` |

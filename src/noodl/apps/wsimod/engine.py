@@ -93,7 +93,21 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   nitrite == 0``, whose event is ``"pull_storage_no_din"``, L5, Y18) in place of the tank's
   ``pull_storage`` sites, and ``node:N/surfaces.<name>/adjust_vqip_to_liquid/{N,P}`` (``:1595``,
   ``:1599``; ``call`` counts the dry deposition, wet deposition, fertiliser and manure calls in
-  that order).
+  that order). Its soil processes add ``node:N/surfaces.<name>/calc_temperature_dependence_factor/
+  {warm,thawed}`` (``:1822``, ``:1826``),
+  ``node:N/surfaces.<name>/calc_soil_moisture_dependence_factor/{saturated,wilted,min:wp,min:fc}``
+  (``:1843``, ``:1845``, and ``:1853``'s three-way ``min`` as two margins in Python's order),
+  ``node:N/surfaces.<name>/soil_pool_transformation/{no_din,inorganic_N,organic_N,inorganic_P,
+  organic_P}`` (``no_din`` is noodl's guard for the tank's ``nitrate + ammonia == 0``, whose
+  event is ``"transformation_no_din"``, L6, Y18; then ``:1770``, ``:1783``, ``:1790``,
+  ``:1797``), ``node:N/surfaces.<name>/calc_crop_uptake/{crop,temperature_cap,temperature_floor,
+  shape,available_water,dry_soil,cap:P,cap:N}`` (``:1872``, ``:1878`` for an autumn-sown crop
+  only, ``:1887``, ``:1899``; ``dry_soil`` is noodl's guard for ``V == 0``, whose event is
+  ``"crop_uptake_dry_soil"``, L7, Y18; ``:1910-1911``) and
+  ``node:N/surfaces.<name>/denitrification/{saturated,moist}`` (``:2107``, ``:2109``). The
+  transformation, the uptake and denitrification pull from the tank through ``pull_pollutants``
+  (its ``clip`` sites), and record the event ``"nutrient_pool_not_tracking"`` where its clamp
+  removed more than ``FLOAT_ACCURACY`` (WSIMOD's dead check, L10, Y16).
   Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's

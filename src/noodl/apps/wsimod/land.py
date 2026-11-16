@@ -89,10 +89,20 @@ PART_NAMES = {
     "route": "PerviousSurface.route",
     "fertiliser": "GrowingSurface.fertiliser",
     "manure": "GrowingSurface.manure",
+    "soil_pool_transformation": "GrowingSurface.soil_pool_transformation",
+    "calc_crop_uptake": "GrowingSurface.calc_crop_uptake",
+    "denitrification": "GrowingSurface.denitrification",
 }
 NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"
 # the surface functions that return empty VQIPs and so have no part (D11)
-NO_PART = frozenset({"calc_crop_cover", "effective_precipitation_flushing"})
+NO_PART = frozenset(
+    {
+        "calc_crop_cover",
+        "effective_precipitation_flushing",
+        "calc_temperature_dependence_factor",
+        "calc_soil_moisture_dependence_factor",
+    }
+)
 
 # land.py:208: where percolation goes; :221: where runoff goes; :711: where ponding goes
 PERCOLATION_TYPES = ("Groundwater",)
