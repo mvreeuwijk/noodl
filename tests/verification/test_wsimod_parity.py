@@ -515,8 +515,7 @@ def test_the_irrigation_cases_reach_every_irrigate_branch(name):
     for _, ctx, _ in day.run_days(days=CASES[name].bookkeeping):
         for d in ctx.decisions:
             if bool(d.active.any()):
-                seen.setdefault(d.site, set()).add(bool(d.outcome[d.active].any()))
-                seen[d.site].add(bool((~d.outcome[d.active]).any()))
+                seen.setdefault(d.site, set()).update(d.outcome[d.active].tolist())
     for surface in ("irr_a", "irr_b"):
         for branch in ("crop", "deficit", "demand", "saturated"):
             site = f"node:farm/surfaces.{surface}/irrigate/{branch}"
