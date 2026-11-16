@@ -427,7 +427,9 @@ WSIMOD's order (`land.py:1283-1291`):
   has; WSIMOD prints "weird nutrients" when the two differ by more than `FLOAT_ACCURACY`, and
   noodl records `"erosion_pool_short"`. For gradients, rain crossing 5 mm is a jump (from 0 to
   the rain energy), the transport factor's `min(1, ...)` is a kink, and the switches at
-  `ie = 0`, `erodingflow = 0` and at 4 mm are continuous.
+  `erodingflow = 0` and at 4 mm are continuous; the switch at `ie = 0` is continuous for
+  `sreroexp > 0` and a jump for `sreroexp = 0` (to `(1 - ground_cover) / (0.5 * cohesion) *
+  sin(slope / 100) / 365`).
 - **Denitrification** (`:2096-2152`), on a soil wetter than `limpar` of field capacity: a factor
   1 above field capacity and `((smc / fc_m - limpar) / (1 - limpar)) ** exppar` below (1.0 at
   field capacity itself), a half-saturation factor of the dissolved inorganic N's concentration

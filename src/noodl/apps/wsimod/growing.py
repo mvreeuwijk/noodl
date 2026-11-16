@@ -489,6 +489,8 @@ class GrowingSurface(PerviousSurface):
         self.RAW = self.TAW * self._param("ET_depletion_factor")
         self.ground_cover_stages = _stages_tensor(self._param("ground_cover_max"))
         self.crop_cover_stages = _stages_tensor(self._param("crop_cover_max"))
+        # erosion's sin(slope / 100) (:1966), Python's per instance, constant between binds
+        self.slope_sine = sin_python(self._param("slope") / 100)
 
     @classmethod
     def carried_fields_of(cls, *, nutrients: bool) -> tuple[str, ...]:
@@ -1220,7 +1222,7 @@ class GrowingSurface(PerviousSurface):
         base = torch.where(runoff, ie_v / area * M_TO_MM * 365, torch.ones_like(ie_v))
         mobilised_flow = pow_python(base, self._param("sreroexp"))
         cover = (1 - self.ground_cover) * (1 / (0.5 * self._param("cohesion")))
-        mobilised_flow = mobilised_flow * (cover * sin_python(self._param("slope") / 100) / 365)
+        mobilised_flow = mobilised_flow * (cover * self.slope_sine / 365)
         mobilised_flow = torch.where(runoff, mobilised_flow, torch.zeros_like(mobilised_flow))
         # :1974-1987
         total_flows = ie_v + ss_v + perc_v

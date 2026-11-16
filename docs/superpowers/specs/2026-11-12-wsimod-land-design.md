@@ -1309,7 +1309,8 @@ They are documented on the application page.
     at 0. The pool extracts' `min` caps are kinks.
   - **Erosion.**
     - Rain above 5 mm is a jump, from 0 to `8.95 + …`.
-    - `ie.volume > 0` and `erodingflow > 0` are continuous.
+    - `erodingflow > 0` is continuous. `ie.volume > 0` is continuous for `sreroexp > 0` and a
+      jump for `sreroexp = 0` (`0 ** 0 = 1`; Task 8a review).
     - The enrichment's switch at 4 is continuous (`4 − 2.5 = 1.5`).
     - `min(1, ·)` of the transport factor is a kink.
   - **Denitrification** is continuous at `fc_m` (`f = 1` on both sides) and at `limpar` (`f →
