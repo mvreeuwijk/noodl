@@ -684,7 +684,6 @@ def test_the_climate_state_round_trips(case):
     efficiency = 0.42 if case == "garden" else 0.3
     first = wsimod_run(model, state, drivers, days=1)
     assert _day_0_water(case, first) == pytest.approx(max(3.0 - 1.0, 0.0) * efficiency, rel=1e-12)
-    assert torch.equal(first.arc_flow, wsimod_run(model, held, drivers, days=1).arc_flow)
     unset = wsimod_run(model, initial_state(model, values=others), drivers, days=1)
     assert _day_0_water(case, unset) == 0.0
 

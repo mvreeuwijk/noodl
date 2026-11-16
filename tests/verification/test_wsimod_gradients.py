@@ -817,8 +817,9 @@ SPECS.update(SPECS_3C)
 # demand to 0, land.py:2358) and irr_a is sown on run day 16: from day 0 the coefficient reaches
 # nothing for 48 days. Its entries start irr_a sown (``days_after_sow`` 5) on a soil of 1900 m3
 # (it leaves saturation near 1960 m3): it pulls on every dry day, and the closest decisions
-# (``calc_crop_cover/depletion``, the tank's phosphate clip) stay 9x and more above the threshold,
-# so ``max(E - P, 0)`` (``irrigate/deficit``) and the ``FLOAT_ACCURACY`` tests are farther still
+# (``calc_crop_cover/depletion``; with the pollutants, the phosphate clip of irr_a's own soil store,
+# ``surfaces.irr_a/pull_pollutants/clip:phosphate``) stay 9x and more above the threshold, so
+# ``max(E - P, 0)`` (``irrigate/deficit``) and the ``FLOAT_ACCURACY`` tests are farther still
 _IRRIGATED = ("driver", "wsimod.IrrigationSurface.irrigation_coefficient", ("farm", "irr_a"))
 _IRR_SOIL = ("final", "farm", "surface:irr_a", "volume")
 
@@ -831,13 +832,16 @@ def _sown(volume) -> tuple:
 
 
 SPECS_3C_II = {
-    # the soil storage, quantity only: the default selection's 3c-ii entry (2 s alone)
+    # the soil storage, quantity only: the default selection's 3c-ii entry (5 s alone)
     "IrrigationSurface.irrigation_coefficient": Spec(
         "irrigation", 10, False, _IRRIGATED, _IRR_SOIL, initial=_sown(1900.0)
     ),
     # with the pollutants: the supply's nitrogen reaches the dissolved pool (land.py:2372-2381).
-    # Its decisions compare masses (the pools, the tank's pollutants) and are held to the mass
-    # scale, as the growing entries are
+    # Its decisions compare masses (the pools, the soil store's pollutants) and are held to the
+    # mass scale, as the growing entries are. The soil store's phosphate clip (call 3) binds on
+    # days 14-17 and 19 and not on day 18: it alternates in this window, so the evidence that the
+    # stencil crosses no switch is its distance in steps (1.9e5 steps of h), not its ratio to the
+    # threshold (9x on the mass scale)
     "IrrigationSurface.irrigation_coefficient [pollutants]": Spec(
         "irrigation",
         20,
@@ -903,8 +907,10 @@ SLOW = {
         for name, spec in SPECS_3C.items()
         if spec.case != "surface_deposition" and name != "noy-dry (short window)"
     ),
-    # 3c-ii: the irrigation run with the pollutants (7 s alone); the others take 2-4 s
+    # 3c-ii, measured alone in one process: the irrigation run with the pollutants (20 s) and the
+    # garden (11 s); irrigation_coefficient (5 s) and current_surface_area (8 s) stay default
     "IrrigationSurface.irrigation_coefficient [pollutants]",
+    "ResidentialDemand.gardening_efficiency",
 }
 
 
