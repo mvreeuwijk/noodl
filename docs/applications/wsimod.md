@@ -1235,8 +1235,9 @@ has to be debugged, not admitted.
 - **Garden** (`garden`, 100 days): a `ResidentialDemand` fed through a `Distribution` asks two
   `Land`s for garden water. `gardens` has two `GardenSurface`s and a `PerviousSurface`, `plain`
   has no garden surface and answers 0. The soils keep their 11 degC, so the 0 degC water cools
-  `g2`, the surface that holds the handlers; `g1` only grows. The soil starts above capacity, so
-  the first days are saturated and the later ones are not, with wet days (no deficit) and dry
+  `g2`, the surface that holds the handlers; `g1` only grows. `g2` starts above capacity (250 m3
+  against 240), and that start alone gives its saturated first days (the wet spells never fill
+  it), the later ones are not, with wet days (no deficit) and dry
   days (a demand); both outcomes of `deficit` and `saturated` are asserted from the decisions.
   Bitwise equal to WSIMOD, and the replay of both `Land`s, handler calls included, is bitwise.
 - **Crashes** (`test_case_runs_where_wsimod_crashes*`): eleven cases where WSIMOD raises. Three run

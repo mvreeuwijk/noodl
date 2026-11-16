@@ -815,7 +815,9 @@ Consequences, all transcribed:
 
 - **The demand is yesterday's.** `create_demand` runs before `Land.run`, so `evaporation` and
   `precipitation` are the previous day's flows, and 0 on day 0 (run while writing this spec: the
-  check answered 0 on days 0 and 1, then 40.0, and the push carried 16.8 = 40 × 0.42). They are
+  check answered 0 on day 0, then yesterday's deficit, 40.0 in that run, and the push carried
+  16.8 = 40 × 0.42; only day 0 is 0 for certain, and later days are 0 only where yesterday's
+  deficit was 0 or the soil was full). They are
   carried state (State).
 - **The garden water is at 0 °C.** `apply_gardening_pollutants` builds the push from
   `empty_vqip()` (`demand.py:273-287`), so its temperature is 0. Blended into the soil store, it

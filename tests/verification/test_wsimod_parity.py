@@ -524,8 +524,9 @@ def test_the_irrigation_cases_reach_every_irrigate_branch(name):
 
 def test_the_garden_case_reaches_both_garden_branches():
     """From the decisions (Task 14, Y80): on the ``garden`` case, ``deficit`` (a negative and a
-    positive ``E - P``) and ``saturated`` (a full and a dry soil) are active with both outcomes
-    at ``g2``, the surface that holds the handlers, and no decision is recorded at ``g1``, whose
+    positive ``E - P``) and ``saturated`` (a full soil, from ``g2``'s over-capacity start of
+    250, and a dry one) are active with both outcomes at ``g2``, the surface that holds the
+    handlers, and no decision is recorded at ``g1``, whose
     handlers the last garden replaced (L18). The outcomes themselves are recorded."""
     spec = CASES["garden"]
     day = WsimodDay(read_wsimod_config(spec.build()), pollutants=True)

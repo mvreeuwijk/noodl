@@ -1905,7 +1905,9 @@ def _garden() -> dict:
     irrigated and ``g1`` only grows, and the water arrives at 0 degC (L19). ``plain`` has no
     garden surface and answers 0 (``land.py:93-94``). The demand is the previous day's deficit
     (the check runs before ``Land.run``): 0 on day 0 and, with the forcing's first days wet, on
-    the next ones; the wet spells saturate the soil (``cmd <= FLOAT_ACCURACY``, ``:2416``)."""
+    the next ones. ``g2`` starts over capacity (250 m3 against 240), and that start alone gives
+    its saturated days (days 0-5, ``cmd <= FLOAT_ACCURACY``, ``:2416``); the wet spells do not
+    fill the soil."""
     days = _GARDEN_DAYS
     dates = _dates(days)
     return {

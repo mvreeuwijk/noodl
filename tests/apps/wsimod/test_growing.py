@@ -3839,6 +3839,18 @@ def test_the_garden_demand_is_yesterdays():
         expected = max(float(evaporation[d - 1]) - float(precipitation[d - 1]), 0.0)
         assert garden[d] == pytest.approx(expected * 0.42, rel=1e-9), d
         assert garden[d] > 0
+    # a full soil (cmd <= FLOAT_ACCURACY) gives 0 whatever the deficit: g2 starts over capacity
+    mapping["nodes"][3]["surfaces"][1]["initial_storage"]["volume"] = 250.0
+    results = wsimod_run(build_model(read_wsimod_config(mapping))[0], days=6)
+    pulled = results.arc_flow[:, names.index("dist_to_homes")]
+    garden = [float(pulled[d]) - 40.0 * 0.15 for d in range(6)]
+    storage = results.surface["storage"]
+    full = [float(storage[d, g2].reshape(-1)[0]) >= 240.0 - 1e-9 for d in range(6)]
+    evaporation = results.surface["evaporation"][:, g2]
+    assert full[0]  # over capacity at the start
+    for d in range(1, 6):
+        if full[d - 1]:
+            assert garden[d] == 0.0 and float(evaporation[d - 1]) > 0, d
 
 
 def test_the_garden_surface_is_a_schema_class_with_no_parameter_of_its_own():

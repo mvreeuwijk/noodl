@@ -878,7 +878,7 @@ class GardenSurface(GrowingSurface):
   - `test_garden_handlers_equal_wsimods` (`importorskip`): `calculate_irrigation_demand` gives `max(E − P, 0)`, set to 0 when `cmd ≤ FA`. `receive_irrigation_demand` forces the push in, and its reply is equal.
   - `test_the_last_garden_takes_the_handlers` (L18, Y28): with `g1`, `g2`, the handlers are `g2`'s, and `"land.surfaces.g1.garden_handlers"` is in `unread`.
   - `test_the_garden_water_is_at_zero_degrees` (L19, Y29): a push at 0 °C into a soil at 11.5 °C cools the soil, as in WSIMOD.
-  - `test_the_garden_demand_is_yesterdays`: days 0 and 1 answer 0, then the previous day's deficit times `gardening_efficiency` (the spec's run: 40.0 × 0.42 = 16.8).
+  - `test_the_garden_demand_is_yesterdays`: day 0 answers 0 (the only day that does for certain), then the previous day's deficit times `gardening_efficiency`, 0 only where yesterday's deficit was 0 or the soil was full (the spec's run: 40.0 × 0.42 = 16.8).
   - Case `garden`: a `ResidentialDemand` through a `Distribution` to a `Land` with two `GardenSurface`s and a `PerviousSurface`, and a second `Land` with no garden on the same demand, which answers 0. `replay=("land", "land_plain")`.
 - [ ] **Step 2:** Run them. Expected: FAIL.
 - [ ] **Step 3:** Implement D24.
