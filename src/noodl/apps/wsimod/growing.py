@@ -412,6 +412,12 @@ class GrowingSurface(PerviousSurface):
     # factor and the day's et0_coefficient are per-day stores, recomputed before every reader
     carried_fields: ClassVar[tuple[str, ...]] = ("days_after_sow", "crop_cover", "ground_cover")
     crop_fields: ClassVar[tuple[str, ...]] = (*carried_fields, "crop_factor", "et0_coefficient")
+    # the pool's two factors, set every day before any reader (land.py:1813-1856): per-day
+    # stores, not carried, so the day's reset gives them the day's batch shape (I2)
+    pool_factor_fields: ClassVar[tuple[str, ...]] = (
+        "nutrient_pool.temperature_dependence_factor",
+        "nutrient_pool.soil_moisture_dependence_factor",
+    )
     parameter_defaults: ClassVar[dict[str, float]] = {
         **{
             k: v
@@ -528,8 +534,10 @@ class GrowingSurface(PerviousSurface):
     @classmethod
     def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
         """D5: the crop registers and the day's crop factor and ``et0_coefficient``; with
-        ``nutrients`` the pool's ``(5, 2)`` storage too."""
-        return (*cls.crop_fields, "nutrient_pool") if nutrients else cls.crop_fields
+        ``nutrients`` the pool's ``(5, 2)`` storage and its two per-day factors too."""
+        if not nutrients:
+            return cls.crop_fields
+        return (*cls.crop_fields, "nutrient_pool", *cls.pool_factor_fields)
 
     def stores(self) -> dict[str, Tensor]:
         """:meth:`Surface.stores`, with the pool's storage tensor at ``nutrient_pool``."""
@@ -539,16 +547,13 @@ class GrowingSurface(PerviousSurface):
         return out
 
     def load_store(self, field: str, value: Tensor) -> None:
-        """``nutrient_pool`` is the pool's storage; anything else is an attribute.
-
-        Loading the pool (once a day, from the state) also resets its two factors to a scalar
-        0: each day sets them before any reader (``land.py:1813-1856``, before ``:1744`` and
-        ``:2096``), so their value never carries over, but a factor written under a batched
-        mask would carry yesterday's batch shape into a day of another shape."""
+        """``nutrient_pool`` is the pool's storage, ``nutrient_pool.<factor>`` the pool's
+        factor; anything else is an attribute."""
         if field == "nutrient_pool" and self.nutrient_pool is not None:
             self.nutrient_pool.storage = value
-            self.nutrient_pool.temperature_dependence_factor = _f64(0.0)
-            self.nutrient_pool.soil_moisture_dependence_factor = _f64(0.0)
+            return
+        if field in self.pool_factor_fields and self.nutrient_pool is not None:
+            setattr(self.nutrient_pool, field.split(".", 1)[1], value)
             return
         super().load_store(field, value)
 

@@ -1117,12 +1117,17 @@ def growing_capture(name: str, days: int) -> tuple:
     return tuple(calls["land"])
 
 
-def _wsimod_days(name: str) -> list[dict]:
-    """The stores after each day's ``Land.run`` in WSIMOD (``post`` of its one ``run`` call a
-    day: nothing else calls into the land in these cases)."""
+def _wsimod_runs(name: str) -> list:
+    """Each day's ``Land.run`` call in WSIMOD's capture: one a day, and nothing else calls into
+    the land in these cases."""
     runs = [c for c in growing_capture(name, CASES[name].days) if c.method == "run"]
     assert [c.day for c in runs] == list(range(CASES[name].days))
-    return [c.post for c in runs]
+    return runs
+
+
+def _wsimod_days(name: str) -> list[dict]:
+    """The stores after each day's ``Land.run`` in WSIMOD (the ``post`` of :func:`_wsimod_runs`)."""
+    return [c.post for c in _wsimod_runs(name)]
 
 
 @functools.cache
@@ -1130,7 +1135,8 @@ def growing_days(name: str) -> tuple[list[dict], object]:
     """noodl's day driver (pollutants on) over the case's default ``days``: after each day's
     orchestration, the growing surface's tank (``(1 + K,)``), pool (``(5, 2)``) and
     ``days_after_sow``, ``crop_cover`` and ``total_decayed``, the outcomes of its decisions
-    (``{site: {outcome, ...}}`` over the active ones) and the day's events at the land."""
+    (``{site: {outcome, ...}}`` over the active ones), the day's events at the land and its
+    ``Surface.nitrite_carry_over`` inflow part (D11)."""
     network = read_wsimod_config(CASES[name].build())
     day = WsimodDay(network, pollutants=True)
     day.record_decisions = True
@@ -1151,6 +1157,7 @@ def growing_days(name: str) -> tuple[list[dict], object]:
                 "total_decayed": surface.total_decayed.clone(),
                 "outcomes": outcomes,
                 "events": {c: bool(t["land"]) for c, t in ctx.events.items() if "land" in t},
+                "carry_over": ctx.parts["in"].get("Surface.nitrite_carry_over"),
             }
         )
     return rows, network.pollutants
@@ -1177,8 +1184,8 @@ def test_the_pools_are_flushed_twice():
     dissolved pools that ``pull_storage`` already took them from (``land.py:1458``,
     ``:1605-1645``), so the tank and its pool drift apart. On ``growing_spring``, noodl's daily
     tank-pool gap (the tank's N and P less ``DI + DO``) equals WSIMOD's from the capture,
-    bitwise, on every day of the default run, and it is not zero: the gap is reproduced, not
-    a hard-coded ratio of it."""
+    bitwise, on every day of the default run, and it grows far above rounding (measured on day
+    539: 33.6 kg N and 1.99 kg P): the gap is reproduced, not a hard-coded ratio of it."""
     name = "growing_spring"
     ours, pollutants = growing_days(name)
     theirs = _wsimod_days(name)
@@ -1191,8 +1198,12 @@ def test_the_pools_are_flushed_twice():
             post[f"surfaces.{surface}.storage"], post[f"surfaces.{surface}.nutrient_pool"]
         )
         assert mine == wsimod, (day, mine, wsimod)
-        gaps.append(mine)
-    assert any(n != 0.0 for n, _ in gaps) and any(p != 0.0 for _, p in gaps)
+        gaps.append((mine, tank))
+    # above rounding (day 0's gap is ~1e-16): the largest gap exceeds a millionth of the
+    # largest tank store of N and of P
+    for column, names in ((0, _N_TANK), (1, _P_TANK)):
+        store = max(sum(abs(tank[n]) for n in names) for _, tank in gaps)
+        assert max(abs(gap[column]) for gap, _ in gaps) > 1e-6 * store, (names, store)
 
 
 def _negative_columns(tanks, additive) -> list[tuple[int, str]]:
@@ -1204,8 +1215,8 @@ def test_the_tank_columns_keep_their_sign(name):
     """L9: the uptake and the denitrification take the pool's N as nitrate (``land.py:1917``,
     ``:2145``) and the tank's decay (``growing_decay``) bypasses the pool, so ``pull_storage``
     could ask a tank column for more than it holds. noodl's answer to "did an additive column
-    of the growing tank go negative on some day" is WSIMOD's from the capture; the message
-    states it."""
+    of the growing tank go negative on some day" is WSIMOD's from the capture, and it is the
+    measured one the docs state (L9 row): no column went negative, in either."""
     ours, pollutants = growing_days(name)
     theirs = _wsimod_days(name)
     surface = ours[0]["surface"]
@@ -1216,7 +1227,7 @@ def test_the_tank_columns_keep_their_sign(name):
     wsimod = _negative_columns([post[f"surfaces.{surface}.storage"] for post in theirs], additive)
     answer = f"a negative column on {mine[:3]}" if mine else "no column went negative"
     assert mine == wsimod, f"{name}: noodl {answer}; WSIMOD {wsimod[:3]}"
-    assert bool(mine) == bool(wsimod), f"{name}: {answer}"
+    assert not mine, f"{name}: {answer}, in WSIMOD too: update the L9 row of the docs"
 
 
 # L1: the first three dates are a leap year's (28 and 29 February are adjusted days 59, 1 March is
@@ -1259,22 +1270,23 @@ def test_growing_spring_spans_the_leap_shift():
 
 
 def test_the_growing_cases_exercise_what_they_are_named_for():
-    """``growing_spring``'s default run has soil temperatures below 0, in ``(0, 5]`` and above
-    5 degC (``land.py:1820-1829``), a stressed and an unstressed crop (``:1561-1568``) and rain
-    above 5 mm (``:1943``). ``growing_autumn`` (L2) grows a crop with no cover all year, and its
+    """``growing_spring``'s default run reaches the soil temperature factor's three bands
+    (``warm`` and ``thawed`` each both ways, ``land.py:1820-1829``), a stressed and an unstressed
+    crop (``:1561-1568``), rain above 5 mm (``:1943``) and erosion's runoff branch both ways
+    (``:1959``). ``growing_autumn`` (L2) grows a crop with no cover all year, and its
     uptake reaches the autumn ``temp_func`` and ``days_after_sow - 25`` (``:1876-1879``), with
     ``days_after_sow`` both below and above 25. ``growing_decay`` decays its tank's ammonia and
     nitrite (3b) and raises ``"nutrient_pool_not_tracking"`` (D19)."""
-    spring, pollutants = growing_days("growing_spring")
-    temperature = [float(r["storage"][pollutants.column("temperature")]) for r in spring]
-    assert min(temperature) < 0 and any(0 < t <= 5 for t in temperature) and max(temperature) > 5
-    unstressed = set().union(
-        *(
-            r["outcomes"].get("node:land/surfaces.wheat/calc_crop_cover/unstressed", ())
-            for r in spring
-        )
-    )
-    assert unstressed == {True, False}
+    spring, _ = growing_days("growing_spring")
+    wheat = "node:land/surfaces.wheat"
+    for site in (
+        "calc_temperature_dependence_factor/warm",
+        "calc_temperature_dependence_factor/thawed",
+        "calc_crop_cover/unstressed",
+        "erosion/runoff",
+    ):
+        outcomes = set().union(*(r["outcomes"].get(f"{wheat}/{site}", ()) for r in spring))
+        assert outcomes == {True, False}, site
     mapping = CASES["growing_spring"].build()
     rain = mapping["nodes"][0]["data_input_dict"]
     first = mapping["dates"][: CASES["growing_spring"].days]
@@ -1293,3 +1305,21 @@ def test_the_growing_cases_exercise_what_they_are_named_for():
         assert sum(float(r["total_decayed"][pollutants.column(name)]) for r in decay) > 0.0
     tracking = [r["events"].get("nutrient_pool_not_tracking", False) for r in decay]
     assert any(tracking) and not all(tracking)
+
+
+def test_growing_decay_carries_yesterdays_decay_into_nitrite_and_nitrate():
+    """3b's carry-over on a growing tank (``land.py:427-439``): each day's ``Land.run`` adds the
+    tank's decayed ammonia as nitrite and its decayed nitrite as nitrate. noodl's
+    ``Surface.nitrite_carry_over`` part equals, bitwise on every day, the ``total_decayed`` that
+    WSIMOD's surface held when its run began (the capture's ``pre``), and it is not zero."""
+    name = "growing_decay"
+    ours, pollutants = growing_days(name)
+    runs = _wsimod_runs(name)
+    carried = {"nitrite": 0.0, "nitrate": 0.0}
+    for row, call in zip(ours, runs, strict=True):
+        decayed = call.pre[f"surfaces.{row['surface']}.total_decayed"]
+        for target, source in (("nitrite", "ammonia"), ("nitrate", "nitrite")):
+            mine = float(row["carry_over"][pollutants.column(target)])  # a full VQIP
+            assert mine == decayed[source], (call.day, target, mine, decayed[source])
+            carried[target] += mine
+    assert carried["nitrite"] > 0.0 and carried["nitrate"] > 0.0, carried

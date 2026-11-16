@@ -228,12 +228,12 @@ def test_the_replay_notices_a_difference():
 @pytest.mark.parametrize("what", ["temperature_dependence_factor", "nutrient_pool", "crop_factor"])
 def test_the_growing_replay_compares_the_pool_its_factors_and_the_crop_factor(what):
     """The land replay of a nitrate growing case (``growing_spring``) loads and compares the
-    pool (D4), its two factors (``pool_factors``, set every day, ``land.py:1813-1856``) and the
+    pool (D4), its two factors (per-day stores, set every day, ``land.py:1813-1856``) and the
     crop factor: the capture holds the factors with more than one value each, and a one-ulp
     change to one of them in one call's ``post`` fails the replay."""
     spec = CASES["growing_spring"]
     calls = captured("growing_spring")["land"]
-    prefix = "factors.surfaces.wheat."
+    prefix = "surfaces.wheat.nutrient_pool."
     for factor in ("temperature_dependence_factor", "soil_moisture_dependence_factor"):
         assert len({c.post[prefix + factor] for c in calls}) > 10, factor
     network = read_wsimod_config(spec.build())

@@ -653,10 +653,11 @@ def test_a_batch_of_two_capacities_equals_its_single_runs(case, pollutants):
         )
 
 
-@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only"])
+@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only", "growing_decay"])
 def test_a_day_of_batch_three_after_a_day_of_batch_two_resets_the_day(case):
     """I2: the per-day values a class does not reset itself (an FWTW's current_input and
-    solids, a surface's flows) start every day fresh, at the day's batch shape."""
+    solids, a surface's flows, a growing surface's two pool factors) start every day fresh, at
+    the day's batch shape."""
     network = read_wsimod_config(CASES[case].build())
     model, state, drivers = build_model(network)
     capacity = drivers["wsimod.Arc.capacity"]

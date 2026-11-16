@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from operator import attrgetter
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
@@ -361,7 +362,8 @@ class Surface(DecayTank):
         return {
             "storage": self.storage,
             **{f: getattr(self, f) for f in self.flow_fields},
-            **{f: getattr(self, f) for f in self.state_fields(nutrients=nutrients)},
+            # a dotted field is an attribute of an attribute (a growing pool's factors)
+            **{f: attrgetter(f)(self) for f in self.state_fields(nutrients=nutrients)},
             "total_decayed": self.total_decayed,
         }
 

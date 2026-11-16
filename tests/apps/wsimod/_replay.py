@@ -10,9 +10,7 @@ The comparison is exact for a class whose ``replay_bound`` is 0 (``Node``, ``Was
 ``Catchment``): every value must be bitwise WSIMOD's. A class with ``pow``/``exp``/``sqrt`` may
 declare ``1e-12`` (relative to the case's scale) with its cause written next to it. A River
 with biochemistry loads its two lag registers from WSIMOD's captured lists (padded, X17) and
-compares them after every call, and its bound ``temperature`` with the one WSIMOD read. A
-growing surface's pool loads its two factors from each call's ``pre`` and compares them with its
-``post`` (``_pool_factors``).
+compares them after every call, and its bound ``temperature`` with the one WSIMOD read.
 
 :class:`StoreNode` is a test double for the unit tests: a VQIP store of a given capacity whose
 WSIMOD type is settable.
@@ -48,7 +46,7 @@ from noodl.apps.wsimod.vqip import (
     v_change_vqip,
     write,
 )
-from tests.verification._wsimod_reference import INPUT_VARIABLES, POOL_FACTORS, pad_register
+from tests.verification._wsimod_reference import INPUT_VARIABLES, pad_register
 
 if TYPE_CHECKING:  # pragma: no cover
     from tests.verification._wsimod_reference import ArcCall, ArcDay
@@ -332,23 +330,6 @@ def compare_store(compare: _Comparer, label: str, path: str, ours: Tensor, their
         compare.value(label, ours, theirs)
 
 
-def _pool_factors(node: Node, captured: Mapping) -> dict[tuple, float]:
-    """The captured pool factors (``"factors.surfaces.<s>.<factor>"``, ``pool_factors``) by
-    ``(noodl pool, factor)``: a growing surface's pool sets them every day (``land.py:1813-1856``)
-    and its transformation and denitrification read them. A replay without the pool
-    (quantity-only) has none to load or compare."""
-    out = {}
-    for surface in getattr(node, "surfaces", ()):
-        pool = getattr(surface, "nutrient_pool", None)
-        if pool is None:
-            continue
-        for factor in POOL_FACTORS:
-            key = f"factors.surfaces.{surface.name}.{factor}"
-            if key in captured:
-                out[pool, factor] = captured[key]
-    return out
-
-
 def _spec(network: WsimodNetwork, name: str) -> NodeSpec:
     for spec in network.nodes:
         if spec.name == name:
@@ -434,16 +415,16 @@ def replay(
             for key, value in call.pre.items():
                 if key.startswith("forcing.surfaces."):
                     _, _, surface, variable = key.split(".", 3)
-                    read = node._surface(surface).forcing
-                    if variable in INPUT_VARIABLES and variable not in read:
+                    owner = node._surface(surface)
+                    if (
+                        variable in INPUT_VARIABLES
+                        and getattr(owner, "nutrient_pool", None) is None
+                    ):
                         continue  # a quantity-only replay has no pool: no fertiliser or manure
-                    compare.value(f"{label} {key}", read[variable], value)
+                    compare.value(f"{label} {key}", owner.forcing[variable], value)
         node.load_stores(
             {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
         )
-        factors = _pool_factors(node, call.pre)
-        for (pool, factor), value in factors.items():
-            setattr(pool, factor, torch.tensor(float(value), dtype=torch.float64))
         if call.method == "end_timestep":
             node.end_timestep()
             reply = None
@@ -461,8 +442,6 @@ def replay(
         stores = node.stores()
         for path in node.store_paths:
             compare_store(compare, f"{label} post {path}", path, stores[path], call.post[path])
-        for (pool, factor), value in _pool_factors(node, call.post).items():
-            compare.value(f"{label} post {pool.site}.{factor}", getattr(pool, factor), value)
         for arc in arcs.values():
             key = f"arcs.{arc.name}"
             if f"{key}.flow_in" in call.post:

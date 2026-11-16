@@ -1116,8 +1116,9 @@ has to be debugged, not admitted.
   series, and their land replays are bitwise, the pool, its two factors, the crop factor and the
   `et0_coefficient` included. WSIMOD prints round-off "mass balance error" lines for
   `org-phosphorus` at the land on these cases (about 2e-17 kg; 60, 9 and 11 lines); their store-
-  bounded admission is not in place yet, so these six parity items are strict expected failures
-  that also assert bitwise values with those lines alone set aside. `deposition_non_additive`
+  bounded admission is not in place yet, so these eight parity items (six default and two
+  `-m slow`) are strict expected failures that also assert bitwise values with those lines alone
+  set aside. `deposition_non_additive`
   runs `surface_deposition`'s surfaces with `ammonia` non-additive (Y43): bitwise, no prints.
 - **Crashes** (`test_case_runs_where_wsimod_crashes_*`): five cases where WSIMOD raises. Three
   run in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`,

@@ -70,7 +70,6 @@ __all__ = [
     "capture_node_calls",
     "extract_topology",
     "pad_register",
-    "pool_factors",
     "record_wsimod_run",
     "reference_of_rows",
     "reset_wsimod_globals",
@@ -550,24 +549,6 @@ def _attribute(obj, path: str):
     return obj
 
 
-# the two factors a growing surface sets on its pool every day (land.py:1813-1856), read by the
-# transformation and the denitrification of the same day (np.py:187-190)
-POOL_FACTORS = ("temperature_dependence_factor", "soil_moisture_dependence_factor")
-
-
-def pool_factors(node) -> dict[str, float]:
-    """A ``Land``'s growing surfaces' pool factors, ``"factors.surfaces.<s>.<factor>"``, when
-    WSIMOD runs the pools (``nitrate`` a pollutant, ``land.py:1276``); empty otherwise."""
-    if not (hasattr(node, "surfaces") and _runs_nutrients()):
-        return {}
-    return {
-        f"factors.surfaces.{surface.surface}.{factor}": getattr(surface.nutrient_pool, factor)
-        for surface in node.surfaces
-        if hasattr(surface, "nutrient_pool")
-        for factor in POOL_FACTORS
-    }
-
-
 def call_forcing(node) -> dict[str, float]:
     """The day's forcing the call reads: a biochemistry River's
     ``get_data_input("temperature")`` (``storage.py:750``)."""
@@ -606,9 +587,9 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     and each deposition surface's ``(variable, monthyear)`` values (with ``nitrate``, a growing
     surface's fertiliser and manure too) are ``pre["forcing.monthyear"]`` and
     ``pre["forcing.surfaces.<surface>.<variable>"]``, which the replay checks the same way. A
-    growing surface's ``nutrient_pool`` store is its five pools' ``(5, 2)`` ``N`` and ``P``, and
-    its pool's two factors are ``"factors.surfaces.<surface>.<factor>"`` (:func:`pool_factors`),
-    before and after every call; its ``crop_factor`` and ``et0_coefficient`` are stores.
+    growing surface's ``nutrient_pool`` store is its five pools' ``(5, 2)`` ``N`` and ``P``; its
+    pool's two factors (``nutrient_pool.<factor>``), ``crop_factor`` and ``et0_coefficient`` are
+    stores like any other.
     A call into a target that is already in a captured call is refused (D22); the error is
     raised again at exit, because WSIMOD's ``query_handler`` swallows exceptions and retries
     (``nodes.py:335-343``).
@@ -623,7 +604,6 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
 
     def snapshot(node) -> dict[str, object]:
         out: dict[str, object] = {path: _wsimod_store(node, path) for path in _store_paths(node)}
-        out.update(pool_factors(node))
         for arc in node.out_arcs.values():
             out[f"arcs.{arc.name}.vqip_in"] = copy.deepcopy(arc.vqip_in)
             out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
