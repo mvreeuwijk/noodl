@@ -191,6 +191,9 @@ _REFUSED = {"<=": "<= 0", "<": "< 0", "==": "0"}
 # land.py:1186-1250, WSIMOD's attributes as written (Python evaluates the expressions), set only
 # in ``__init__`` and reachable through the overrides (``:1376-1410``); and the two constructor
 # keywords that are batched parameters (``:1085-1094``)
+# the growing parameters a quantity-only run reads; ``crop_factor_stages`` is a structural value
+# (Y72). Every other one of GROWING_DEFAULTS that a configuration gives is listed as ignored
+QUANTITY_ONLY_READ = frozenset({"ET_depletion_factor", "rooting_depth"})
 GROWING_DEFAULTS: dict[str, float] = {
     "ET_depletion_factor": 1,
     "rooting_depth": 1,
@@ -626,6 +629,17 @@ class GrowingSurface(PerviousSurface):
         missing fertiliser or manure variable (``land.py:1649-1710`` reads all six) or a missing
         first-of-the-month row on a run date. A quantity-only run lists the data as ignored (the
         caller does)."""
+        ignored = []
+        if not pollutants:
+            # a quantity-only run reads only ET_depletion_factor, rooting_depth,
+            # crop_factor_stages (and the structural calendar values): every other growing
+            # parameter the configuration gives is listed (Y72, spec "Drivers"). The
+            # nutrient-pool drivers do not exist in a quantity-only run, so they are not listed.
+            ignored = [
+                f"surfaces.{surface.name}.{name}"
+                for name in GROWING_DEFAULTS
+                if name in surface.parameters and name not in QUANTITY_ONLY_READ
+            ]
         values = {**cls.parameter_defaults, **STRUCTURE_DEFAULTS, **surface.parameters}
         names = network.pollutants.names
         if "nitrate" in names:
@@ -642,7 +656,7 @@ class GrowingSurface(PerviousSurface):
             _soil_storage(values.get("initial_soil_storage"), where)
         _check_structure(values, where)
         if "nitrate" not in names:
-            return []
+            return ignored
         variables = {variable for variable, _ in surface.data}
         for variable in SURFACE_INPUTS:
             if variable not in variables:
@@ -659,7 +673,7 @@ class GrowingSurface(PerviousSurface):
                         f"{where}: no {variable!r} data on {month:%Y-%m-%d}, the first of the "
                         f"month of {date:%Y-%m-%d} (land.py:1649-1710, via :471)"
                     )
-        return []
+        return ignored
 
     # --- the calendar ---------------------------------------------------------------------------
     def set_dates(self, dates: Sequence[datetime], labels: Sequence[str]) -> None:

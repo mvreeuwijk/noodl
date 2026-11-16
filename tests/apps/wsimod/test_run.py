@@ -125,7 +125,8 @@ def test_the_prints_that_carry_the_node_and_the_date_match_the_records(case, eve
         ("decay_queue_groundwater", 40),
         ("decay_arc", 30),
         ("river_nutrients", 60),
-        ("growing_spring", 60),  # 3c: the pools, days_after_sow and the covers
+        ("growing_spring", 60),  # 3c: the pools carried through model.step
+        ("growing_spring", 200),  # crosses the sowing (run day 182): days_after_sow, the covers
     ],
 )
 def test_step_by_step_equals_wsimod_run(case, days):
@@ -415,22 +416,22 @@ def test_quantity_only_volumes_never_depend_on_3b_values(case, days):
 # --- 3c: batches, stepping, state and quantity-only structure (Task 10) -----------------------
 G = "wsimod.GrowingSurface."
 SPRING = "node:land/surfaces.wheat/"
-# 250 days for growing_spring, not the brief's 100: the crop is sown on run day 182 (2004-03-31),
-# so the uptake caps (Review Focus 1) are not reached before day 211 (measured, 250 is the
-# case's own bookkeeping horizon)
+# growing_spring's crop is sown on run day 182, so the uptake caps (Review Focus 1) differ between
+# instances only from day 211: that half runs 250 days and is ``slow`` (33 s measured, alone); the
+# default batch runs 100 days and shows the Newton iteration counts (day 32)
+_SPRING_PLAN = {
+    G + "kfr": [1.0, 0.2, 5.0, 0.05],
+    G + "uptake1": [1.0, 0.5, 2.0, 0.1],
+    G + "ET_depletion_factor": [1.0, 0.6, 1.4, 0.8],
+    G + "crop_factor_stages": [1.0, 1.3, 0.7, 1.0],
+    G + "nutrient_pool.degrhpar": [1.0, 0.5, 2.0, 0.1],
+    "wsimod.nhx-fertiliser": [1.0, 0.0, 3.0, 0.5],
+}
 BATCH_3C = {
-    "growing_spring": (
-        250,
-        {
-            G + "kfr": [1.0, 0.2, 5.0, 0.05],
-            G + "uptake1": [1.0, 0.5, 2.0, 0.1],
-            G + "ET_depletion_factor": [1.0, 0.6, 1.4, 0.8],
-            G + "crop_factor_stages": [1.0, 1.3, 0.7, 1.0],
-            G + "nutrient_pool.degrhpar": [1.0, 0.5, 2.0, 0.1],
-            "wsimod.nhx-fertiliser": [1.0, 0.0, 3.0, 0.5],
-        },
-    ),
+    "growing_spring": ("growing_spring", 100, _SPRING_PLAN),
+    "growing_spring_caps": ("growing_spring", 250, _SPRING_PLAN),
     "surface_deposition": (
+        "surface_deposition",
         100,
         {
             "wsimod.ImperviousSurface.pollutant_load": [1.0, 0.0, 3.0, 0.5],
@@ -452,13 +453,16 @@ def _newton_passes(records: list, instance: int) -> int:
     return passes
 
 
-@pytest.mark.parametrize("case", list(BATCH_3C))
-def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(case):
+@pytest.mark.parametrize(
+    "name",
+    [pytest.param(n, marks=pytest.mark.slow) if n.endswith("_caps") else n for n in BATCH_3C],
+)
+def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(name):
     """Four instances of the growing surface differ in ``kfr``, ``uptake1``,
     ``ET_depletion_factor``, the crop-factor stages, a pool rate and a fertiliser column; of the
     deposition surfaces in the loads, a deposition column and the area. Each equals its single
     run, state included."""
-    days, plan = BATCH_3C[case]
+    case, days, plan = BATCH_3C[name]
     model, state, drivers = _case(case)
     batched = _scaled(drivers, plan)
     if case == "surface_deposition":  # only the phosphate column of the loads varies
@@ -472,8 +476,8 @@ def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(case):
     together = _comparable(ran, dict(model.wsimod_day.last_state))
     assert ran.arc_flow.shape[0] == 4
     if case == "growing_spring":
-        # on some day two instances take different Newton iteration counts, and on some day
-        # different uptake caps (calc_crop_uptake/cap:N or cap:P among the instances that reach it)
+        # on some day two instances take different Newton iteration counts, and (250 days) on
+        # some day different uptake caps (calc_crop_uptake/cap:N or cap:P among those reaching it)
         counts = [
             len({_newton_passes(records, i) for i in range(4)})
             for records in diagnostics["decisions"]
@@ -486,7 +490,7 @@ def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(case):
             if d.site in (f"{SPRING}calc_crop_uptake/cap:N", f"{SPRING}calc_crop_uptake/cap:P")
             and len(set(d.outcome[d.active].tolist())) > 1
         ]
-        assert capped
+        assert capped or days < 250
     else:
         assert not torch.equal(ran.tank_quality[0], ran.tank_quality[1])
     for i in range(4):
@@ -590,7 +594,8 @@ def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
     the configuration's ``data_input_dict`` and ``pollutant_load`` values."""
     names = (
         "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion srfilt macrofilt "
-        "limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes bulk_density"
+        "limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes bulk_density "
+        "crop_cover_max ground_cover_max satact thetaupp thetalow thetapow slope"
     ).split()
     scale = {G + n: 1.7 for n in names}
     for kind in ("fertiliser", "manure"):
@@ -626,24 +631,43 @@ def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
 
 
 def test_quantity_only_lists_the_3c_parameters():
-    """What the configuration writes and a quantity-only run never reads is listed: the surface
-    data (the deposition, fertiliser and manure), the loads and the soil-temperature weights.
-    The volume parameters (``ET_depletion_factor``, ``rooting_depth``, ``crop_factor_stages``)
-    are not."""
-    listed = {}
-    for case in ("growing_spring", "surface_deposition"):
-        model, _, _ = build_model(read_wsimod_config(CASES[case].build()), pollutants=False)
-        listed[case] = model.ignored_by_quantity_only
-    assert "land.surfaces.wheat.data_input_dict" in listed["growing_spring"]
-    assert "land.surfaces.wheat.soil_temp_w_prev" in listed["growing_spring"]
-    for surface in ("roofs", "lawns"):
-        assert f"suburb.surfaces.{surface}.pollutant_load" in listed["surface_deposition"]
-        assert f"suburb.surfaces.{surface}.data_input_dict" in listed["surface_deposition"]
-    assert "suburb.surfaces.yards.data_input_dict" in listed["surface_deposition"]
-    for name in ("ET_depletion_factor", "rooting_depth", "crop_factor_stages"):
-        assert not any(item.endswith(name) for item in listed["growing_spring"]), name
-    model, _, _ = build_model(read_wsimod_config(CASES["growing_spring"].build()), pollutants=True)
+    """What the configuration writes and a quantity-only run never reads is listed (Y72): the
+    surface data, the loads, the soil-temperature weights and every growing parameter but the
+    ones the run reads (``ET_depletion_factor``, ``rooting_depth``, ``crop_factor_stages``). The
+    nutrient-pool drivers do not exist in a quantity-only run and are not listed."""
+    ignored_growing = (
+        "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion slope srfilt "
+        "macrofilt limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes "
+        "bulk_density crop_cover_max ground_cover_max satact thetaupp thetalow thetapow"
+    ).split()
+    mapping = CASES["growing_spring"].build()
+    # the growing parameters are WSIMOD overrides (land.py:1376-1410), as the soil weights are
+    nodes = mapping.setdefault("overrides", {}).setdefault("nodes", {})
+    entry = nodes.setdefault("land", {"type_": "Land", "name": "land"})
+    surface = entry.setdefault("surfaces", {}).setdefault("wheat", {})
+    for name in ignored_growing:
+        surface[name] = {"adosorption_nr_limit": 2e-5, "slope": 4}.get(name, 0.02)
+    read = ("ET_depletion_factor", "rooting_depth", "crop_factor_stages")  # given in the surface
+    network = read_wsimod_config(mapping)
+    model, _, _ = build_model(network, pollutants=False)
+    listed = model.ignored_by_quantity_only
+    assert "land.surfaces.wheat.data_input_dict" in listed
+    assert "land.surfaces.wheat.soil_temp_w_prev" in listed
+    for name in ignored_growing:
+        assert f"land.surfaces.wheat.{name}" in listed, name
+    for name in read:
+        assert f"land.surfaces.wheat.{name}" not in listed, name
+    assert not any("nutrient_pool" in item for item in listed)
+    model, _, _ = _case("growing_spring")
     assert model.ignored_by_quantity_only == []
+    # the deposition surfaces
+    model, _, _ = build_model(
+        read_wsimod_config(CASES["surface_deposition"].build()), pollutants=False
+    )
+    for surface in ("roofs", "lawns"):
+        for name in ("pollutant_load", "data_input_dict"):
+            assert f"suburb.surfaces.{surface}.{name}" in model.ignored_by_quantity_only
+    assert "suburb.surfaces.yards.data_input_dict" in model.ignored_by_quantity_only
 
 
 def test_the_results_follow_wsimods_record_layout():
