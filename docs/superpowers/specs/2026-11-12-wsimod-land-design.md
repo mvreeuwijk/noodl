@@ -974,6 +974,19 @@ summed into the balance, with one `(..., T, 1 + K_add)` entry per function and d
 | `"GrowingSurface.adsorption"` | in and out | `:2265` |
 | `"Surface.nitrite_carry_over"` (3b) | in | `:434-439` |
 | `"PerviousSurface.ihacres"`, `"ImperviousSurface.precipitation_evaporation"` (3a) | in, out | precipitation in, evaporation out |
+| `"ImperviousSurface.push_to_sewers"` (3a) | in, out | the runoff pushed to a sewer |
+| `"PerviousSurface.calculate_soil_temperature"` (3b) | in, out | `:1060-1079` |
+| `"PerviousSurface.route"` (3a) | in, out | `:1046-1058` |
+
+`PART_NAMES` (`land.py`) lists exactly these names, with the nitrite carry-over's
+`"Surface.nitrite_carry_over"` kept beside it as `NITRITE_CARRY_OVER`: `Surface.atmospheric_deposition`,
+`Surface.precipitation_deposition`, `Surface.simple_deposition`,
+`ImperviousSurface.precipitation_evaporation`, `ImperviousSurface.push_to_sewers`,
+`PerviousSurface.ihacres`, `PerviousSurface.calculate_soil_temperature`, `PerviousSurface.route`,
+`GrowingSurface.fertiliser`, `GrowingSurface.manure`, `GrowingSurface.soil_pool_transformation`,
+`GrowingSurface.calc_crop_uptake`, `GrowingSurface.erosion`, `GrowingSurface.denitrification` and
+`GrowingSurface.adsorption`. The functions that return empty VQIPs (`calc_crop_cover`,
+`effective_precipitation_flushing` and the two dependence factors) have no part (`NO_PART`).
 
 A test asserts that the parts of each direction sum to the aggregate within 1e-12 × scale. The
 sums differ only by summation order: WSIMOD adds sequentially (`land.py:444-449`), and the parts
@@ -1255,8 +1268,9 @@ Rule as in 3a and 3b:
 - otherwise noodl refuses by name or, for a state-dependent case, reproduces it and records an
   event.
 
-Each row has a test. Nothing is filed upstream without the user (Y4); #258 and #259 exist, and
-none of these is in them. 26 rows.
+Each row has a test. All 26 rows, L1 to L26, were filed upstream as
+ImperialCollegeLondon/wsi#260 on the user's instruction ("report them all", 2026-11-12), beside #258
+and #259, which hold none of them. 26 rows.
 
 | # | Defect | WSIMOD | noodl | Test |
 |---|---|---|---|---|
@@ -1758,8 +1772,7 @@ These record the coordinator's rulings on the Fable spec review (findings 1–14
   p₁p₂)`. Dropping the extraction in `pull_storage` and keeping the flushing removes `DI₀·(p₁ +
   p₂)`, and the reply's species split then needs a pool read that WSIMOD does not have. Neither
   is evident. `test_the_pools_are_flushed_twice` asserts that noodl's tank–pool gap on
-  `growing_spring` equals WSIMOD's, not a hard-coded ratio. Whether L8 and the other defects go
-  upstream is the user's decision, which is pending (Y4).
+  `growing_spring` equals WSIMOD's, not a hard-coded ratio. All 26 rows are filed as wsi#260 (Y4).
   - Why: parity, X14's precedent, and no single evident fix.
   - Cost if wrong: noodl inherits a large modelling error, documented and visible in the state.
 - **Y46, two events for the two zero-DIN guards (finding 13).** `"pull_storage_no_din"` (species
@@ -1795,6 +1808,5 @@ These record the coordinator's rulings on the Fable spec review (findings 1–14
 
 ## Open questions
 
-- **Upstream filing (Y4).** Whether L1–L25 go upstream as a third issue after #258 and #259 is
-  the user's decision, which is pending. Nothing is filed until then. The crash and mass-loss
-  rows (L3, L5–L10, L13, L14) are the strongest candidates.
+- **Upstream filing (Y4), closed.** All 26 rows, L1 to L26, were filed upstream as
+  ImperialCollegeLondon/wsi#260 on the user's instruction, beside #258 and #259.

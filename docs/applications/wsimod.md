@@ -38,7 +38,7 @@ live (below), and so are the treatment works' pollutant treatment and the first-
 the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces, and so is a
 `River`'s biochemistry (below), and the user decay arcs `DecayArc` and `DecayArcAlt`. A
 land's growing surfaces (`GrowingSurface`, `IrrigationSurface`, `GardenSurface` and
-`VariableAreaSurface`) and their nutrient pools are ported too (sub-project 3c). A surface's `pollutant_load` and its monthly
+`VariableAreaSurface`) and their nutrient pools are ported too. A surface's `pollutant_load` and its monthly
 deposition data are live (below).
 
 | Class | Process ported (sub-project 3b) |
@@ -991,7 +991,11 @@ node's handlers only for a positive configured leakage.
 ## Where WSIMOD is silent or wrong
 
 Where WSIMOD's source is defective, noodl does the evident intent or refuses by name; where
-WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a test.
+WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a test. The 26
+defects of the growing surface, the pools, the irrigation and the garden (L1 to L26, the rows
+below that carry an L number) were reported upstream as
+[ImperialCollegeLondon/wsi#260](https://github.com/ImperialCollegeLondon/wsi/issues/260); the
+earlier ones are in #258 and #259.
 
 | WSIMOD | noodl | Test |
 |---|---|---|
@@ -1020,6 +1024,11 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | Two or more `GardenSurface`s on a `Land`: the last one's handlers replace the others' (L18) | reproduced; the earlier ones are listed in `model.unread` (Y28) | `test_the_last_garden_takes_the_handlers`; `garden` |
 | The garden water is an empty VQIP with a volume (`demand.py:273-287`), so it is at 0 degC (L19) | reproduced (Y29) | `test_the_garden_water_is_at_zero_degrees`; `garden` |
 | `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]`; `test_wsimod_erosion_without_solids_raises` |
+| `Surface.apply_overrides`: a `pollutant_load` override on a surface built without one is ignored (the inflows were fixed at construction) and mutates the shared default `{}` (L14) | per surface; the load is listed in `model.unread` | `test_a_load_override_without_a_load_is_unread`; case `surface_overrides` |
+| `Surface.apply_overrides`: a `data_input_dict` override does not rebuild the deposition inflows (L15) | deposition data added by override are unread; removing `nhx-dry` by override is refused | `test_deposition_data_added_by_override_are_unread`; `test_surface_override_refusals` |
+| `GrowingSurface`: `depth` raises `TypeError` in the configuration (multiple values for `depth`) and is popped with a printed "ERROR" as an override (L17) | refused in both; `rooting_depth` is the override | `test_growing_refusals[depth]` |
+| dry deposition without wet data raises `KeyError` (L25) | refused by name | `test_surface_data_refusals[nhx-wet]` |
+| `calc_crop_cover`'s harvest branch stores `crop_factor = crop_factor_stages[0]`, which the next statement overwrites (L26) | not ported (no observable effect) | the `calc_crop_cover` docstring |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
 | `UnlimitedDistribution` loses its leakage | refused | `test_leakage_refusals` |
@@ -1057,7 +1066,7 @@ returns the water and balances. WSIMOD's `NonResidentialDemand` raises `Recursio
 
 - **Learnable.** Every numeric parameter (`"wsimod.<Class>.<parameter>"`), the arcs' capacities
   and preferences, the forcing series and the initial stores may require grad. The gradient
-  tests check 49 of them. From 3a, 22: arc capacity and preference, groundwater and land
+  tests check 81 of them. From 3a, 22: arc capacity and preference, groundwater and land
   residence times, impervious and pervious surface coefficients, `ihacres_p`, river `mrf` and
   `velocity`, a sewer's time-area fractions, `Distribution.leakage`, the `WWTW` and `FWTW`
   throughput capacities, `ResidentialDemand.per_capita`, a demand's `pollutant_load`, a
@@ -1067,7 +1076,16 @@ returns the water and balances. WSIMOD's `NonResidentialDemand` raises `Recursio
   treatment; the `WWTW`'s `process_parameters` (`constant`, `exponent`) and `liquor_multiplier`;
   the three soil-temperature weights; and, through the River's biochemistry, `denpar_w`,
   `halfsatINwater`, `prodNpar`, `muptNpar`, `T_wdays` and the air temperature, each read through
-  the nitrate and the organic-nitrogen outputs.
+  the nitrate and the organic-nitrogen outputs. From 3c, 32: the growing surface's
+  `ET_depletion_factor`, `rooting_depth`, crop factors and covers, `uptake1`, `uptake3`,
+  `denpar`, `hsatINs`, `exppar`, `satact`, `thetapow`, `kfr`, `nfr`, `kadsdes`, `erodibility`,
+  `sreroexp` and `srfilt`; the nutrient pool's `minfpar`, `immobdpar` and
+  `fraction_manure_to_dissolved_inorganic`; the monthly deposition, fertiliser and manure data and
+  the surfaces' `pollutant_load`; the temperature forcing through the temperature factor;
+  `IrrigationSurface.irrigation_coefficient`, `VariableAreaSurface.current_surface_area` and
+  `ResidentialDemand.gardening_efficiency`; each checked in a window of its case (`start`), with
+  a batched gradient of the loads and the deposition and the zero gradient of the adsorption's
+  Newton limit.
 - **Structural.** The topology, the classes, the pollutant lists, the orchestration, the travel
   times (whole days: they size the queues) and whether a `Distribution` has leakage at all
   (WSIMOD decorates its handlers only then) are fixed when the model is built.
@@ -1080,8 +1098,10 @@ returns the water and balances. WSIMOD's `NonResidentialDemand` raises `Recursio
   `diagnostics["decisions"]`) says how near a run is to such a point. A residence time near
   one day leaves a recession tail of about 1e-9 that a central difference sees as a kink.
 
-Against central differences at a relative step of 1e-6, all 49 gradients agree within 1.5e-7
-relative (the tolerance is 1e-6), and the `"decisions"` outcomes of the two perturbed runs are
+Against central differences at a relative step of 1e-6, all 81 gradients agree within 5.3e-7
+relative (the tolerance is 1e-6; the 3c entries' worst is `GrowingSurface.kfr` at 20, 5.3e-7, then
+`nhx-fertiliser` 4.5e-7 and `nfr` 3.0e-7, the irrigation and garden ones within 2.5e-8; the 3a and 3b
+ones within 1.5e-7), and the `"decisions"` outcomes of the two perturbed runs are
 identical. The worst are the River's (`T_wdays [nitrate]` 1.5e-7, `halfsatINwater [nitrate]`
 1.0e-7 and `denpar_w [org-nitrogen]` 6.8e-8, small gradients through 120 days of two rivers),
 then `Sewer.pipe_timearea` 5.9e-8; the decay entries are within 9e-10, the treatment ones within
@@ -1103,8 +1123,33 @@ travel times, the pollutant lists and whether a `Distribution` has leakage.
 
 Autograd is on only when a state or driver tensor requires grad (W9); otherwise the run is under
 `torch.no_grad()`. The graph is large because the day is thousands of small operations. The
-benchmark (`benchmarks/wsimod_run.py`) times 60 days with `wsimod.Arc.capacity` requiring grad
-and counts the autograd nodes behind the last day's storage:
+benchmark (`benchmarks/wsimod_run.py`) times 60 days (120 for `growing_spring`, which is sown on
+run day 90) with `wsimod.Arc.capacity` requiring grad and counts the autograd nodes behind the
+last day's storage. Each figure is one shot; the table is the 3c run at the end of the sub-project
+(Task 17, a machine at 4 to 6 % CPU load before the run), with the median of three of 3's
+Task 0 baseline beside it (that run was on a loaded machine), no grad / grad in s/day:
+
+| Demo | Batch | 3c run, no grad / grad | Task 0 median, no grad / grad | Autograd nodes |
+|---|---|---|---|---|
+| quickstart (quantity only) | 1 | 0.0424 / 0.0959 | 0.0532 / 0.0876 | 240,999 |
+| quickstart | 10 | 0.0743 / 0.0909 | 0.0706 / 0.0974 | 240,999 |
+| quickstart | 100 | 0.0793 / 0.1041 | 0.0732 / 0.0966 | 240,999 |
+| oxford (quantity only) | 1 | 0.2759 / 0.3652 | 0.2682 / 0.3650 | 936,765 |
+| oxford | 10 | 0.2950 / 0.3900 | 0.2842 / 0.3729 | 936,765 |
+| oxford | 100 | 0.2942 / 0.3713 | 0.2878 / 0.3954 | 936,765 |
+| oxford, `config.yml`, pollutants | 1 | 0.2948 / 0.3972 | 0.2805 / 0.3926 | 942,436 |
+| oxford, pollutants | 10 | 0.3056 / 0.4099 | 0.3018 / 0.4077 | 942,436 |
+| oxford, pollutants | 100 | 0.3198 / 0.4346 | 0.3158 / 0.4387 | 942,436 |
+| `growing_spring`, eight nutrient pollutants (120 days) | 1 | 0.0630 / 0.0961 | new in 3c | 441,093 |
+| `growing_spring` | 10 | 0.0817 / 0.1062 | | 441,093 |
+| `growing_spring` | 100 | 0.0858 / 0.1110 | | 441,093 |
+
+Oxford is unchanged by 3c, within the spread of one shot against a median (the surface deposition
+and the pool are not in it). The `growing_spring` case costs about 0.06 s a day at batch 1, and a batch of 100 costs 36 % more (no grad) and 16 % more (grad) than
+a batch of 1: the per-instance Python calls (about 30 per growing surface per day, plus 3 per
+Newton iteration of the adsorption). No assertion is made on any of these times (W8).
+
+The earlier table, of 3b, was measured on a shared machine:
 
 | Demo | Batch | `no_grad`, s/day | grad, s/day | Autograd nodes (60 days) |
 |---|---|---|---|---|
@@ -1144,9 +1189,11 @@ unloaded medians differ by 5 %).
 
 ## Limitations
 
-- **Sub-project 3c.** The land's nutrient pools and every surface class (`GrowingSurface`,
-  `IrrigationSurface`, `GardenSurface`, `VariableAreaSurface`) are ported. Not ported: surface
-  data named `*-residue` (`allocate_residue`, refused by name, Y36, L21) and `EnfieldFoulSewer`.
+- **Scope.** Every WSIMOD 0.8.1 class in `nodes/` and `arcs/` is ported except `EnfieldFoulSewer`
+  and the never-ported list: `GrowingSurface.residue` (`allocate_residue`; surface data named
+  `*-residue` is refused by name, Y36, L21), `NutrientPool.apply_overrides` (nothing calls it; the
+  pool's parameters are drivers, L20), the `("RiparianBuffer", "volume")` check (no such class
+  exists in WSIMOD 0.8.1, Y10) and `Model.change_impervious_area`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:
@@ -1179,15 +1226,16 @@ has to be debugged, not admitted.
   Reservoir, ResidentialDemand, Catchment) has worst difference exactly 0, with both IHACRES
   outcomes sampled.
 - **Whole model** (`tests/verification/test_wsimod_parity.py`): WSIMOD's two demos, `quickstart`
-  and `oxford`, each in two modes, against WSIMOD's own `Model.run`, and 49 purpose-built cases
+  and `oxford`, each in two modes, against WSIMOD's own `Model.run`, and the purpose-built cases
   (every feature the demos skip: queue arcs, a leaky `Distribution` and the reservoir spill,
   sewers with time-areas and foul sewers, storm tanks, an `FWTW` deficit, an evaporation clamp,
   a porous `QueueGroundwater`, rivers and the River biochemistry, decays, treatment, a
-  `float_accuracy` override and others) in two modes. (At the end of Task 9b `CASES` holds 63
-  cases: 56 run against WSIMOD, 55 of them in both modes and `growing_lean_soil` in pollutant
-  mode only, and seven are crash cases.)
+  `float_accuracy` override and others) in two modes. (At the end of 3c `CASES` holds 69
+  cases: 61 run against WSIMOD, 60 of them in both modes and `growing_lean_soil` in pollutant
+  mode only, and eight are noodl-only: six crash cases and `wtw_zero_input` and
+  `nonresidential_demand`.)
   Every arc's flow and pollutants, every recorded tank and every surface field, on every day. The
-  worst difference is exactly 0 for every node of both demos and for all 56 cases in each of their
+  worst difference is exactly 0 for every node of both demos and for all 61 cases in each of their
   modes, the River biochemistry cases (`river_nutrients`, `river_double_discharge`) included, and
   no tie admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
   day (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
@@ -1201,7 +1249,7 @@ has to be debugged, not admitted.
   run's exactly (`torch.equal`). The River biochemistry cases: `river_nutrients` runs its first
   400 days by default and all 1100 under `-m slow`, when the decisions are recorded and every
   branch is asserted (X39, D24); `river_double_discharge` runs its 40 days by default.
-- **The growing surface with its nutrient pool** (3c): `growing_spring` (sown on day 90,
+- **The growing surface with its nutrient pool:** `growing_spring` (sown on day 90,
   harvested on 250, fertiliser, manure, deposition and an `initial_soil_storage`; 365 days by
   default, its three years under `-m slow`), `growing_autumn` (sown on 280, harvested on 200:
   the unsorted calendar and the autumn uptake; 300 days by default, 400 under `-m slow`),
@@ -1272,15 +1320,19 @@ has to be debugged, not admitted.
   0) and `growing_empty_soil` (an empty soil, `ET_depletion_factor = 0.5`, dry deposition and a
   crop sown on the first day: L7, `:1899`, day 1). A sixth, `irrigation_without_nutrients` (L13, `KeyError` at `:2373`, day 5), runs a surface with the
   pollutants `phosphate` and `temperature` and no event: noodl updates no pool.
-- **Gradients** (`tests/verification/test_wsimod_gradients.py`): 49 entries (22 from 3a, 27 from
-  3b), central differences at a relative step of 1e-6, the two perturbed runs' decision outcomes
-  identical. The worst relative disagreement is 1.5e-7 (`River.T_wdays [nitrate]`; then
-  `River.halfsatINwater [nitrate]` 1.0e-7, `River.denpar_w [org-nitrogen]` 6.8e-8, `Sewer.pipe_timearea`
-  5.9e-8 and `River.mrf` 3.6e-8) against a tolerance of 1e-6. Nineteen of the 49 are `-m slow`:
+- **Gradients** (`tests/verification/test_wsimod_gradients.py`): 81 entries (22 from 3a, 27 from
+  3b, 32 from 3c), central differences at a relative step of 1e-6, the two perturbed runs' decision outcomes
+  identical. The worst relative disagreement is 5.3e-7 (`GrowingSurface.kfr` at 20; then
+  `nhx-fertiliser` 4.5e-7, `nfr` 3.0e-7, `uptake1` 1.4e-7 and, of 3b, `River.T_wdays [nitrate]`
+  1.5e-7, `River.halfsatINwater [nitrate]` 1.0e-7) against a tolerance of 1e-6. The irrigation and
+  garden entries are within 2.5e-8 (`IrrigationSurface.irrigation_coefficient`,
+  `VariableAreaSurface.current_surface_area`, `ResidentialDemand.gardening_efficiency`). Of 3a's and 3b's 49, nineteen are `-m slow`:
   the six quickstart ones (200 days), two soil weights and eleven of the River's (120 days of two
   rivers, 10 s and more each); each 3b family keeps its cheapest entry in the default selection,
-  and a mutation of `pow_python` or of `window_sum` fails a default entry. The 49 take 229 s
-  with `-n 4` on a shared machine.
+  and a mutation of `pow_python` or of `window_sum` fails a default entry. Of the 32 from 3c, 27
+  are `-m slow` (each growing run takes 15 to 30 s alone) and 5 are in the default selection; the
+  whole file under `-m slow` took 413 s in Task 16. The 3a and 3b entries took 229 s with `-n 4` on a
+  shared machine.
 
 | Run | Days | Modes | Worst difference | Default | Time (`-n 4`) |
 | --- | --- | --- | --- | --- | --- |
@@ -1301,7 +1353,12 @@ has to be debugged, not admitted.
 | `growing_no_nitrate` | 365 (540 `-m slow`) | quantity-only, all pollutants | 0 | yes | 16 s, 16 s |
 | five growing crash cases | 10 to 20 | the pollutants of each | 0 on the days before WSIMOD's crash | yes | a few seconds each |
 | `deposition_non_additive` | 90 | quantity-only, all pollutants | 0 | yes | 3 s, 4 s |
-| 49 gradients | 1 to 200 | quantity-only values, pollutant runs | 1.5e-7 relative | 30 of 49 (19 `-m slow`) | 229 s in all |
+| `irrigation`, `irrigation_early` | 120 | quantity-only, the eight nutrient pollutants | 0 (no print admission needed) | yes | 19 s the pollutant mode of each, below 13 s the other |
+| `garden` | 100 | quantity-only, the eight nutrient pollutants | 0 | yes | below 13 s a mode |
+| `variable_area` | 100 | quantity-only, the eight nutrient pollutants | 0 (three round-off lines within 0.889 eps S) | yes | below 13 s a mode |
+| `surface_overrides` | 100 | quantity-only, pollutant mode | 0 | yes | below 13 s a mode |
+| `irrigation_without_nutrients` | 40 | pollutants `phosphate` and `temperature` | noodl only (WSIMOD raises on day 5, L13) | yes | a few seconds |
+| 81 gradients (49 from 3a and 3b, 32 from 3c) | 1 to 200 | quantity-only values, pollutant runs | 5.3e-7 relative | 35 of 81 (46 `-m slow`) | 229 s for the 49 (shared machine); 413 s for the file under `-m slow` |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
 pollutant mode runs the same `config.yml` with every pollutant and compares all of them. Neither demo has a `River` node, so
@@ -1325,3 +1382,15 @@ cases' long horizons moved to `-m slow` (Y68: `growing_spring` 365 of 1096 days,
 `growing_autumn` 300 of 400, `growing_decay` 100 of 200, and with W15 `surface_deposition` 180
 of 450 and `growing_no_nitrate` 365 of 540), and the bookkeeping items run those cases on a
 prefix (`Case.bookkeeping`). Their table times above are from that run.
+
+At the end of 3c (Task 17) the wsimod row (`tests/apps/wsimod`, the allocation and `test_wsimod_*`
+verification files, 1,900 tests, without the core subset) took 1,160 s (19 min 20 s) with `-n 4`
+on a machine with no other jobs, CPU load sampled every 30 s at 1 to 12 % (mean 4 %: its own four
+workers). That is over the 10-minute budget (W15) and no horizon was cut further (Y87): the
+irrigation, garden and variable-area cases, the batches, the replays and the 3c gradients, run
+after Task 9b's measurement, came on top of it. The four demo parity items took 93 to 109 s each,
+against 30 to 40 s unloaded in 3b, so this machine ran about 2.5 times slower than the 3b one,
+and the figure carries that factor. Of the 30 slowest items, 18 are 3c items (the growing, irrigation and
+deposition cases and their batches and replays), against W15's goal of none; the slowest is
+`test_quantity_only_volumes_never_depend_on_3c_pollutant_values` at 52 s. A later review may
+propose splitting the demo items off the row.

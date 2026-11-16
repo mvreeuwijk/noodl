@@ -47,7 +47,7 @@ ADDITIVE_POLLUTANTS: tuple[str, ...] = (
 
 # land.py:375-380, :540-576: the surface data the deposition functions read (D8)
 SURFACE_DEPOSITION = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
-# land.py:1167-1172, :1649-1710: the fertiliser and manure data a growing surface reads (3c, later)
+# land.py:1167-1172, :1649-1710: the fertiliser and manure data a growing surface reads
 SURFACE_INPUTS = (
     "nhx-fertiliser",
     "noy-fertiliser",

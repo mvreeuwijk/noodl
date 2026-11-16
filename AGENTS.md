@@ -29,9 +29,12 @@ Add the application you are changing. CI's `branch` job uses the same table
 | electrical | `tests/apps/electrical tests/layers/test_mna*.py tests/test_model_mna.py tests/operators/test_mna_operator.py tests/verification/test_power_flow_parity.py tests/verification/test_modelica_electrical_parity.py` |
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |
 
-The wsimod row runs in about 5 minutes with `-n 4` on an unloaded machine (315 s, 5,798 tests, measured
-in the last 3b task; 675 s, 5,835 tests, on a shared machine at the end of 3b), within the 10-minute
-budget when unloaded, so nothing more is cut: the default composition is quickstart in full (1456 days,
+The wsimod row (`tests/apps/wsimod`, the allocation and `test_wsimod_*` verification files, 1,900
+tests) took 1,160 s (19 min 20 s) with `-n 4` on a machine with no other jobs at the end of 3c (CPU
+load sampled every 30 s: 1 to 12 %, mean 4 %, which is its own four workers), over the 10-minute
+budget: the 3c cases (the growing surface, irrigation, garden, variable area, and their replays
+and batches) added to it, and no horizon was cut further (Y87). The four demo parity items took 93 to 109 s each, against 30 to 40 s in the 3b measurement below, so this machine ran about 2.5 times slower than that one with nothing else on it. Before 3c, 315 s on an unloaded
+machine (5,798 tests including the core subset, 3b) and 675 s on a shared one. The default composition is quickstart in full (1456 days,
 both modes, 30-40 s each unloaded), oxford for its first 365 days (both modes, similar), the sampled
 replays, the gradients and the cases (the rest); `river_nutrients` runs 400 of its 1100 days by default.
 Full oxford (1456 days, both modes, about
