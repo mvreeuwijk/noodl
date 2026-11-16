@@ -1836,6 +1836,91 @@ def test_a_clamped_pull_records_the_event():
                 assert float(ours.storage[NUT.column(name)]) == 0.0
         else:
             assert ammonia > 1e-3
+    # short by less than FLOAT_ACCURACY: the clamp bites, but the event stays false
+    tank = _random_tank(rng)
+    _set_state(theirs, ours, tank, _random_pools(rng))
+    request = {**dict.fromkeys(_KEYS, 0.0), "nitrate": tank["nitrate"] + 1e-13}
+    ctx = _nut_ctx(land)
+    clamped = ours._pull_tracked(NUT.to_vqip(request), active=TRUE)
+    their = theirs.pull_pollutants(dict(request))
+    assert torch.equal(clamped, _vector(their))
+    assert float(clamped[NUT.column("nitrate")]) == tank["nitrate"] < request["nitrate"]
+    assert not bool(ctx.events["nutrient_pool_not_tracking"]["land"])
+
+
+def test_no_crop_never_evaluates_the_uptake_exponential():
+    """``land.py:1872``: without a crop WSIMOD returns empty VQIPs and never evaluates
+    ``exp(-uptake3 * d)``; with ``uptake3 = 800`` and ``days_after_sow = None`` (``-1``) noodl's
+    ``math.exp(800)`` would overflow. Both return empty."""
+    rng = random.Random(83)
+    for sowing in (90, 250):
+        parameters = {**_soil_parameters(rng), "uptake3": 800.0}
+        theirs, land, ours = _soil_pair(parameters, sowing_day=sowing)
+        tank, pools = _random_tank(rng), _random_pools(rng)
+        _set_state(theirs, ours, tank, pools, days=-1)
+        _nut_ctx(land)
+        their = theirs.calc_crop_uptake()
+        in_, out_ = ours.calc_crop_uptake(active=TRUE)
+        _assert_same(theirs, ours, their, (in_, out_), sowing)
+        assert not in_.any() and not out_.any()
+
+
+@pytest.mark.parametrize("name", ["thetaupp", "thetalow"])
+def test_a_negative_theta_with_a_fractional_power_is_refused(name):
+    """With ``thetapow`` fractional, a negative ``thetaupp`` or ``thetalow`` makes the moisture
+    factor's base negative: Python's ``**`` is complex and WSIMOD's ``min`` raises ``TypeError``
+    (``land.py:1849-1853``). Refused by name at build and, per instance, at bind."""
+    import traceback
+
+    rng = random.Random(89)
+    parameters = {**_soil_parameters(rng), name: -0.1, "thetapow": 1.5}
+    theirs, _, _ = _soil_pair({k: v for k, v in parameters.items() if k != name})
+    setattr(theirs, name, -0.1)
+    theirs.thetapow = 1.5
+    smc = (theirs.field_capacity_m + theirs.wilting_point_m) / 2
+    theirs.storage = _random_tank(rng, volume=smc * parameters["area"])
+    with pytest.raises(TypeError) as raised:
+        theirs.calc_soil_moisture_dependence_factor()
+    frame = traceback.extract_tb(raised.value.__traceback__)[-1]
+    assert frame.filename.endswith("land.py") and 1849 <= frame.lineno <= 1855
+    mapping = _mapping(
+        [_complete()], overrides={"g": {name: -0.1, "thetapow": 1.5}}, lists=_NITRATE
+    )
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match=f"{name}.*fractional thetapow"):
+            _validate(mapping, pollutants=pollutants)
+    surface = _nutrient_land(initial_storage=_START).surfaces[0]
+    with pytest.raises(ValueError, match=f"{name}.*fractional thetapow"):
+        surface.bind(
+            {
+                name: torch.tensor([0.1, -0.1], dtype=F64),
+                "thetapow": torch.tensor([1.5, 1.5], dtype=F64),
+            }
+        )
+    # per instance: the negative one has an integral power
+    surface.bind(
+        {
+            name: torch.tensor([0.1, -0.1], dtype=F64),
+            "thetapow": torch.tensor([1.5, 2.0], dtype=F64),
+        }
+    )
+
+
+def test_a_negative_theta_with_an_integral_power_runs_as_wsimod():
+    """``thetaupp = -0.1`` with ``thetapow = 2``: WSIMOD runs (an integral power of a negative
+    base is real), and noodl's factor equals it bitwise."""
+    rng = random.Random(97)
+    parameters = {**_soil_parameters(rng), "thetaupp": -0.1, "thetalow": -0.07, "thetapow": 2.0}
+    theirs, land, ours = _soil_pair(parameters)
+    fc_m, wp_m = theirs.field_capacity_m, theirs.wilting_point_m
+    for _ in range(20):
+        smc = rng.uniform(wp_m, fc_m)
+        _set_state(theirs, ours, _random_tank(rng, volume=smc * parameters["area"]), [[0, 0]] * 5)
+        _nut_ctx(land)
+        theirs.calc_soil_moisture_dependence_factor()
+        ours.calc_soil_moisture_dependence_factor(active=TRUE)
+        their = theirs.nutrient_pool.soil_moisture_dependence_factor
+        assert float(ours.nutrient_pool.soil_moisture_dependence_factor) == their
 
 
 def _uptake_scale(parameters, days, autumn) -> float:
@@ -2092,6 +2177,8 @@ def test_gradcheck_on_the_factors_and_uptake():
         hot0[0] = True
         tank = torch.where(hot, temperature, torch.where(hot0, volume, tank))
         ours.storage = tank
+        # fresh factors: write's torch.where carries the old value's graph, which the previous
+        # gradcheck call has already freed
         pool = ours.nutrient_pool
         pool.temperature_dependence_factor = torch.tensor(0.0, dtype=F64)
         pool.soil_moisture_dependence_factor = torch.tensor(0.0, dtype=F64)

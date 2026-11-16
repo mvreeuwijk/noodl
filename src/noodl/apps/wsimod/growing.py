@@ -296,6 +296,25 @@ def _check_domain(values: Mapping, where: str) -> None:
             raise ValueError(f"{where}: {name} {value.tolist()} is {_REFUSED[op]}: {why}")
 
 
+def _check_negative_base(values: Mapping, where: str) -> None:
+    """With ``nitrate``: ``thetaupp < 0`` or ``thetalow < 0`` where ``thetapow`` is not integral,
+    per instance. The soil-moisture factor's base ``fc_diff / (thetaupp * rooting_depth)`` (or its
+    ``thetalow`` twin) is then negative, Python's ``**`` returns a complex number and WSIMOD's
+    ``min`` raises ``TypeError`` (``land.py:1849-1853``). With an integral ``thetapow`` WSIMOD
+    runs, and so does noodl."""
+    power = _f64(values["thetapow"])
+    fractional = power != torch.floor(power)
+    for name in ("thetaupp", "thetalow"):
+        value = _f64(values[name])
+        bad = (value < 0) & fractional
+        if bool(bad.any()):
+            raise ValueError(
+                f"{where}: {name} {value.tolist()} < 0 with a fractional thetapow "
+                f"{power.tolist()}: a negative base to a fractional power, WSIMOD's min raises "
+                "TypeError (land.py:1849-1853)"
+            )
+
+
 def _soil_storage(value: object, where: str) -> Mapping | None:
     """``initial_soil_storage`` (``land.py:1308-1324``, read only with ``nitrate``): falsy (no
     solid pools) or a mapping with :data:`_SOIL_STORAGE_KEYS`, each a number. A float, which
@@ -501,6 +520,7 @@ class GrowingSurface(PerviousSurface):
         if self.nutrient_pool is not None:
             values = {**self.defaults, **parameters}
             _check_domain({name: values[name] for name, _, _ in _DOMAIN}, self.site)
+            _check_negative_base(values, self.site)
         stages = parameters.pop("crop_factor_stages", None)
         stages = self._stages_default if stages is None else _f64(stages)
         length = len(self.crop_factor_stage_dates)
@@ -559,6 +579,7 @@ class GrowingSurface(PerviousSurface):
                         "(land.py:1294-1307, :1465, :2088, :1822: KeyError; L24)"
                     )
             _check_domain(values, where)
+            _check_negative_base(values, where)
             _soil_storage(values.get("initial_soil_storage"), where)
         _check_structure(values, where)
         if "nitrate" not in names:
@@ -1091,7 +1112,10 @@ class GrowingSurface(PerviousSurface):
         # :1884-1896
         uptake1, uptake2 = self._param("uptake1"), self._param("uptake2")
         uptake3 = self._param("uptake3")
-        uptake_par = (uptake1 - uptake2) * exp_python(-uptake3 * days)
+        # exp only where a crop grows: WSIMOD never evaluates it elsewhere, so a no-crop day or a
+        # masked instance cannot overflow math.exp
+        exponent = torch.where(crop, -uptake3 * days, torch.zeros_like(uptake3 * days))
+        uptake_par = (uptake1 - uptake2) * exp_python(exponent)
         shape = ctx.decide(f"{site}/shape", uptake_par + uptake2, ">", 0.0, active=crop, call=call)
         total = torch.where(shape, uptake2 + uptake_par, torch.ones_like(uptake_par))
         common_n = uptake1 * uptake2 * uptake3 * uptake_par / pow_python(total, 2.0)

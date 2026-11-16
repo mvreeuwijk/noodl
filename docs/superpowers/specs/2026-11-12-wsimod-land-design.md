@@ -1046,7 +1046,11 @@ New refusals, each by name with a test:
     - `cohesion = 0`, `thetaupp = 0` and `thetalow = 0` (divisions);
     - `hsatINs ≤ 0` (`din_conc + hsatINs` can be 0);
     - `limpar < 0`, with which a dry soil reaches `DI.N / 0`;
-    - `field_capacity ≤ 0` (`smc / field_capacity_m`).
+    - `field_capacity ≤ 0` (`smc / field_capacity_m`);
+    - per instance, `thetaupp < 0` or `thetalow < 0` where `thetapow` is not integral: the
+      soil-moisture factor's base is then negative, Python's `**` is complex and WSIMOD's `min`
+      raises `TypeError` (`land.py:1849-1853`). With an integral `thetapow` WSIMOD runs, and
+      noodl matches it bitwise, so that case is not refused (Task 7 review, finding 2).
   - In both modes, the `ET_depletion_factor = 1` stress case is not refused: it is the evident
     intent (Y17).
 - **`IrrigationSurface`:** none beyond its parent's. The missing-pollutant crash is avoided

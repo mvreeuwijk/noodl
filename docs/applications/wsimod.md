@@ -632,7 +632,7 @@ builds a large graph, so fit in windows). Stepping with `model.step` and running
 `wsimod_run` give identical values.
 
 ```python
-from noodl.apps.wsimod import wsimod_run
+from noodl.apps.wsimod import EVENT_NAMES, wsimod_run
 
 model, state, drivers = build_model(network)
 diagnostics = {}
@@ -642,7 +642,7 @@ print(results.tank_names, [round(x, 4) for x in results.tank_storage[:, 0].tolis
 balance = results.mass_balance
 print(sorted(balance.terms))
 print(float(balance.residual.abs().max()) < 1e-12)
-print(sorted(diagnostics["events"])[:3], tuple(diagnostics["events"]["demand_deficit"].shape))
+print(set(diagnostics["events"]) == set(EVENT_NAMES), tuple(diagnostics["events"]["demand_deficit"].shape))
 print(round(float(balance.inflow[0, 0]), 4), round(float(balance.storage_change[0, 0]), 4))
 ```
 
@@ -651,7 +651,7 @@ print(round(float(balance.inflow[0, 0]), 4), round(float(balance.storage_change[
 [('river', 'tank')] [0.1389, 0.1275, 0.1101, 0.1043, 0.2316]
 ['Catchment.flow', 'Catchment.unrouted', 'Waste.total_in', 'dropped']
 True
-['crop_uptake_dry_soil', 'crop_water_stress_zero_denominator', 'decay_arc_order_unknown'] (5, 3)
+True (5, 3)
 120.0 0.1389
 ```
 
