@@ -93,6 +93,7 @@ PART_NAMES = {
     "calc_crop_uptake": "GrowingSurface.calc_crop_uptake",
     "erosion": "GrowingSurface.erosion",
     "denitrification": "GrowingSurface.denitrification",
+    "adsorption": "GrowingSurface.adsorption",
 }
 NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"
 # the surface functions that return empty VQIPs and so have no part (D11)

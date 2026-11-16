@@ -21,15 +21,20 @@ three N species 0 in ``pull_storage``, where WSIMOD raises ``ZeroDivisionError``
 Y18; the decision ``S/pull_storage/no_din`` and the event ``"pull_storage_no_din"``).
 
 **The soil processes** run after ``calculate_soil_temperature``, in WSIMOD's list
-(``:1283-1291``; adsorption is a later task, D20): the temperature and soil-moisture
+(``:1283-1291``, D20): the temperature and soil-moisture
 factors of the day (``:1813-1856``; the temperature factor jumps at 5 °C, L12, Y19), the pool's
 transformations scaled back into the tank (``:1744-1811``), crop uptake (``:1858-1926``), erosion
 (``:1928-2094``; its sediment and the adsorbed and humus P go straight into the day's outflows,
-bypassing the tank, and a short pool records ``"erosion_pool_short"``) and denitrification
-(``:2096-2152``). Uptake and denitrification take all their N as nitrate (L9).
+bypassing the tank, and a short pool records ``"erosion_pool_short"``), denitrification
+(``:2096-2152``) and the Freundlich adsorption of phosphorus (``:2154-2265``; its Newton loop is
+unrolled to ``adsorption_nr_maxiter`` passes and its convergence test lags one pass, both
+transcribed; no adsorbed P takes WSIMOD's shortcut, ``"adsorption_shortcut"``, and a request
+above its pool records ``"freundlich_flow_adjusted"``, L11). Uptake and denitrification take all
+their N as nitrate (L9).
 Each pulls from the tank through :meth:`GrowingSurface._pull_tracked`, whose clamp records
-``"nutrient_pool_not_tracking"`` (L10). Python's ``**``, ``exp``, ``log10`` and ``sin`` are
-evaluated per instance (``pow_python``, ``exp_python``, ``log10_python``, ``sin_python``). Two
+``"nutrient_pool_not_tracking"`` (L10). Python's ``**``, ``exp``, ``log``, ``log10`` and ``sin`` are
+evaluated per instance (``pow_python``, ``exp_python``, ``log_python``, ``log10_python``,
+``sin_python``). Two
 zero denominators are guarded: ``nitrate + ammonia = 0`` in the transformation (proportion 0,
 ``"transformation_no_din"``, L6) and ``V = 0`` in the uptake (no available uptake,
 ``"crop_uptake_dry_soil"``, L7), where WSIMOD raises ``ZeroDivisionError``.
@@ -81,8 +86,9 @@ dry, wet, fertiliser and manure calls in that order), the pool's own
 ``S/calc_soil_moisture_dependence_factor/{saturated,wilted,min:wp,min:fc}``,
 ``S/soil_pool_transformation/{no_din,inorganic_N,organic_N,inorganic_P,organic_P}``,
 ``S/calc_crop_uptake/{crop,temperature_cap,temperature_floor,shape,available_water,dry_soil,cap:P,
-cap:N}``, ``S/erosion/{rain,runoff,transport,enrichment_cap,flow,phosphorus}`` and
-``S/denitrification/{saturated,moist}``.
+cap:N}``, ``S/erosion/{rain,runoff,transport,enrichment_cap,flow,phosphorus}``,
+``S/denitrification/{saturated,moist}`` and ``S/adsorption/{empty,shortcut,
+newton:<j>/{residual,step,positive},change,adsorb}``.
 """
 
 from __future__ import annotations
@@ -102,6 +108,7 @@ from noodl.apps.wsimod.constants import (
     KG_M2_TO_KG_KM2,
     KG_M3_TO_KG_KM3,
     KG_M3_TO_MG_L,
+    KG_TO_MG,
     M2_TO_KM2,
     M_TO_KM,
     M_TO_MM,
@@ -123,6 +130,7 @@ from noodl.apps.wsimod.vqip import (
     Pollutants,
     extract_vqip,
     log10_python,
+    log_python,
     pow_python,
     safe_den,
     sin_python,
@@ -366,8 +374,8 @@ def _f64(x) -> Tensor:
 
 class GrowingSurface(PerviousSurface):
     """``GrowingSurface`` (``land.py:1082-2312``): construction, overrides, the crop calendar,
-    ``calc_crop_cover``, the nutrient pool's inputs and outputs, the soil processes and erosion
-    (see the module text).
+    ``calc_crop_cover``, the nutrient pool's inputs and outputs and the soil processes, erosion
+    and adsorption among them (see the module text).
 
     Parameters (``parameter_defaults``): :class:`~noodl.apps.wsimod.land.PerviousSurface`'s without
     ``depth`` (its physical depth is ``rooting_depth``) and ``et0_coefficient`` (overwritten every
@@ -438,8 +446,7 @@ class GrowingSurface(PerviousSurface):
             self._fill_pool(_soil_storage(structure.get("initial_soil_storage"), where))
             # :1278-1281 (residue stays unwired, :1281)
             self.inflows += [self.effective_precipitation_flushing, self.fertiliser, self.manure]
-            # :1283-1291, after calculate_soil_temperature; adsorption (last) is a later task
-            # (D20)
+            # :1283-1291, after calculate_soil_temperature (D20)
             self.processes += [
                 self.calc_temperature_dependence_factor,
                 self.calc_soil_moisture_dependence_factor,
@@ -447,6 +454,7 @@ class GrowingSurface(PerviousSurface):
                 self.calc_crop_uptake,
                 self.erosion,
                 self.denitrification,
+                self.adsorption,
             ]
 
     def _fill_pool(self, soil: Mapping | None) -> None:
@@ -1334,6 +1342,127 @@ class GrowingSurface(PerviousSurface):
         out_ = self._with_columns(ctx.empty(), {"nitrate": taken[..., 0]})
         out_ = self._pull_tracked(out_, active=run)
         return ctx.empty(), torch.where(run[..., None], out_, ctx.empty())
+
+    def adsorption(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:2154-2265``: the Freundlich adsorption and desorption of phosphorus (HYPE's),
+        in WSIMOD's operand order.
+
+        - ``pool_ = (ads.P + DI.P) / (area * M2_TO_KM2)``; where it is 0 (``empty``, ``:2176``)
+          both VQIPs are empty and nothing changes;
+        - ``smc_mm = smc * M_TO_MM``, ``conc_sol = ads.P * KG_TO_MG / (bulk_density *
+          rooting_depth * area)`` and ``coeff = kfr * bulk_density * rooting_depth``;
+        - where ``conc_sol <= 0`` (``shortcut``, ``:2191``) the equilibrium is ``kfr * pool_ /
+          (smc_mm + coeff)``, and ``"adsorption_shortcut"`` is recorded where WSIMOD prints
+          "Warning: soil partP <=0...";
+        - otherwise Newton's method from ``x0 = exp((log(conc_sol) - log(kfr)) / nfr)``, unrolled
+          to ``adsorption_nr_maxiter`` passes under a ``running`` mask (Y25). Pass ``j`` runs
+          where ``abs(fxn) > limit`` (``newton:<j>/residual``, ``:2206``); it computes ``fxn =
+          xn * smc_mm + coeff * xn ** nfr - pool_``, ``fprimxn = smc_mm + nfr * coeff * xn **
+          (nfr - 1)`` and ``dx = fxn / fprimxn``, stops where ``abs(dx) < 0.000001 * xn``
+          (``newton:<j>/step``, the ``break``), and otherwise sets ``xn = xn_1 = xn - dx``, or
+          ``1e-10`` where that is not positive (``newton:<j>/positive``, ``:2217``; true is
+          ``xn - dx > 0``). A stopped instance keeps its ``xn``, ``xn_1`` and ``fxn``. **The
+          residual test lags one pass** (transcribed): it reads the ``fxn`` of the previous
+          pass, the residual of the iterate before its last update, so the loop always takes one
+          step more than the residual needs, and the first two tests read the same ``f(x0)``.
+          WSIMOD's last test, after the ``maxiter``-th pass, decides nothing and is not
+          recorded. The equilibrium is ``kfr * xn_1 ** nfr``;
+        - where ``abs(equi - conc_sol) > 1e-6`` (``change``, ``:2225``) the request ``P =
+          (equi - conc_sol) * (1 - exp(-kadsdes)) * bulk_density * rooting_depth * (area *
+          M2_TO_KM2)``. Above 0 (``adsorb``) it is extracted from the dissolved inorganic pool
+          into the adsorbed one and leaves the tank as phosphate (``out_``,
+          :meth:`_pull_tracked`); otherwise ``-P`` is extracted from the adsorbed pool into the
+          dissolved inorganic one and forced into the tank (``in_``). The request's ``N = 0``
+          moves too (``:2226``).
+
+        WSIMOD's "freundlich flow adjusted" warning tests ``extracted - request > FA``
+        (``:2242``, ``:2257``), which ``min`` makes ``<= 0``, so it never prints (L11); noodl
+        records the evident ``request - extracted > FA`` as ``"freundlich_flow_adjusted"``
+        (Y16). Every ``log``, ``exp`` and power is Python's, per instance, on an argument
+        replaced by a safe one (1, or 0 for ``exp``) where its branch is not taken, so a masked,
+        empty, shortcut or stopped instance never overflows, divides by zero or raises a
+        negative number to a fractional power. ``adosorption_nr_limit`` (WSIMOD's spelling)
+        enters only comparisons, so it has no gradient."""
+        ctx, pool = self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("adsorption")
+        site = f"{self.site}/adsorption"
+        area = self.area
+        kfr, nfr = self._param("kfr"), self._param("nfr")
+        bulk_density, rooting_depth = self._param("bulk_density"), self._param("rooting_depth")
+        limit = self._param("adosorption_nr_limit")
+        # :2171-2177
+        ads_p, di_p = pool.storage[..., ADS, 1], pool.storage[..., DI, 1]
+        pool_ = ads_p + di_p
+        pool_ = pool_ / (area * M2_TO_KM2)
+        empty = ctx.decide(f"{site}/empty", pool_, "==", 0.0, active=active, call=call)
+        run = active & ~empty
+        # :2180-2188
+        smc_mm = self._smc() * M_TO_MM
+        conc_sol = ads_p * KG_TO_MG / (bulk_density * rooting_depth * area)
+        coeff = kfr * bulk_density * rooting_depth
+        # :2191-2195 (smc_mm + coeff > 0: kfr, bulk_density and rooting_depth are refused <= 0)
+        shortcut = run & ctx.decide(f"{site}/shortcut", conc_sol, "<=", 0.0, active=run, call=call)
+        ctx.event("adsorption_shortcut", self.parent.name, shortcut)
+        equi_shortcut = kfr * (pool_ / (smc_mm + coeff))
+        # :2197-2221, unrolled (Y25); conc_sol > 0 where the log is taken
+        newton = run & ~shortcut
+        one = torch.ones_like(conc_sol)
+        exponent = (log_python(torch.where(newton, conc_sol, one)) - log_python(kfr)) / nfr
+        x0 = exp_python(torch.where(newton, exponent, torch.zeros_like(exponent)))
+        xn = torch.where(newton, x0, one)
+        fxn = xn * smc_mm + coeff * pow_python(xn, nfr) - pool_
+        xn_1 = xn
+        running = newton
+        for j in range(self.adsorption_nr_maxiter):
+            running = running & ctx.decide(
+                f"{site}/newton:{j}/residual", fxn.abs(), ">", limit, active=running, call=call
+            )
+            # xn > 0 on every instance: x0 = exp(...), the update or 1e-10, and 1 elsewhere
+            value = xn * smc_mm + coeff * pow_python(xn, nfr) - pool_
+            slope = smc_mm + nfr * coeff * pow_python(xn, nfr - 1)
+            dx = value / slope
+            fxn = write(running, value, fxn)
+            step = ctx.decide(
+                f"{site}/newton:{j}/step", dx.abs(), "<", 0.000001 * xn, active=running, call=call
+            )
+            running = running & ~step
+            update = xn - dx
+            positive = ctx.decide(
+                f"{site}/newton:{j}/positive", update, ">", 0.0, active=running, call=call
+            )
+            update = torch.where(positive, update, torch.full_like(update, 1e-10))
+            xn_1 = write(running, update, xn_1)
+            xn = write(running, update, xn)
+        equi = torch.where(shortcut, equi_shortcut, kfr * pow_python(xn_1, nfr))
+        # :2225-2238
+        difference = equi - conc_sol
+        change = run & ctx.decide(
+            f"{site}/change", difference.abs(), ">", 1e-6, active=run, call=call
+        )
+        rate = 1 - exp_python(torch.where(change, -self._param("kadsdes"), torch.zeros_like(one)))
+        adsdes = difference * rate
+        request = adsdes * bulk_density * rooting_depth * (area * M2_TO_KM2)
+        adsorb = change & ctx.decide(f"{site}/adsorb", request, ">", 0.0, active=change, call=call)
+        desorb = change & ~adsorb
+        zero = torch.zeros_like(request)
+        # :2239-2251, adsorption (the request {N: 0, P})
+        wanted = torch.stack(torch.broadcast_tensors(zero, request), dim=-1)
+        adsorbed = pool.extract(DI, wanted, active=adsorb)
+        pool.receive(ADS, adsorbed, active=adsorb)
+        short = adsorb & ((request - adsorbed[..., 1]) > ctx.fa)
+        out_ = self._with_columns(ctx.empty(), {"phosphate": adsorbed[..., 1]})
+        out_ = self._pull_tracked(out_, active=adsorb)
+        # :2252-2263, desorption
+        wanted = torch.stack(torch.broadcast_tensors(zero, -request), dim=-1)
+        desorbed = pool.extract(ADS, wanted, active=desorb)
+        pool.receive(DI, desorbed, active=desorb)
+        short = short | (desorb & ((-request - desorbed[..., 1]) > ctx.fa))
+        ctx.event("freundlich_flow_adjusted", self.parent.name, short)
+        in_ = self._with_columns(ctx.empty(), {"phosphate": desorbed[..., 1]})
+        in_ = torch.where(desorb[..., None], in_, ctx.empty())
+        self.push_storage(in_, force=True, active=desorb)
+        return in_, torch.where(adsorb[..., None], out_, ctx.empty())
 
 
 SURFACE_CLASSES["GrowingSurface"] = GrowingSurface

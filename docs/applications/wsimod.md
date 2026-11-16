@@ -434,6 +434,30 @@ WSIMOD's order (`land.py:1283-1291`):
   1 above field capacity and `((smc / fc_m - limpar) / (1 - limpar)) ** exppar` below (1.0 at
   field capacity itself), a half-saturation factor of the dissolved inorganic N's concentration
   and the temperature factor, times `denpar`. The nitrogen leaves the model.
+- **Adsorption** (`:2154-2265`, HYPE's Freundlich isotherm), last. The adsorbed and dissolved
+  inorganic P per km² (`pool_`) are split at equilibrium: noodl transcribes WSIMOD's
+  Newton–Raphson iteration on the liquid concentration `x`, `x * smc_mm + kfr * bulk_density *
+  rooting_depth * x ** nfr = pool_`, from `x0 = exp((log(conc_sol) - log(kfr)) / nfr)`,
+  unrolled to `adsorption_nr_maxiter` passes under a mask (an instance whose loop has stopped
+  keeps its iterate). A pass stops the loop when its step is below `1e-6` of the iterate, and an
+  iterate that is not positive becomes `1e-10`. **The convergence test lags one pass**
+  (transcribed): `abs(fxn) > adosorption_nr_limit` reads the residual computed in the previous
+  pass, that of the iterate before its last update, so the loop always takes one step more than
+  the residual needs; the first two tests read the same first residual, so a loop the residual
+  ends runs two passes at least. The adsorbed
+  concentration moves `1 - exp(-kadsdes)` of the way to the equilibrium `kfr * x ** nfr` when
+  they differ by more than `1e-6` mg/kg: adsorption takes P from the dissolved inorganic pool
+  and the tank's phosphate (`out_`), desorption puts it back into both (`in_`). **With no
+  adsorbed P** WSIMOD takes a shortcut, `kfr * pool_ / (smc_mm + kfr * bulk_density *
+  rooting_depth)`, and prints "Warning: soil partP <=0. Freundlich will give error, take
+  shortcut."; it is common, since the adsorbed pool starts empty unless `initial_soil_storage`
+  or dry deposition fills it, and noodl records `"adsorption_shortcut"`. A request larger than
+  its source pool takes what the pool has; WSIMOD's warning for it tests `extracted - request >
+  FLOAT_ACCURACY`, which can never hold (L11), and noodl records the evident `request -
+  extracted > FLOAT_ACCURACY` as `"freundlich_flow_adjusted"`. For gradients, the iteration
+  count is structural and the gradient is that of the unrolled passes, not the implicit one at
+  the equilibrium; where a pass stops the loop, or the clamp acts, the result jumps. The
+  limit `adosorption_nr_limit` enters only comparisons and has no gradient.
 
 **Uptake and denitrification take all their nitrogen as `nitrate`** (`:1917`, `:2145`), though
 the pool's dissolved inorganic N stands for nitrate, ammonia and nitrite together (L9). When the
@@ -721,8 +745,11 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   surface's tank had less than its pool removed, and the removal was clamped, L9, L10),
   `"transformation_no_din"` (the tank had neither nitrate nor ammonia to split the
   transformation's change over, L6), `"crop_uptake_dry_soil"` (a crop on a soil with no
-  water, L7) and `"erosion_pool_short"` (a growing surface's adsorbed and humus pools held less
-  phosphorus than erosion removed; WSIMOD prints "weird nutrients"). The arc-keyed event,
+  water, L7), `"erosion_pool_short"` (a growing surface's adsorbed and humus pools held less
+  phosphorus than erosion removed; WSIMOD prints "weird nutrients"), `"adsorption_shortcut"` (a
+  growing surface with no adsorbed P took WSIMOD's Freundlich shortcut, and WSIMOD prints "soil
+  partP <=0") and `"freundlich_flow_adjusted"` (an adsorption or desorption request was larger
+  than its source pool, L11). The arc-keyed event,
   `"decay_arc_order_unknown"`, is keyed by arc,
   `(..., T, n_arcs)`, and `WsimodDay.event_columns(condition)` names the columns (X48);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
@@ -891,6 +918,8 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface.calc_crop_uptake` divides by the tank's volume (L7) | no available uptake, event `"crop_uptake_dry_soil"` | `test_crop_uptake_from_an_empty_soil_is_zero` |
 | `GrowingSurface`: uptake and denitrification take all their N as nitrate (L9) | reproduced; the tank's clamp recorded as `"nutrient_pool_not_tracking"` | `test_calc_crop_uptake_equals_wsimods`; `test_denitrification_equals_wsimods` |
 | `GrowingSurface`: the "nutrient pool not tracking soil tank" check compares a VQIP with itself and never prints (L10) | the event `"nutrient_pool_not_tracking"` where the clamp bites | `test_a_clamped_pull_records_the_event` |
+| `GrowingSurface.adsorption`: the "freundlich flow adjusted" warning tests `extracted - request > FLOAT_ACCURACY`, which `min` makes impossible (L11) | the evident test `request - extracted > FLOAT_ACCURACY`, event `"freundlich_flow_adjusted"` | `test_a_short_pool_records_freundlich_flow_adjusted` |
+| `GrowingSurface.adsorption`: the Newton loop's convergence test reads the previous pass's residual | reproduced (transcribed, not a defect), documented | `test_the_newton_test_lags_one_iteration` |
 | `GrowingSurface`: the soil temperature factor is `T / 5` below 5 °C, not HYPE's product, so it jumps at 5 °C (L12) | reproduced, documented | `test_the_soil_factors_equal_wsimods` |
 | `GrowingSurface`: a float `initial_soil_storage`, which the docstring allows, raises `TypeError` (L16) | refused | `test_initial_soil_storage_refusals` |
 | `NutrientPool`: its parameters cannot be configured (L20) | drivers with WSIMOD's defaults; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` |

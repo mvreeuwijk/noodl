@@ -7,6 +7,7 @@ UNBOUNDED_CAPACITY = 1e15  # constants.py:18
 DT_DAYS = 1  # constants.py:20
 DECAY_REFERENCE_TEMPERATURE = 20  # constants.py:66, degC: the exponents are relative to it
 FLOAT_ACCURACY = 1e-11  # constants.py:17, default; per model in the port
+KG_TO_MG = 1e6  # constants.py:65
 MG_L_TO_KG_M3 = 1e-3  # constants.py:61
 KG_M3_TO_MG_L = 1e3  # constants.py:62
 G_M2_TO_KG_M2 = 1e-3  # constants.py:84

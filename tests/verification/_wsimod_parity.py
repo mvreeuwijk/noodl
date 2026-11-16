@@ -75,6 +75,10 @@ _UNDATED = {
     "more_backflow_than_vqip": re.compile(r"more backflow than vqip\.\.\."),
     "inaccurate_evaporation": re.compile(r"inaccurate evaporation calculation of \S+"),
     "erosion_pool_short": re.compile(r"weird nutrients"),  # land.py:2054
+    # land.py:2193
+    "adsorption_shortcut": re.compile(
+        r"Warning: soil partP <=0\. Freundlich will give error, take shortcut\."
+    ),
 }
 # WSIMOD's deny handlers (``nodes.py:560-608``) print and return a zero reply; noodl's are silent
 # and record nothing, the reply being all that has an effect (and replies are compared bitwise).

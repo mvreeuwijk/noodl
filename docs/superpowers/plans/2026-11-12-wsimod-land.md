@@ -629,7 +629,7 @@ class GrowingSurface:
     - the empty pool (`pool_ == 0`);
     - the shortcut (`ads.P = 0`), where `"adsorption_shortcut"` is true and WSIMOD prints its warning;
     - Newton exits by residual, by step, and by `maxiter`, with `adsorption_nr_maxiter = 2`;
-    - the `xn_1 ≤ 0` clamp to `1e-10`, from crafted pools with `kfr = 1e4`;
+    - the `xn_1 ≤ 0` clamp to `1e-10`, from a huge first guess (small `kfr` and `nfr`, a large adsorbed pool), whose first step cancels to `≤ 0` in rounding (spec, corrected in Task 8b);
     - adsorption and desorption;
     - `abs(equi − conc_sol) ≤ 1e-6`, which moves nothing.
 

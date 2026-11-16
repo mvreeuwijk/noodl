@@ -1363,7 +1363,7 @@ cases in `tests/verification/_wsimod_cases.py`. The bounds are W19's: 0 (bitwise
     request), `denitrification` (each branch) and `adsorption`. Adsorption covers:
     - the empty pool and the shortcut;
     - Newton exits by residual, by step and by `maxiter`, with `maxiter` overridden to 2;
-    - the `xn_1 ≤ 0` clamp, from crafted pools with a large `kfr`;
+    - the `xn_1 ≤ 0` clamp, from a huge first guess (`conc_sol / kfr` large, `nfr` small), whose first step `x0 - dx` is positive in exact arithmetic (`(nfr * A + D) / f'`, `A` and `D` the adsorbed and dissolved P per km²) but cancels to `≤ 0` in rounding; a large `kfr` makes `x0` small and never clamps (corrected while implementing Task 8b, W2);
     - both directions, and a short pool, which raises the event.
   - **The deposition methods** of `Surface` and `GrowingSurface`, with `adjust_vqip_to_liquid`.
   - **`IrrigationSurface.irrigate`** with a scripted `pull_distributed`, and **`GardenSurface`'s

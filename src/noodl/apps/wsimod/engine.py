@@ -108,7 +108,13 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   (``:1943``, ``:1959``, ``:1984``'s ``min``, ``:1992``, ``:1994``, ``:2048``; the adsorbed and
   humus pools' ``extract`` sites follow ``phosphorus``, and a pool short of the eroded P by more
   than ``FLOAT_ACCURACY`` records ``"erosion_pool_short"``, ``:2051-2054``) and
-  ``node:N/surfaces.<name>/denitrification/{saturated,moist}`` (``:2107``, ``:2109``). The
+  ``node:N/surfaces.<name>/denitrification/{saturated,moist}`` (``:2107``, ``:2109``) and
+  ``node:N/surfaces.<name>/adsorption/{empty,shortcut,newton:<j>/residual,newton:<j>/step,
+  newton:<j>/positive,change,adsorb}`` (``:2176``, ``:2191`` with the event
+  ``"adsorption_shortcut"``; per pass ``j`` of the unrolled Newton loop ``:2206``, ``:2213``
+  and ``:2217``, ``positive`` being ``xn - dx > 0``; ``:2225``, ``:2239``; the pools'
+  ``extract`` sites follow ``adsorb``, and a request above its pool records
+  ``"freundlich_flow_adjusted"``, L11). The
   transformation, the uptake and denitrification pull from the tank through ``pull_pollutants``
   (its ``clip`` sites), and record the event ``"nutrient_pool_not_tracking"`` where its clamp
   removed more than ``FLOAT_ACCURACY`` (WSIMOD's dead check, L10, Y16).
