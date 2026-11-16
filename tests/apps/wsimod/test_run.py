@@ -127,6 +127,12 @@ def test_the_prints_that_carry_the_node_and_the_date_match_the_records(case, eve
         ("river_nutrients", 60),
         ("growing_spring", 60),  # 3c: the pools carried through model.step
         ("growing_spring", 200),  # crosses the sowing (run day 182): days_after_sow, the covers
+        # 3c-ii: irr_a is sown on run day 16 (days_after_sow, the irrigate decisions from day 17);
+        # its soil leaves saturation on day 48, and the slow run carries the state into the days
+        # that pull water and feed the pools
+        ("irrigation", 20),
+        pytest.param("irrigation", 50, marks=pytest.mark.slow),
+        ("garden", 12),  # g2 leaves saturation on day 6: the garden water of days 6-11
     ],
 )
 def test_step_by_step_equals_wsimod_run(case, days):
@@ -427,6 +433,7 @@ _SPRING_PLAN = {
     G + "nutrient_pool.degrhpar": [1.0, 0.5, 2.0, 0.1],
     "wsimod.nhx-fertiliser": [1.0, 0.0, 3.0, 0.5],
 }
+_FOUR = [1.0, 0.0, 2.0, 0.5]
 BATCH_3C = {
     "growing_spring": ("growing_spring", 100, _SPRING_PLAN),
     "growing_spring_caps": ("growing_spring", 250, _SPRING_PLAN),
@@ -440,7 +447,30 @@ BATCH_3C = {
             "wsimod.ImperviousSurface.area": [1.0, 0.5, 2.0, 1.5],
         },
     ),
+    # 3c-ii (Task 16): one parameter each, 0 in instance 1. The garden water starts on day 6 (g2
+    # leaves saturation), the variable-area crop is sown on day 6
+    "irrigation": ("irrigation", 10, {"wsimod.IrrigationSurface.irrigation_coefficient": _FOUR}),
+    "garden": ("garden", 12, {"wsimod.ResidentialDemand.gardening_efficiency": _FOUR}),
+    "variable_area": (
+        "variable_area",
+        10,
+        {"wsimod.VariableAreaSurface.current_surface_area": _FOUR},
+    ),
 }
+# the configured soils of ``irrigation`` are saturated until run day 48 and its crops are sown on
+# days 16 and 36 (no water is pulled before them, whatever the coefficient): its batch starts both
+# crops sown and both soils below capacity, so both pull from day 0 and the coefficient of 0 makes
+# no demand (``irrigate/demand``) where the others do
+BATCH_STATE = {
+    "irrigation": {
+        "wsimod.storage": {
+            ("farm", "surface:irr_a"): {"volume": 1900.0, "temperature": 10.0},
+            ("farm", "surface:irr_b"): {"volume": 1500.0, "temperature": 10.0},
+        },
+        "wsimod.days_after_sow": {("farm", "surfaces.irr_a"): 5.0, ("farm", "surfaces.irr_b"): 5.0},
+    }
+}
+BATCH_SITE = {"irrigation": "node:farm/surfaces.irr_a/irrigate/demand"}
 
 
 def _newton_passes(records: list, instance: int) -> int:
@@ -460,10 +490,14 @@ def _newton_passes(records: list, instance: int) -> int:
 def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(name):
     """Four instances of the growing surface differ in ``kfr``, ``uptake1``,
     ``ET_depletion_factor``, the crop-factor stages, a pool rate and a fertiliser column; of the
-    deposition surfaces in the loads, a deposition column and the area. Each equals its single
-    run, state included."""
+    deposition surfaces in the loads, a deposition column and the area; of the irrigated, garden
+    and variable-area surfaces in ``irrigation_coefficient``, the demand's
+    ``gardening_efficiency`` and ``current_surface_area``. Each equals its single run, state
+    included."""
     case, days, plan = BATCH_3C[name]
     model, state, drivers = _case(case)
+    if name in BATCH_STATE:
+        state = initial_state(model, values=BATCH_STATE[name])
     batched = _scaled(drivers, plan)
     if case == "surface_deposition":  # only the phosphate column of the loads varies
         for key in plan:
@@ -492,8 +526,21 @@ def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(name):
         ]
         if days == 250:  # the caps differ only once the crop is established (day 211)
             assert capped
-    else:
+    elif case == "surface_deposition":
         assert not torch.equal(ran.tank_quality[0], ran.tank_quality[1])
+    else:  # every pair of instances moves different water
+        assert all(
+            not torch.equal(ran.arc_flow[i], ran.arc_flow[j])
+            for i in range(4)
+            for j in range(i + 1, 4)
+        )
+    if name in BATCH_SITE:  # instances that reach the site take different outcomes on some day
+        assert any(
+            len(set(d.outcome[d.active].tolist())) > 1
+            for records in diagnostics["decisions"]
+            for d in records
+            if d.site == BATCH_SITE[name]
+        ), BATCH_SITE[name]
     for i in range(4):
         single_drivers = {k: (v[i] if k in plan else v) for k, v in batched.items()}
         single = wsimod_run(model, state, single_drivers, days=days)
@@ -575,6 +622,87 @@ def test_a_warm_start_mid_season_crosses_the_harvest():
         assert torch.equal(stepped[key], value), key
     assert sown[341 - 300 - 1] > 0.0  # the day before the harvest
     assert all(value == -1.0 for value in sown[341 - 300 :]), sown
+
+
+# 3c-ii (Task 16): the carried climate of the surface that reads it on day 0. ``irrigate`` reads it
+# only when ``apply_irrigation`` runs before ``Land.run`` (``irrigation_early``; in the default
+# orchestration ``Land.run`` overwrites the flows first), and the garden check always (it runs in
+# ``create_demand``, before ``Land.run``). Both soils start below capacity, so that the day-0
+# check is not cut to 0 by a saturated soil (``land.py:2358``, ``:2416``), and irr_a is sown
+CLIMATE_STATE = {
+    "irrigation_early": (
+        "farm",
+        "irr_a",
+        {
+            "wsimod.storage": {("farm", "surface:irr_a"): {"volume": 1900.0, "temperature": 10.0}},
+            "wsimod.days_after_sow": {("farm", "surfaces.irr_a"): 5.0},
+        },
+    ),
+    "garden": (
+        "gardens",
+        "g2",
+        {"wsimod.storage": {("gardens", "surface:g2"): {"volume": 100.0, "temperature": 11.0}}},
+    ),
+}
+
+
+def _day_0_water(case: str, results: WsimodResults) -> float:
+    """The water the day-0 check asked for: the irrigation pulled into ``farm``, or the garden
+    water pushed to the two ``Land`` nodes."""
+    if case == "garden":
+        arcs = ("homes_to_gardens", "homes_to_plain")
+    else:
+        arcs = ("stream_to_farm", "well_to_farm", "tank_to_farm")
+    return sum(float(results.arc_flow[0, results.arc_names.index(a)]) for a in arcs)
+
+
+@pytest.mark.parametrize("case", list(CLIMATE_STATE))
+def test_the_climate_state_round_trips(case):
+    """``"wsimod.surface_climate"`` is set by label (evaporation 3, precipitation 1) and reaches
+    day 0: ``irrigation_early`` pulls ``max(3 - 1, 0) * irrigation_coefficient`` (0.3) and the
+    garden check answers 2.0, which ``gardening_efficiency`` (0.42) turns into the garden water;
+    with the configured climate (0) neither asks for water. The state set by label equals one
+    holding those flows in its tensor, and a run warm-started from a run's last state equals the
+    continuation (``torch.equal``)."""
+    node, surface, others = CLIMATE_STATE[case]
+    model, _, drivers = _case(case)
+    day = model.wsimod_day
+    flows = {
+        (node, f"surfaces.{surface}", "evaporation"): 3.0,
+        (node, f"surfaces.{surface}", "precipitation"): 1.0,
+    }
+    state = initial_state(model, values={**others, "wsimod.surface_climate": flows})
+    held = initial_state(model, values=others)
+    assert not bool(held["wsimod.surface_climate"].any())
+    labels = day.state_labels("wsimod.surface_climate")
+    climate = held["wsimod.surface_climate"].clone()
+    for label, value in flows.items():
+        climate[labels.index(label)] = value
+    held["wsimod.surface_climate"] = climate
+    for key in state:
+        assert torch.equal(state[key], held[key]), key
+    efficiency = 0.42 if case == "garden" else 0.3
+    first = wsimod_run(model, state, drivers, days=1)
+    assert _day_0_water(case, first) == pytest.approx(max(3.0 - 1.0, 0.0) * efficiency, rel=1e-12)
+    assert torch.equal(first.arc_flow, wsimod_run(model, held, drivers, days=1).arc_flow)
+    unset = wsimod_run(model, initial_state(model, values=others), drivers, days=1)
+    assert _day_0_water(case, unset) == 0.0
+
+    def stepped(start, k0, k1):
+        out, flows = start, []
+        for k in range(k0, k1):
+            out = model.step(out, drivers, dt=DAY, t=k * DAY)
+            flows.append(model.wsimod_day.last_record.arc_flow)
+        return out, flows
+
+    whole, whole_flows = stepped(state, 0, 10)
+    middle, early = stepped(state, 0, 4)
+    resumed, late = stepped(middle, 4, 10)
+    assert bool(middle["wsimod.surface_climate"].any())  # a day's flows, carried
+    for key in whole:
+        assert torch.equal(whole[key], resumed[key]), key
+    assert all(torch.equal(a, b) for a, b in zip(whole_flows, early + late, strict=True))
+    assert torch.equal(torch.stack(whole_flows)[:1], first.arc_flow)
 
 
 def _quantity_only_pair(case: str, days: int, scale: dict):

@@ -22,6 +22,8 @@ amended by ``initial``) and check further scalars on the same runs (``more``). T
 Newton tests and the spec's continuous switches are held to a distance in steps instead of the
 scale (``STEPPED``). Two tests add the batched gradient of the loads and the deposition (Y58,
 Y59) and the zero gradient of ``adosorption_nr_limit``.
+3c-ii adds ``irrigation_coefficient``, ``current_surface_area`` and the demand's
+``gardening_efficiency`` (Task 16), each off ``max(E - P, 0)`` and the ``FLOAT_ACCURACY`` switches.
 This file is also the whole-model check of the hand-written gradients of ``pow_half``,
 ``exp_python`` and ``pow_python`` (bitwise Python math).
 """
@@ -810,6 +812,64 @@ SPECS_3C = {
 }
 SPECS.update(SPECS_3C)
 
+# --- 3c-ii: irrigation, gardens and variable areas (Task 16) ------------------------------------
+# irrigation's configured soils are saturated until run day 48 (``cmd <= FLOAT_ACCURACY`` cuts the
+# demand to 0, land.py:2358) and irr_a is sown on run day 16: from day 0 the coefficient reaches
+# nothing for 48 days. Its entries start irr_a sown (``days_after_sow`` 5) on a soil of 1900 m3
+# (it leaves saturation near 1960 m3): it pulls on every dry day, and the closest decisions
+# (``calc_crop_cover/depletion``, the tank's phosphate clip) stay 9x and more above the threshold,
+# so ``max(E - P, 0)`` (``irrigate/deficit``) and the ``FLOAT_ACCURACY`` tests are farther still
+_IRRIGATED = ("driver", "wsimod.IrrigationSurface.irrigation_coefficient", ("farm", "irr_a"))
+_IRR_SOIL = ("final", "farm", "surface:irr_a", "volume")
+
+
+def _sown(volume) -> tuple:
+    return (
+        ("wsimod.storage", ("farm", "surface:irr_a"), volume),
+        ("wsimod.days_after_sow", ("farm", "surfaces.irr_a"), 5.0),
+    )
+
+
+SPECS_3C_II = {
+    # the soil storage, quantity only: the default selection's 3c-ii entry (2 s alone)
+    "IrrigationSurface.irrigation_coefficient": Spec(
+        "irrigation", 10, False, _IRRIGATED, _IRR_SOIL, initial=_sown(1900.0)
+    ),
+    # with the pollutants: the supply's nitrogen reaches the dissolved pool (land.py:2372-2381).
+    # Its decisions compare masses (the pools, the tank's pollutants) and are held to the mass
+    # scale, as the growing entries are
+    "IrrigationSurface.irrigation_coefficient [pollutants]": Spec(
+        "irrigation",
+        20,
+        True,
+        _IRRIGATED,
+        _IRR_SOIL,
+        margin_scale="mass",
+        more=(("pool", "farm", "irr_a", "dissolved_inorganic_pool", "N"),),
+        initial=_sown({"volume": 1900.0, "temperature": 10.0}),
+    ),
+    # half (5000 of 10000 m2) through its scaled rain and evaporation (land.py:2455-2459), sown on
+    # run day 6
+    "VariableAreaSurface.current_surface_area": Spec(
+        "variable_area",
+        30,
+        False,
+        ("driver", "wsimod.VariableAreaSurface.current_surface_area", ("land", "half")),
+        ("arcs", ("land_to_aquifer", "land_to_brook"), None),
+        more=(("final", "land", "surface:half", "volume"),),
+    ),
+    # the Demand's factor on the garden water (demand.py:288-301), which g2 receives from day 6
+    # (its soil leaves saturation) on
+    "ResidentialDemand.gardening_efficiency": Spec(
+        "garden",
+        30,
+        True,
+        ("driver", "wsimod.ResidentialDemand.gardening_efficiency", "homes"),
+        ("final", "gardens", "surface:g2", "volume"),
+    ),
+}
+SPECS.update(SPECS_3C_II)
+
 
 # the quickstart runs take about 20 s each: three stay in the default selection, the rest are slow;
 # so are the 3b runs listed below them
@@ -843,6 +903,8 @@ SLOW = {
         for name, spec in SPECS_3C.items()
         if spec.case != "surface_deposition" and name != "noy-dry (short window)"
     ),
+    # 3c-ii: the irrigation run with the pollutants (7 s alone); the others take 2-4 s
+    "IrrigationSurface.irrigation_coefficient [pollutants]",
 }
 
 
