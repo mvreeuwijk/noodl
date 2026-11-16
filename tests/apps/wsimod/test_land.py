@@ -1722,3 +1722,27 @@ def test_a_data_override_that_keeps_the_built_data_is_accepted():
     assert network.unread == [
         "land.surfaces.r.et0_coefficient",
     ]
+
+
+def test_a_fertiliser_drop_without_nitrate_is_accepted_and_unread():
+    """Y77: the fertiliser and manure inflows exist only with ``nitrate`` (``land.py:1276-1280``),
+    so without it dropping their data is accepted, even if the surface was built with them, and
+    the run is the run without the override."""
+    from noodl.apps.wsimod.constants import SURFACE_INPUTS
+
+    data = _text(_monthly_data(start=(2004, 1), months=3, variables=(*_VARIABLES, *SURFACE_INPUTS)))
+    base = _dep_mapping(data, cls="GrowingSurface", lists=_LISTS)
+    kept = {k: v for k, v in data.items() if k[0] not in SURFACE_INPUTS}
+    over = _surface_override(copy.deepcopy(base), data_input_dict=kept)
+    assert read_wsimod_config(over).nodes[0].surfaces[0].data
+    _, results = _run(over)
+    _, expected = _run(base)
+    _results_equal(results, expected)
+
+
+def test_an_override_on_a_renamed_surface_is_found_by_its_old_name():
+    """``land.py:396``: the lookup is by the built name; the new ``surface`` name follows."""
+    new = _text(_monthly_data(start=(2004, 1), months=3))
+    over = _surface_override(_dep_mapping(new), surface="renamed", data_input_dict=dict(new))
+    surface = read_wsimod_config(over).nodes[0].surfaces[0]
+    assert surface.name == "renamed" and len(surface.data) == len(new)

@@ -204,8 +204,10 @@ compute derived quantities.
   the surface's inflows (`land.py:375-382`) and an override does not rebuild them (L15, Y21):
   an override that adds deposition data to a surface built without `nhx-dry` is read and never
   used, and each variable is listed in `WsimodNetwork.unread`; an override that drops `nhx-dry`
-  from a surface built with it (WSIMOD raises `KeyError` at the first run) is refused, and so is
-  one that drops a fertiliser or manure variable of a growing surface.
+  from a surface built with it (WSIMOD raises `KeyError` at the first run) is refused, and, when `nitrate`
+  is a pollutant (the only case in which a growing surface reads them, `land.py:1276-1280`), so is
+  one that drops a fertiliser or manure variable of a growing surface; without `nitrate` the drop
+  is accepted and the run is unchanged.
 - A `pollutant_load` override on a surface built **without** a load is ignored, as in WSIMOD, whose
   inflows were fixed at construction (L14): each of its run-pollutant keys is listed in
   `WsimodNetwork.unread` as `<land>.surfaces.<surface>.pollutant_load.<key>` (a key that is no

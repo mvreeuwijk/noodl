@@ -439,7 +439,8 @@ def _override_surface_data(
     as written, relative to the working directory (X27); a mapping replaces the data; anything
     else is ``ValueError`` in WSIMOD, and is refused here. The constructor fixed the inflows
     (``:375-382``, L15), so the replacement must keep what the constructor's functions read:
-    ``nhx-dry`` (``KeyError`` at the first run otherwise) and, with ``nitrate``, a growing
+    ``nhx-dry`` (``KeyError`` at the first run otherwise) and, with ``nitrate`` only (the
+    fertiliser and manure inflows exist only then, ``:1276-1280``), a growing
     surface's fertiliser and manure data (``:1649-1710``)."""
     if isinstance(value, str):
         path = Path(value)
@@ -462,9 +463,7 @@ def _override_surface_data(
         )
     if "rooting_depth" in SURFACE_SCHEMAS[surface.cls].parameters:  # a growing surface
         for variable in SURFACE_INPUTS:
-            if variable not in variables and (
-                variable in surface.constructed_variables or "nitrate" in pollutants.names
-            ):
+            if variable not in variables and "nitrate" in pollutants.names:
                 raise ValueError(
                     f"{where}: the data_input_dict override drops {variable!r}: a growing "
                     "surface reads its fertiliser and manure data (land.py:1649-1710, "
