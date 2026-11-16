@@ -103,7 +103,11 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``:1797``), ``node:N/surfaces.<name>/calc_crop_uptake/{crop,temperature_cap,temperature_floor,
   shape,available_water,dry_soil,cap:P,cap:N}`` (``:1872``, ``:1878`` for an autumn-sown crop
   only, ``:1887``, ``:1899``; ``dry_soil`` is noodl's guard for ``V == 0``, whose event is
-  ``"crop_uptake_dry_soil"``, L7, Y18; ``:1910-1911``) and
+  ``"crop_uptake_dry_soil"``, L7, Y18; ``:1910-1911``),
+  ``node:N/surfaces.<name>/erosion/{rain,runoff,transport,enrichment_cap,flow,phosphorus}``
+  (``:1943``, ``:1959``, ``:1984``'s ``min``, ``:1992``, ``:1994``, ``:2048``; the adsorbed and
+  humus pools' ``extract`` sites follow ``phosphorus``, and a pool short of the eroded P by more
+  than ``FLOAT_ACCURACY`` records ``"erosion_pool_short"``, ``:2051-2054``) and
   ``node:N/surfaces.<name>/denitrification/{saturated,moist}`` (``:2107``, ``:2109``). The
   transformation, the uptake and denitrification pull from the tank through ``pull_pollutants``
   (its ``clip`` sites), and record the event ``"nutrient_pool_not_tracking"`` where its clamp

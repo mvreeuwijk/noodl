@@ -74,6 +74,7 @@ _UNDATED = {
     "ponded_water_cant_reenter": re.compile(r"ponded water cant reenter"),
     "more_backflow_than_vqip": re.compile(r"more backflow than vqip\.\.\."),
     "inaccurate_evaporation": re.compile(r"inaccurate evaporation calculation of \S+"),
+    "erosion_pool_short": re.compile(r"weird nutrients"),  # land.py:2054
 }
 # WSIMOD's deny handlers (``nodes.py:560-608``) print and return a zero reply; noodl's are silent
 # and record nothing, the reply being all that has an effect (and replies are compared bitwise).

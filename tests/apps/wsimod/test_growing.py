@@ -28,7 +28,7 @@ from noodl.apps.wsimod.growing import (
     quick_interp,
 )
 from noodl.apps.wsimod.land import SURFACE_CLASSES, Land, month_start, surface_derived
-from noodl.apps.wsimod.nutrient_pool import ADS, DI, DO, FAST, POOLS
+from noodl.apps.wsimod.nutrient_pool import ADS, DI, DO, FAST, HUMUS, POOLS
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 
 P = QUANTITY_ONLY
@@ -1617,15 +1617,17 @@ def _seen(ctx, seen: dict) -> None:
 
 
 def test_the_soil_processes_follow_wsimods_list():
-    """D20: ``processes`` is WSIMOD's (``land.py:1283-1291``) without the later tasks' erosion
-    and adsorption, so each process is at its place; the factors have no part, the other three
-    have theirs (Y57)."""
+    """D20: ``processes`` is WSIMOD's (``land.py:1283-1291``) without the later task's
+    adsorption, so each process is at its place (erosion between the uptake and
+    denitrification); the factors have no part, the other four have theirs (Y57)."""
     from noodl.apps.wsimod.land import NO_PART, PART_NAMES
 
     theirs, _, ours = _soil_pair({})
-    names = [f.__name__ for f in theirs.processes if f.__name__ not in ("erosion", "adsorption")]
+    names = [f.__name__ for f in theirs.processes if f.__name__ != "adsorption"]
     assert [f.__name__ for f in ours.processes] == names
-    assert names[1:] == list(_SOIL_PROCESSES)
+    assert [n for n in names[1:] if n != "erosion"] == list(_SOIL_PROCESSES)
+    assert names.index("erosion") == names.index("calc_crop_uptake") + 1
+    assert PART_NAMES["erosion"] == "GrowingSurface.erosion"
     assert {"calc_temperature_dependence_factor", "calc_soil_moisture_dependence_factor"} <= NO_PART
     assert PART_NAMES["soil_pool_transformation"] == "GrowingSurface.soil_pool_transformation"
     assert PART_NAMES["calc_crop_uptake"] == "GrowingSurface.calc_crop_uptake"
@@ -2217,3 +2219,322 @@ def test_gradcheck_on_the_factors_and_uptake():
         torch.tensor(v, dtype=F64, requires_grad=True) for v in (15.0, 1.3, 0.02, 1e-4, 1e-5)
     )
     assert torch.autograd.gradcheck(uptake, inputs)
+
+
+# --- erosion (Task 8a) --------------------------------------------------------------------------
+# land.py:1928-2094. Each fixture is random (parameters, flows, covers, pools and rain), so that an
+# operation taken in another order gives another float; each batch runs in one call and is compared,
+# instance by instance, bitwise against a live WSIMOD GrowingSurface.
+_EROSION_SCALARS = ("erodibility", "sreroexp", "cohesion", "slope", "srfilt", "macrofilt")
+_EROSION_DATES = ("2003-01-17", "2003-03-01", "2003-06-21", "2003-09-30", "2003-12-31")
+_FLOWS = ("infiltration_excess", "subsurface_flow", "percolation")
+
+
+def _erosion_parameters(rng) -> dict:
+    return {
+        "area": rng.uniform(5.0, 50.0),
+        "rooting_depth": rng.uniform(0.4, 1.6),
+        # down to 1e-4: a pool much shorter than the eroded P (land.py:2051-2054)
+        "bulk_density": 10 ** rng.uniform(-4.0, 3.3),
+        "erodibility": rng.uniform(0.001, 0.005),
+        "sreroexp": rng.uniform(0.8, 1.6),
+        "cohesion": rng.uniform(0.5, 3.0),
+        "slope": rng.uniform(1.0, 15.0),
+        "srfilt": rng.uniform(0.4, 0.9),
+        "macrofilt": rng.uniform(0.005, 0.05),
+    }
+
+
+def _random_flow(rng, volume: float) -> dict:
+    return {
+        **{n: rng.uniform(0.0, 0.2) for n in NUT.additive},
+        "volume": volume,
+        "temperature": 7.5,
+    }
+
+
+def _erosion_draw(rng, parameters, k: int) -> dict:
+    """One instance's state: the rain depth on either side of 5 mm, ``ie`` 0 or positive, and
+    ``erodingflow`` 0, in ``(0, 4]`` or above 4 (cycled by ``k``)."""
+    area = parameters["area"]
+    eroding = (0.0, rng.uniform(0.05, 4.0), rng.uniform(4.0, 12.0))[k % 3]
+    total = eroding * area / 1e3
+    shares = [rng.uniform(0.0, 1.0) for _ in range(3)]
+    if k % 4 == 1:
+        shares[0] = 0.0  # no infiltration excess
+    if not sum(shares):
+        shares = [0.0, 1.0, 1.0]
+    volumes = [total * s / sum(shares) for s in shares]
+    return {
+        "precipitation": rng.uniform(0.0, 0.005) if k % 2 else rng.uniform(0.005, 0.03),
+        "crop_cover": rng.uniform(0.0, 0.9),
+        "ground_cover": rng.uniform(0.0, 0.3),
+        "flows": [_random_flow(rng, v) for v in volumes],
+        "pools": _random_pools(rng, scale=rng.choice((1e-6, 1e-3, 1.0))),
+    }
+
+
+def _wsimod_erosion(parameters, draw, date):
+    from wsimod.orchestration.model import to_datetime
+
+    theirs = _wsimod_nutrient(
+        {"volume": 1.0}, area=parameters["area"], rooting_depth=parameters["rooting_depth"]
+    )
+    for name in (*_EROSION_SCALARS, "bulk_density"):
+        setattr(theirs, name, parameters[name])
+    precipitation = draw["precipitation"]
+    theirs.parent.t = to_datetime(date)
+    theirs.parent.get_data_input = lambda variable: {"precipitation": precipitation}[variable]
+    theirs.crop_cover, theirs.ground_cover = draw["crop_cover"], draw["ground_cover"]
+    for name, flow in zip(_FLOWS, draw["flows"], strict=True):
+        setattr(theirs, name, {**dict.fromkeys(_KEYS, 0.0), **flow})
+    _set_their_pools(theirs, draw["pools"])
+    return theirs
+
+
+def _our_erosion(parameters: list[dict], draws: list[dict], date: str):
+    """noodl's surface with the batch of ``parameters`` and ``draws`` on ``date``."""
+    land = _nutrient_land()
+    ours = land.surfaces[0]
+    ours.set_dates([datetime.strptime(date, "%Y-%m-%d")], [date])
+    ours.bind({k: torch.tensor([p[k] for p in parameters], dtype=F64) for k in parameters[0]})
+    land.params = {"precipitation": torch.tensor([d["precipitation"] for d in draws], dtype=F64)}
+    ours.crop_cover = torch.tensor([d["crop_cover"] for d in draws], dtype=F64)
+    ours.ground_cover = torch.tensor([d["ground_cover"] for d in draws], dtype=F64)
+    for j, name in enumerate(_FLOWS):
+        rows = [[d["flows"][j].get(k, 0.0) for k in _KEYS] for d in draws]
+        setattr(ours, name, torch.tensor(rows, dtype=F64))
+    ours.nutrient_pool.storage = torch.tensor([d["pools"] for d in draws], dtype=F64)
+    n = len(draws)
+    ctx = Ctx(NUT, FA, torch.Size((n,)), day=0, node_names=["land"], record_decisions=True)
+    land.ctx = ctx
+    return land, ours, ctx
+
+
+def test_erosion_equals_wsimods(capsys):
+    """``land.py:1928-2094``, bitwise: per date a batch of 60 instances with their own parameters,
+    rain (below and above 5 mm), flows (``ie`` 0 and positive; ``erodingflow`` 0, in ``(0, 4]``
+    and above 4), covers and pools (some much shorter than the eroded P), in one call, equal a live
+    WSIMOD surface instance by instance: the three outflow VQIPs, the pools and ``in_``. Where
+    ``erodingflow = 0`` both VQIPs are empty and nothing changes. ``"erosion_pool_short"`` holds on
+    exactly the instances where WSIMOD prints "weird nutrients". Instance 2 has exactly 5 mm of
+    rain and instance 1 none (``log10(0)`` would raise). Instance 0 is masked and has a flow
+    that would overflow ``** sreroexp``."""
+    pytest.importorskip("wsimod")
+    rng = random.Random(83)
+    seen: dict = {}
+    shorts = 0
+    for date in _EROSION_DATES:
+        parameters = [_erosion_parameters(rng) for _ in range(60)]
+        draws = [_erosion_draw(rng, p, k) for k, p in enumerate(parameters)]
+        parameters[0]["sreroexp"] = 1e4
+        draws[0]["flows"][0]["volume"] = 10.0 * parameters[0]["area"]
+        draws[1]["precipitation"] = 0.0  # a dry day: WSIMOD takes no log10 of it
+        draws[2]["precipitation"] = 0.005  # pd == 5.0 exactly: no rain (`>`, land.py:1943)
+        active = torch.ones(len(draws), dtype=torch.bool)
+        active[0] = False
+        land, ours, ctx = _our_erosion(parameters, draws, date)
+        flows_before = [getattr(ours, name).clone() for name in _FLOWS]
+        pools_before = ours.nutrient_pool.storage.clone()
+        in_, out_ = ours.erosion(active=active)
+        assert not out_.any()
+        short = ctx.events["erosion_pool_short"]["land"]
+        for d in ctx.decisions:
+            seen.setdefault(d.site, set()).update(d.outcome[d.active].tolist())
+        capsys.readouterr()
+        for i, (parameter, draw) in enumerate(zip(parameters, draws, strict=True)):
+            if i == 0:
+                for name, before in zip(_FLOWS, flows_before, strict=True):
+                    assert torch.equal(getattr(ours, name)[0], before[0])
+                assert torch.equal(ours.nutrient_pool.storage[0], pools_before[0])
+                assert not in_[0].any() and not bool(short[0])
+                continue
+            theirs = _wsimod_erosion(parameter, draw, date)
+            their_in, their_out = theirs.erosion()
+            printed = capsys.readouterr().out
+            label = (date, i)
+            assert torch.equal(in_[i], _vector(their_in)), label
+            assert torch.equal(out_[i], _vector(their_out)), label
+            for name in _FLOWS:
+                assert torch.equal(getattr(ours, name)[i], _vector(getattr(theirs, name))), label
+            assert torch.equal(ours.nutrient_pool.storage[i], _their_pools(theirs)), label
+            assert bool(short[i]) == ("weird nutrients" in printed), label
+            shorts += bool(short[i])
+            if i % 3 == 0 and i > 1:  # erodingflow = 0: nothing changes
+                assert not in_[i].any(), label
+                for name, before in zip(_FLOWS, flows_before, strict=True):
+                    assert torch.equal(getattr(ours, name)[i], before[i]), label
+    for branch in ("rain", "runoff", "transport", "enrichment_cap", "flow", "phosphorus"):
+        assert seen[f"{S7}/erosion/{branch}"] == {True, False}, branch
+    assert 0 < shorts
+
+
+def test_the_batched_erosion_is_pythons_per_instance():
+    """20000 eroding instances (rain above 5 mm, infiltration excess, ``erodingflow > 0``) in one
+    call equal WSIMOD's, instance by instance: torch's batched ``log10``, ``sin`` and ``pow``
+    differ from Python's ``math.log10``, ``math.sin`` and ``**`` in the last bit on about 0.04 %,
+    0.08 % and 1.6 % of values (measured), so the helpers evaluate each instance (Approach rule
+    1); a batch this size has each kind of difference, and its first rain depths are ones where
+    the log10 difference survives into the rain energy."""
+    pytest.importorskip("wsimod")
+    from wsimod.orchestration.model import to_datetime
+
+    rng = random.Random(107)
+    n, date = 20000, "2003-08-14"
+    parameters = [_erosion_parameters(rng) for _ in range(n)]
+    draws = []
+    for parameter in parameters:
+        parameter["bulk_density"] = rng.uniform(800.0, 1600.0)
+        draw = _erosion_draw(rng, parameter, rng.choice((1, 2)))
+        draw["precipitation"] = rng.uniform(0.0051, 0.03)
+        if not draw["flows"][0]["volume"]:
+            draw["flows"][0]["volume"] = rng.uniform(0.01, 0.5) * parameter["area"] / 1e3
+        draws.append(draw)
+    # torch's log10 differs from Python's on only about 0.01 % of the rain energies (most of its
+    # last-bit differences vanish in 8.95 + 8.44 * ...), so the batch starts with rain depths on
+    # which it does, found on a probe batch
+    raw = datetime.strptime(date, "%Y-%m-%d").timetuple().tm_yday
+    seasonal = 0.257 + math.sin(2 * math.pi * ((raw - 70) / 365)) * 0.09
+    probe = torch.tensor([rng.uniform(0.0051, 0.03) for _ in range(200000)], dtype=F64)
+    depth = probe * 1e3
+    batched = (8.95 + 8.44 * torch.log10(depth * seasonal * 2)) * depth
+    python = [(8.95 + 8.44 * math.log10(x * seasonal * 2)) * x for x in depth.tolist()]
+    differ = probe[batched != torch.tensor(python, dtype=F64)].tolist()
+    assert differ
+    for draw, precipitation in zip(draws, differ, strict=False):
+        draw["precipitation"] = precipitation
+    _, ours, _ = _our_erosion(parameters, draws, date)
+    in_, _ = ours.erosion(active=torch.ones(n, dtype=torch.bool))
+    theirs = _wsimod_erosion(parameters[0], draws[0], date)
+    theirs.parent.t = to_datetime(date)
+    expected = {"in": [], **{name: [] for name in _FLOWS}}
+    for parameter, draw in zip(parameters, draws, strict=True):
+        for name in (*_EROSION_SCALARS, "bulk_density", "area", "rooting_depth"):
+            setattr(theirs, name, parameter[name])
+        precipitation = draw["precipitation"]
+        theirs.parent.get_data_input = lambda variable, x=precipitation: x
+        theirs.crop_cover, theirs.ground_cover = draw["crop_cover"], draw["ground_cover"]
+        for name, flow in zip(_FLOWS, draw["flows"], strict=True):
+            setattr(theirs, name, {**dict.fromkeys(_KEYS, 0.0), **flow})
+        _set_their_pools(theirs, draw["pools"])
+        their_in, _ = theirs.erosion()
+        expected["in"].append([float(their_in[k]) for k in _KEYS])
+        for name in _FLOWS:
+            expected[name].append([float(getattr(theirs, name)[k]) for k in _KEYS])
+    assert torch.equal(in_, torch.tensor(expected["in"], dtype=F64))
+    for name in _FLOWS:
+        assert torch.equal(getattr(ours, name), torch.tensor(expected[name], dtype=F64)), name
+
+
+def test_a_pool_short_by_less_than_float_accuracy_prints_nothing(capsys):
+    """``abs(inorg + org - eff) > FLOAT_ACCURACY`` (``land.py:2053``): a pool short of the eroded
+    P by 3e-12 prints nothing and records no event; short by 3e-10 it prints "weird nutrients" and
+    records ``"erosion_pool_short"``. Both bitwise WSIMOD's. The eroded P is linear in the pool,
+    ``eff = c * pool``, and ``c`` is read from the ``phosphorus`` decision's margin."""
+    pytest.importorskip("wsimod")
+    rng = random.Random(109)
+    parameter = {**_erosion_parameters(rng), "bulk_density": 1e-4}
+    draw = _erosion_draw(rng, parameter, 2)
+    draw["precipitation"] = 0.012
+    draw["flows"][0]["volume"] = 2.0 * parameter["area"] / 1e3
+    draw["pools"][ADS][1], draw["pools"][HUMUS][1] = 0.4, 0.6
+    _, ours, ctx = _our_erosion([parameter], [draw], "2003-06-21")
+    ours.erosion(active=torch.ones(1, dtype=torch.bool))
+    (d,) = [d for d in ctx.decisions if d.site == f"{S7}/erosion/phosphorus"]
+    c = float(d.margin[0])
+    assert c > 1.5
+    for gap, short in ((3e-12, False), (3e-10, True)):
+        pool = gap / (c - 1)
+        draw["pools"][ADS][1], draw["pools"][HUMUS][1] = 0.4 * pool, 0.6 * pool
+        _, ours, ctx = _our_erosion([parameter], [draw], "2003-06-21")
+        in_, _ = ours.erosion(active=torch.ones(1, dtype=torch.bool))
+        capsys.readouterr()
+        theirs = _wsimod_erosion(parameter, draw, "2003-06-21")
+        their_in, _ = theirs.erosion()
+        assert ("weird nutrients" in capsys.readouterr().out) is short
+        assert bool(ctx.events["erosion_pool_short"]["land"][0]) is short
+        assert torch.equal(in_[0], _vector(their_in))
+        assert torch.equal(ours.nutrient_pool.storage[0], _their_pools(theirs))
+
+
+def test_erosion_uses_the_raw_day_in_its_sine():
+    """On 2003-03-01 the sine is ``math.sin(2 * 3.141592653589793 * ((60 - 70) / 365))``: the raw
+    day 60 (``land.py:1948``), not the adjusted 59 the interpolations use. The rain energy is
+    WSIMOD's on that date."""
+    pytest.importorskip("wsimod")
+    surface = growing(dates=[datetime(2003, 3, 1)])
+    (day,) = surface.calendar
+    assert (day.raw, day.adjusted) == (60, 59)
+    assert day.erosion_sine == math.sin(2 * 3.141592653589793 * ((60 - 70) / 365))
+    assert day.erosion_sine != math.sin(2 * 3.141592653589793 * ((59 - 70) / 365))
+    rng = random.Random(89)
+    parameter = _erosion_parameters(rng)
+    draw = _erosion_draw(rng, parameter, 2)
+    draw["precipitation"] = 0.0173
+    _, ours, _ = _our_erosion([parameter], [draw], "2003-03-01")
+    in_, _ = ours.erosion(active=torch.ones(1, dtype=torch.bool))
+    theirs = _wsimod_erosion(parameter, draw, "2003-03-01")
+    assert torch.equal(in_[0], _vector(theirs.erosion()[0]))
+    assert float(in_[0, NUT.column("solids")]) > 0
+
+
+def test_wsimod_erosion_without_solids_raises():
+    """L24: WSIMOD's erosion writes ``solids`` (``land.py:2088``), which its docstring's pollutant
+    list omits: without it, ``KeyError`` on the first eroding day. noodl refuses the configuration
+    by name (``test_nitrate_needs_the_eight_pollutants[solids]``)."""
+    import traceback
+
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+
+    rng = random.Random(97)
+    parameter = _erosion_parameters(rng)
+    draw = _erosion_draw(rng, parameter, 2)
+    theirs = _wsimod_erosion(parameter, draw, "2003-06-21")
+    constants.POLLUTANTS = [n for n in NUT.names if n != "solids"]
+    constants.ADDITIVE_POLLUTANTS = [n for n in NUT.additive if n != "solids"]
+    for name in _FLOWS:
+        getattr(theirs, name).pop("solids")
+    with pytest.raises(KeyError, match="solids") as raised:
+        theirs.erosion()
+    frame = traceback.extract_tb(raised.value.__traceback__)[-1]
+    assert frame.filename.endswith("land.py") and frame.lineno == 2088
+
+
+def test_gradcheck_on_one_erosion_call():
+    """Spec, Verification 4: one erosion call away from its guards (rain above 5 mm, ``ie > 0``,
+    ``erodingflow`` in ``(0, 4)`` so the transport factor is below 1, a pool longer than the
+    eroded P), with respect to ``erodibility``, ``sreroexp``, ``srfilt`` and the adsorbed and humus
+    P, through the outflows' ``solids``, ``phosphate`` and ``org-phosphorus`` and ``in_``."""
+    rng = random.Random(101)
+    parameter = {**_erosion_parameters(rng), "bulk_density": 1.0}
+    draw = _erosion_draw(rng, parameter, 1)
+    draw["precipitation"] = 0.012
+    draw["flows"][0]["volume"] = 0.3 * parameter["area"] / 1e3
+    land, ours, _ = _our_erosion([parameter], [draw], "2003-06-21")
+    flows = [getattr(ours, name).clone() for name in _FLOWS]
+    pools = ours.nutrient_pool.storage.clone()
+    columns = [NUT.column(n) for n in ("solids", "phosphate", "org-phosphorus")]
+
+    def erosion(erodibility, sreroexp, srfilt, ads_p, humus_p):
+        ours.bind(
+            {
+                **{k: torch.tensor([v], dtype=F64) for k, v in parameter.items()},
+                "erodibility": erodibility,
+                "sreroexp": sreroexp,
+                "srfilt": srfilt,
+            }
+        )
+        for name, flow in zip(_FLOWS, flows, strict=True):
+            setattr(ours, name, flow.clone())
+        phosphorus = {ADS: ads_p[0], HUMUS: humus_p[0]}
+        rows = [torch.stack([pools[0, j, 0], phosphorus.get(j, pools[0, j, 1])]) for j in range(5)]
+        ours.nutrient_pool.storage = torch.stack(rows)[None]
+        land.ctx = Ctx(NUT, FA, torch.Size((1,)), day=0, node_names=["land"])
+        in_, _ = ours.erosion(active=torch.ones(1, dtype=torch.bool))
+        return (in_[0, columns], *(getattr(ours, name)[0, columns] for name in _FLOWS))
+
+    inputs = tuple(
+        torch.tensor([v], dtype=F64, requires_grad=True) for v in (0.0031, 1.17, 0.66, 0.4, 0.9)
+    )
+    assert torch.autograd.gradcheck(erosion, inputs)

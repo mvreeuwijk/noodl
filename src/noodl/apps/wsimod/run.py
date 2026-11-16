@@ -87,6 +87,7 @@ EVENT_NAMES = (
     "nutrient_pool_not_tracking",
     "transformation_no_din",
     "crop_uptake_dry_soil",
+    "erosion_pool_short",
 )
 """The warning conditions a run reports (D13): WSIMOD's prints and noodl's own."""
 

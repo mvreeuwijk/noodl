@@ -91,6 +91,7 @@ PART_NAMES = {
     "manure": "GrowingSurface.manure",
     "soil_pool_transformation": "GrowingSurface.soil_pool_transformation",
     "calc_crop_uptake": "GrowingSurface.calc_crop_uptake",
+    "erosion": "GrowingSurface.erosion",
     "denitrification": "GrowingSurface.denitrification",
 }
 NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"

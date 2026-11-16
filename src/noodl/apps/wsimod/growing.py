@@ -21,16 +21,18 @@ three N species 0 in ``pull_storage``, where WSIMOD raises ``ZeroDivisionError``
 Y18; the decision ``S/pull_storage/no_din`` and the event ``"pull_storage_no_din"``).
 
 **The soil processes** run after ``calculate_soil_temperature``, in WSIMOD's list
-(``:1283-1291``; erosion and adsorption are later tasks, D20): the temperature and soil-moisture
+(``:1283-1291``; adsorption is a later task, D20): the temperature and soil-moisture
 factors of the day (``:1813-1856``; the temperature factor jumps at 5 °C, L12, Y19), the pool's
-transformations scaled back into the tank (``:1744-1811``), crop uptake (``:1858-1926``) and
-denitrification (``:2096-2152``). Uptake and denitrification take all their N as nitrate (L9).
+transformations scaled back into the tank (``:1744-1811``), crop uptake (``:1858-1926``), erosion
+(``:1928-2094``; its sediment and the adsorbed and humus P go straight into the day's outflows,
+bypassing the tank, and a short pool records ``"erosion_pool_short"``) and denitrification
+(``:2096-2152``). Uptake and denitrification take all their N as nitrate (L9).
 Each pulls from the tank through :meth:`GrowingSurface._pull_tracked`, whose clamp records
-``"nutrient_pool_not_tracking"`` (L10). Python's ``**`` and ``exp`` are evaluated per instance
-(``pow_python``, ``exp_python``). Two zero denominators are guarded: ``nitrate + ammonia = 0`` in
-the transformation (proportion 0, ``"transformation_no_din"``, L6) and ``V = 0`` in the uptake
-(no available uptake, ``"crop_uptake_dry_soil"``, L7), where WSIMOD raises
-``ZeroDivisionError``.
+``"nutrient_pool_not_tracking"`` (L10). Python's ``**``, ``exp``, ``log10`` and ``sin`` are
+evaluated per instance (``pow_python``, ``exp_python``, ``log10_python``, ``sin_python``). Two
+zero denominators are guarded: ``nitrate + ammonia = 0`` in the transformation (proportion 0,
+``"transformation_no_din"``, L6) and ``V = 0`` in the uptake (no available uptake,
+``"crop_uptake_dry_soil"``, L7), where WSIMOD raises ``ZeroDivisionError``.
 
 **The calendar is built at build time** (spec, Approach rule 2, D7).
 :meth:`GrowingSurface.set_dates` evaluates, for every date of the network and in WSIMOD's own
@@ -79,7 +81,8 @@ dry, wet, fertiliser and manure calls in that order), the pool's own
 ``S/calc_soil_moisture_dependence_factor/{saturated,wilted,min:wp,min:fc}``,
 ``S/soil_pool_transformation/{no_din,inorganic_N,organic_N,inorganic_P,organic_P}``,
 ``S/calc_crop_uptake/{crop,temperature_cap,temperature_floor,shape,available_water,dry_soil,cap:P,
-cap:N}`` and ``S/denitrification/{saturated,moist}``.
+cap:N}``, ``S/erosion/{rain,runoff,transport,enrichment_cap,flow,phosphorus}`` and
+``S/denitrification/{saturated,moist}``.
 """
 
 from __future__ import annotations
@@ -94,7 +97,16 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.constants import G_M2_TO_KG_M2, KG_M3_TO_MG_L, SURFACE_INPUTS
+from noodl.apps.wsimod.constants import (
+    G_M2_TO_KG_M2,
+    KG_M2_TO_KG_KM2,
+    KG_M3_TO_KG_KM3,
+    KG_M3_TO_MG_L,
+    M2_TO_KM2,
+    M_TO_KM,
+    M_TO_MM,
+    SURFACE_INPUTS,
+)
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.land import SURFACE_CLASSES, PerviousSurface, month_start, runs_nutrients
 from noodl.apps.wsimod.nutrient_pool import (
@@ -110,8 +122,10 @@ from noodl.apps.wsimod.storage import exp_python
 from noodl.apps.wsimod.vqip import (
     Pollutants,
     extract_vqip,
+    log10_python,
     pow_python,
     safe_den,
+    sin_python,
     v_change_vqip,
     write,
 )
@@ -352,8 +366,8 @@ def _f64(x) -> Tensor:
 
 class GrowingSurface(PerviousSurface):
     """``GrowingSurface`` (``land.py:1082-2312``): construction, overrides, the crop calendar,
-    ``calc_crop_cover``, the nutrient pool's inputs and outputs and the soil processes (see the
-    module text).
+    ``calc_crop_cover``, the nutrient pool's inputs and outputs, the soil processes and erosion
+    (see the module text).
 
     Parameters (``parameter_defaults``): :class:`~noodl.apps.wsimod.land.PerviousSurface`'s without
     ``depth`` (its physical depth is ``rooting_depth``) and ``et0_coefficient`` (overwritten every
@@ -424,13 +438,14 @@ class GrowingSurface(PerviousSurface):
             self._fill_pool(_soil_storage(structure.get("initial_soil_storage"), where))
             # :1278-1281 (residue stays unwired, :1281)
             self.inflows += [self.effective_precipitation_flushing, self.fertiliser, self.manure]
-            # :1283-1291, after calculate_soil_temperature; erosion (between the uptake and
-            # denitrification) and adsorption (last) are later tasks (D20)
+            # :1283-1291, after calculate_soil_temperature; adsorption (last) is a later task
+            # (D20)
             self.processes += [
                 self.calc_temperature_dependence_factor,
                 self.calc_soil_moisture_dependence_factor,
                 self.soil_pool_transformation,
                 self.calc_crop_uptake,
+                self.erosion,
                 self.denitrification,
             ]
 
@@ -1148,6 +1163,134 @@ class GrowingSurface(PerviousSurface):
         )
         out_ = self._pull_tracked(out_, active=crop)
         return ctx.empty(), torch.where(crop[..., None], out_, ctx.empty())
+
+    def erosion(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:1928-2094`` (HYPE's erosion), in WSIMOD's operand order:
+
+        - the rain depth ``pd = precipitation * M_TO_MM`` is the Land's forcing (``:1940``);
+          above 5 mm (``rain``) ``mobilised_rain = (8.95 + 8.44 * log10(pd * (0.257 +
+          sin(2 * PI * ((raw - 70) / 365)) * 0.09) * 2)) * pd * (1 - crop_cover) *
+          erodibility``, the sine of the raw day of the year (:attr:`CalendarDay.erosion_sine`),
+          else 0;
+        - with infiltration excess (``runoff``) ``mobilised_flow = (ie / area * M_TO_MM * 365)
+          ** sreroexp * ((1 - ground_cover) * (1 / (0.5 * cohesion)) * sin(slope / 100) /
+          365)``, else 0;
+        - ``total_flows = ie + ss + perc`` (the three volumes; surface runoff is not one),
+          ``erodingflow = total_flows / area * M_TO_MM``, the transport factor ``min(1,
+          (erodingflow / 4) ** 1.3)`` (``transport``) and ``erodedsed = 1000 * (mobilised_flow
+          + mobilised_rain) * transportfactor``;
+        - the enrichment is 1.5 above 4 mm (``enrichment_cap``), ``4 - (4 - 1.5) * erodingflow /
+          4`` above 0 (``flow``); otherwise both VQIPs are empty and nothing changes;
+        - ``erodedP = erodedsed * (erodable / (rooting_depth * M_TO_KM * bulk_density *
+          KG_M3_TO_KG_KM3)) * enrichment`` with the pool's ``ads.P + humus.P`` per km²; both in
+          kg (``* (area * M2_TO_KM2)``), split over the three flows by ``srfilt * ie /
+          total_flows`` and ``macrofilt * ss`` (or ``perc``) ``/ total_flows``;
+        - where ``eff_erodedP = perc_P + surface_P + sub_P > 0`` (``phosphorus``) the pool's
+          ``erode_P`` removes it from the adsorbed and humus pools, and each flow gains its share
+          of the removed organic P as ``org-phosphorus`` and of the adsorbed P as
+          ``phosphate``. A pool holding less than ``eff_erodedP`` (``abs(inorg + org - eff) >
+          FLOAT_ACCURACY``) records ``"erosion_pool_short"``, where WSIMOD prints "weird
+          nutrients" (``:2051-2054``);
+        - each flow gains its sediment as ``solids`` (``:2088-2090``; refused without ``solids``,
+          L24).
+
+        The eroded masses go straight into the day's outflow VQIPs and are returned as the
+        inflow ``in_`` (``phosphate``, ``org-phosphorus``, ``solids``): they never pass through
+        the tank (transcribed, ``:2079-2081``). Every power, ``log10`` and ``sin`` is Python's,
+        per instance, on a base or argument replaced by 1 where its branch is not taken."""
+        p, ctx, pool = self.p, self.ctx, self.nutrient_pool
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = self._call("erosion")
+        site = f"{self.site}/erosion"
+        day = self._day()
+        area = self.area
+        ie, ss, perc = self.infiltration_excess, self.subsurface_flow, self.percolation
+        ie_v, ss_v, perc_v = ie[..., 0], ss[..., 0], perc[..., 0]
+        # :1940-1956
+        depth = self.parent.params["precipitation"] * M_TO_MM
+        rain = active & ctx.decide(f"{site}/rain", depth, ">", 5.0, active=active, call=call)
+        seasonal = 0.257 + day.erosion_sine * 0.09  # a Python float of the date (rule 2)
+        argument = torch.where(rain, depth * seasonal * 2, torch.ones_like(depth))
+        energy = 8.95 + 8.44 * log10_python(argument)
+        energy = energy * depth
+        mobilised_rain = energy * (1 - self.crop_cover) * self._param("erodibility")
+        mobilised_rain = torch.where(rain, mobilised_rain, torch.zeros_like(mobilised_rain))
+        # :1959-1970
+        runoff = active & ctx.decide(f"{site}/runoff", ie_v, ">", 0.0, active=active, call=call)
+        base = torch.where(runoff, ie_v / area * M_TO_MM * 365, torch.ones_like(ie_v))
+        mobilised_flow = pow_python(base, self._param("sreroexp"))
+        cover = (1 - self.ground_cover) * (1 / (0.5 * self._param("cohesion")))
+        mobilised_flow = mobilised_flow * (cover * sin_python(self._param("slope") / 100) / 365)
+        mobilised_flow = torch.where(runoff, mobilised_flow, torch.zeros_like(mobilised_flow))
+        # :1974-1987
+        total_flows = ie_v + ss_v + perc_v
+        eroding = total_flows / area * M_TO_MM
+        # the volumes are non-negative, so the base is; an inactive one is replaced
+        quarter = torch.where(active, eroding / 4, torch.zeros_like(eroding))
+        transport = dmin(
+            ctx, f"{site}/transport", 1.0, pow_python(quarter, 1.3), active=active, call=call
+        )
+        sediment = 1000 * (mobilised_flow + mobilised_rain) * transport
+        # :1992-1997
+        cap = ctx.decide(f"{site}/enrichment_cap", eroding, ">", 4.0, active=active, call=call)
+        flowing = ctx.decide(f"{site}/flow", eroding, ">", 0.0, active=active & ~cap, call=call)
+        run = active & (cap | flowing)
+        enrichment = torch.where(cap, _f64(1.5), 4 - (4 - 1.5) * eroding / 4)
+        # :2000-2019
+        erodable = pool.get_erodable_P() / area * KG_M2_TO_KG_KM2
+        soil = self._param("rooting_depth") * M_TO_KM * self._param("bulk_density")
+        soil = soil * KG_M3_TO_KG_KM3
+        eroded_p = sediment * (erodable / soil) * enrichment
+        eroded_p = eroded_p * (area * M2_TO_KM2)
+        sediment = sediment * (area * M2_TO_KM2)
+        # :2022-2041 (total_flows > 0 where it is used)
+        total = torch.where(run, total_flows, torch.ones_like(total_flows))
+        srfilt, macrofilt = self._param("srfilt"), self._param("macrofilt")
+        surface_p = srfilt * ie_v / total * eroded_p
+        surface_sed = srfilt * ie_v / total * sediment
+        sub_p = macrofilt * ss_v / total * eroded_p
+        sub_sed = macrofilt * ss_v / total * sediment
+        perc_p = macrofilt * perc_v / total * eroded_p
+        perc_sed = macrofilt * perc_v / total * sediment
+        # :2047-2054
+        eff = perc_p + surface_p + sub_p
+        phosphorus = run & ctx.decide(f"{site}/phosphorus", eff, ">", 0.0, active=run, call=call)
+        organic, inorganic = pool.erode_P(eff, active=phosphorus)
+        removed = inorganic + organic
+        short = (removed - eff).abs() > ctx.fa
+        ctx.event("erosion_pool_short", self.parent.name, phosphorus & short)
+        # :2057-2077 (eff > 0 where it is used)
+        eff = torch.where(phosphorus, eff, torch.ones_like(eff))
+        column = p.column
+        flows = []
+        for flow, share_p, share_sed in (
+            (ie, surface_p, surface_sed),
+            (ss, sub_p, sub_sed),
+            (perc, perc_p, perc_sed),
+        ):
+            gained = self._with_columns(
+                flow,
+                {
+                    "org-phosphorus": flow[..., column("org-phosphorus")] + share_p * organic / eff,
+                    "phosphate": flow[..., column("phosphate")] + share_p * inorganic / eff,
+                },
+            )
+            flow = write(phosphorus, gained, flow)
+            # :2088-2090
+            gained = self._with_columns(flow, {"solids": flow[..., column("solids")] + share_sed})
+            flows.append(write(run, gained, flow))
+        self.infiltration_excess, self.subsurface_flow, self.percolation = flows
+        # :2079-2092
+        zero = torch.zeros_like(removed)
+        in_ = self._with_columns(
+            ctx.empty(),
+            {
+                "phosphate": torch.where(phosphorus, inorganic, zero),
+                "org-phosphorus": torch.where(phosphorus, organic, zero),
+                "solids": surface_sed + sub_sed + perc_sed,
+            },
+        )
+        return torch.where(run[..., None], in_, ctx.empty()), ctx.empty()
 
     def denitrification(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:2096-2152``: the moisture dependence ``f`` is 1 where ``smc >

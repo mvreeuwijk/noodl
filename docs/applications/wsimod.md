@@ -265,7 +265,7 @@ override. Its constructor keywords are `rooting_depth`, `ET_depletion_factor`,
 reachable through overrides only, 31 names with `rooting_depth` (`:1376-1431`). With `nitrate`
 among the pollutants the surface also keeps a nutrient pool, fed by deposition, fertiliser and
 manure and drained by its outflows and its soil processes (below): the transformation, crop
-uptake and denitrification. Erosion and adsorption are the next tasks of sub-project 3c.
+uptake, erosion and denitrification. Adsorption is the next task of sub-project 3c.
 
 `calc_crop_cover` (`land.py:1514-1572`) runs first on the surface each day. It sows on
 `sowing_day` and harvests on `harvest_day` (the raw day of the year), interpolates the crop
@@ -407,6 +407,27 @@ WSIMOD's order (`land.py:1283-1291`):
   area) / V` of each. The P is taken first, then the N. A crop on a soil with no water makes
   WSIMOD divide by zero (`:1899`, reachable with `ET_depletion_factor < 1`); noodl takes up
   nothing and records `"crop_uptake_dry_soil"` (L7).
+- **Erosion** (`:1928-2094`, HYPE's), between the uptake and denitrification. Rain above 5 mm
+  mobilises `(8.95 + 8.44 * log10(pd * (0.257 + sin(2 * PI * ((day - 70) / 365)) * 0.09) * 2))
+  * pd * (1 - crop_cover) * erodibility`, with the rain depth `pd` in mm (the Land's
+  precipitation) and the **raw** day of the year in the sine: on 1 March the sine uses day 60,
+  not the adjusted 59 the crop interpolations use. Infiltration excess mobilises `(ie / area *
+  1000 * 365) ** sreroexp * (1 - ground_cover) * (1 / (0.5 * cohesion)) * sin(slope / 100) /
+  365`. The sum is scaled by the transport factor `min(1, (erodingflow / 4) ** 1.3)`, where
+  `erodingflow` is the depth of infiltration excess, subsurface flow and percolation in mm
+  (surface runoff is not among them), into the eroded sediment; its phosphorus is that of the
+  adsorbed and humus pools per unit of soil mass, times an enrichment of 1.5 above 4 mm and
+  `4 - 2.5 * erodingflow / 4` below. A day with `erodingflow = 0` erodes nothing. Sediment and
+  phosphorus are split over the three flows, `srfilt` of the infiltration excess's share and
+  `macrofilt` of the others'; the phosphorus is removed from the two pools in their proportion
+  and each flow gains its share as `org-phosphorus` (the humus) and `phosphate` (the adsorbed),
+  the sediment as `solids`. **The eroded masses bypass the tank** (transcribed): they go
+  straight into the day's outflows and are listed as inflows (the part
+  `"GrowingSurface.erosion"`). A pool holding less phosphorus than the eroded amount gives what it
+  has; WSIMOD prints "weird nutrients" when the two differ by more than `FLOAT_ACCURACY`, and
+  noodl records `"erosion_pool_short"`. For gradients, rain crossing 5 mm is a jump (from 0 to
+  the rain energy), the transport factor's `min(1, ...)` is a kink, and the switches at
+  `ie = 0`, `erodingflow = 0` and at 4 mm are continuous.
 - **Denitrification** (`:2096-2152`), on a soil wetter than `limpar` of field capacity: a factor
   1 above field capacity and `((smc / fc_m - limpar) / (1 - limpar)) ** exppar` below (1.0 at
   field capacity itself), a half-saturation factor of the dissolved inorganic N's concentration
@@ -697,8 +718,10 @@ them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg
   inorganic nitrogen to split a pull over, L5), `"nutrient_pool_not_tracking"` (a growing
   surface's tank had less than its pool removed, and the removal was clamped, L9, L10),
   `"transformation_no_din"` (the tank had neither nitrate nor ammonia to split the
-  transformation's change over, L6) and `"crop_uptake_dry_soil"` (a crop on a soil with no
-  water, L7). The arc-keyed event, `"decay_arc_order_unknown"`, is keyed by arc,
+  transformation's change over, L6), `"crop_uptake_dry_soil"` (a crop on a soil with no
+  water, L7) and `"erosion_pool_short"` (a growing surface's adsorbed and humus pools held less
+  phosphorus than erosion removed; WSIMOD prints "weird nutrients"). The arc-keyed event,
+  `"decay_arc_order_unknown"`, is keyed by arc,
   `(..., T, n_arcs)`, and `WsimodDay.event_columns(condition)` names the columns (X48);
 - `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
   that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
@@ -869,7 +892,7 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `GrowingSurface`: the soil temperature factor is `T / 5` below 5 °C, not HYPE's product, so it jumps at 5 °C (L12) | reproduced, documented | `test_the_soil_factors_equal_wsimods` |
 | `GrowingSurface`: a float `initial_soil_storage`, which the docstring allows, raises `TypeError` (L16) | refused | `test_initial_soil_storage_refusals` |
 | `NutrientPool`: its parameters cannot be configured (L20) | drivers with WSIMOD's defaults; refused as configuration | `test_nutrient_pool_parameters_are_drivers_with_wsimods_defaults` |
-| `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]` |
+| `GrowingSurface`: erosion reads `solids`, which the docstring's pollutant list omits (L24) | refused without `solids` | `test_nitrate_needs_the_eight_pollutants[solids]`; `test_wsimod_erosion_without_solids_raises` |
 | the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
 | `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
 | `UnlimitedDistribution` loses its leakage | refused | `test_leakage_refusals` |
