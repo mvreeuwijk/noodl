@@ -244,5 +244,6 @@ constructs them and noodl runs them, so it decides the order of every push and p
 WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own is set-hash
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
-and run bit for bit as WSIMOD runs them; every ported process runs on them, with no neutralised
-copy of either; each demo's `config.yml` runs unmodified, the surfaces' `pollutant_load` included. See the [WSIMOD application](../applications/wsimod.md).
+and run bit for bit as WSIMOD runs them; every ported process runs on them: each demo's
+`config.yml` runs unmodified, with no second configuration, the surfaces' `pollutant_load`
+included. See the [WSIMOD application](../applications/wsimod.md).

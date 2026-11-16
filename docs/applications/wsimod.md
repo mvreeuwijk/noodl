@@ -490,9 +490,16 @@ With `nitrate`, these are refused by name, in either mode: a missing one of `amm
 WSIMOD's docstring omits it, L24) and `temperature`; and `rooting_depth`, `bulk_density`,
 `kfr` or `nfr` at or below 0, `cohesion`, `thetaupp` or `thetalow` of 0, `hsatINs` at or below 0,
 `limpar` below 0 and `field_capacity` at or below 0, each a division by zero or a logarithm of a
-non-positive number in WSIMOD. These parameter checks run at build in either mode, and again for
-every batched instance when the day is bound, but only with pollutants on: a quantity-only run
-has no pool, so nothing reads them.
+non-positive number in WSIMOD; and a `VariableAreaSurface`'s `current_surface_area` below 0
+(erosion raises a negative flow to 1.3, `land.py:1984`). These parameter checks run at build in
+either mode, and again for every batched instance when the day is bound, but only with
+pollutants on: a quantity-only run has no pool, so nothing reads them.
+
+A value inside these domains can still take WSIMOD's own Python math out of its domain on an
+active instance: a small `nfr` (`1e-3`) underflows adsorption's first guess to 0, and `0 **
+(nfr - 1)` raises `ZeroDivisionError` (`land.py:2210`). WSIMOD raises there too; noodl raises a
+`ValueError` naming the surface, the function, the day and its date, and the cause. Python's
+math has no per-instance error, so one such instance stops the whole batch.
 
 ### The irrigation surface
 
@@ -574,7 +581,10 @@ et0_coefficient` (the crop's coefficient of the day), each times `current_surfac
 so an override naming it is refused (Y50). A surface at the default 0 gets no rain and no
 evaporation (its precipitation volume is 0.0). A quantity-only run reads it (it sets the volumes),
 so it is not listed as ignored. `area` is never 0 (the build refuses it by name, as for every
-growing surface), so the quotient needs no guard.
+growing surface), so the quotient needs no guard. With `nitrate` a pollutant a negative
+`current_surface_area` is refused by name: the negative climate makes the eroding flow negative,
+and WSIMOD's erosion raises `TypeError` (`land.py:1984`). Without `nitrate` erosion does not run,
+and WSIMOD and noodl run the value.
 
 Erosion still reads the `Land`'s unscaled rain (`:1940`), so an idle surface erodes on a rainy day
 (transcribed). `get_climate` is called from `ihacres`, so it is part of the `ihacres` mass-balance
@@ -894,7 +904,7 @@ The state keys, each with a leading batch shape and labelled rows:
 | `"wsimod.liquor"`, `"wsimod.previous_pulled"`, `"wsimod.treated"` | node | the treatment works' liquor, an `FWTW`'s previous day's pull, a `WWTW`'s treated water |
 | `"wsimod.river_temperature_lag"`, `"wsimod.river_phosphorus_lag"` | `(river, i)` | the two registers of every River with biochemistry, `max_temp_lag + 1` and `max_phosphorus_lag + 1` slots (degC, kg) |
 | `"wsimod.total_decayed"` | `(node, "tank.internal_arc")`, `(node, "surfaces.<name>")` | each decaying `QueueGroundwater`'s queue decay that its `storage` loses at the next end of day, and each surface's decayed mass of the last end of day, which the next `Surface.run` converts (surface rows only when `nitrite` is a pollutant; in the state layout's order) |
-| `"wsimod.nutrient_pool"` | `(node, "surfaces.<name>.nutrient_pool", pool, nutrient)` | every growing surface's five nutrient pools, `N` then `P` of each (kg), `(..., 10 n_growing)`, with `nitrate` a pollutant and pollutants on |
+| `"wsimod.nutrient_pool"` | `(node, "surfaces.<name>.nutrient_pool", pool, nutrient)` | every growing surface's five nutrient pools, `N` then `P` of each (kg), `(..., 10 n_growing)`, with `nitrate` a pollutant and pollutants on. The pool is its own state: setting a growing surface's tank in `"wsimod.storage"` does not derive the dissolved pools from it, as WSIMOD's constructor does, so set both together |
 | `"wsimod.days_after_sow"`, `"wsimod.crop_cover"`, `"wsimod.ground_cover"` | `(node, "surfaces.<name>")` | every growing surface's days since sowing (`-1` before sowing: WSIMOD's `None`; d) and its crop and ground cover (-), `(..., n_growing)`, in both modes |
 | `"wsimod.surface_climate"` | `(node, "surfaces.<name>", "evaporation" or "precipitation")` | every irrigation and garden surface's last evaporation and precipitation volumes (m3), `(..., 2 n_climate)`, in both modes |
 
@@ -1089,6 +1099,11 @@ returns the water and balances. WSIMOD's `NonResidentialDemand` raises `Recursio
 - **Structural.** The topology, the classes, the pollutant lists, the orchestration, the travel
   times (whole days: they size the queues) and whether a `Distribution` has leakage at all
   (WSIMOD decorates its handlers only then) are fixed when the model is built.
+- **Python's power.** `pow_python`'s slope in the base is `y x^y / x` wherever the base is not 0:
+  exact for a negative base too, which reaches it only with an integral power (the
+  soil-moisture factor with a negative `thetaupp` or `thetalow` and an integral `thetapow`,
+  which WSIMOD runs). Its slope in the power is 0 for a negative base (there is no real one),
+  and both slopes are 0 at a base of 0 (a saturated soil).
 - **Detached.** Every branch (`if x > FLOAT_ACCURACY`, `min`, `max`, the loop exits, the tie
   rules) is decided on detached values, per instance. The values stay in the graph, so the
   gradient is that of the branch the instance took.
@@ -1123,13 +1138,14 @@ travel times, the pollutant lists and whether a `Distribution` has leakage.
 
 Autograd is on only when a state or driver tensor requires grad (W9); otherwise the run is under
 `torch.no_grad()`. The graph is large because the day is thousands of small operations. The
-benchmark (`benchmarks/wsimod_run.py`) times 60 days (120 for `growing_spring`, which is sown on
-run day 90) with `wsimod.Arc.capacity` requiring grad and counts the autograd nodes behind the
-last day's storage. Each figure is one shot; the table is the 3c run at the end of the sub-project
-(Task 17, a machine at 4 to 6 % CPU load before the run), with the median of three of 3's
-Task 0 baseline beside it (that run was on a loaded machine), no grad / grad in s/day:
+benchmark (`benchmarks/wsimod_run.py`) times 60 days (120 for `growing_spring`, which end before
+its sowing on run day 182: the nutrient pool runs every day, the crop not yet) with
+`wsimod.Arc.capacity` requiring grad and counts the autograd nodes behind the last day's storage.
+Each figure is one shot; the table is the run at the end of 3c (a machine at 4 to 6 % CPU load
+before the run), with the median of three runs from before 3c beside it (those were on a loaded
+machine), no grad / grad in s/day:
 
-| Demo | Batch | 3c run, no grad / grad | Task 0 median, no grad / grad | Autograd nodes |
+| Demo | Batch | end of 3c, no grad / grad | before 3c, median of three, no grad / grad | Autograd nodes |
 |---|---|---|---|---|
 | quickstart (quantity only) | 1 | 0.0424 / 0.0959 | 0.0532 / 0.0876 | 240,999 |
 | quickstart | 10 | 0.0743 / 0.0909 | 0.0706 / 0.0974 | 240,999 |
@@ -1246,7 +1262,9 @@ has to be debugged, not admitted.
   compares them with nothing (D17). The system mass
   balance closes within `1e-12 * scale` every day, and every day the residual equals the
   evaporation clamp's gap (0 without a clamp). A quantity-only run's volumes equal the pollutant
-  run's exactly (`torch.equal`). The River biochemistry cases: `river_nutrients` runs its first
+  run's exactly (`torch.equal`): by default through WSIMOD's one run, which both modes equal
+  bitwise, and directly (`test_quantity_only_equals_the_pollutant_run_volumes`) for the three
+  cases WSIMOD does not run, the others and the demos under `-m slow`. The River biochemistry cases: `river_nutrients` runs its first
   400 days by default and all 1100 under `-m slow`, when the decisions are recorded and every
   branch is asserted (X39, D24); `river_double_discharge` runs its 40 days by default.
 - **The growing surface with its nutrient pool:** `growing_spring` (sown on day 90,
@@ -1270,21 +1288,27 @@ has to be debugged, not admitted.
   stays true on some later days).
   `deposition_non_additive` runs `surface_deposition`'s surfaces with `ammonia` non-additive
   (Y43): bitwise, no prints.
-- **The one print admission** (Y35, Y41, D12): on lands with a growing surface, WSIMOD's node
-  check prints round-off "mass balance error for <pollutant> of x in <land>" lines (always
-  `org-phosphorus` or `org-nitrogen`, |x| about 1e-17 kg) when a tank holds a large organic store
-  and the day's flows are small: its `ds_` is a difference of two large stores, its normaliser the
-  flow scale. noodl's own balance closes. `assert_matches_wsimod(..., store_bounded_prints={"land":
-  c})` admits such a line of an additive pollutant where `|x| <= c * eps * S`, with `eps =
-  2.22e-16` and `S` the largest store of that pollutant on the land's surfaces and its three
-  residence tanks at the end of that day or the day before (the initial stores on day 0); a line
-  beyond it, a volume line and any line of an unmapped land still fail
-  (`test_the_store_bound_admits_nothing_else`). The measured maximum of `|x| / (eps S)` is 1.277
-  (`growing_spring`, day 908 of its three years; 0.432 in its first 365 days), 0.404
-  (`growing_autumn`, 400 days), 0.479 (`growing_decay`, 200) and 0.610 (`growing_lean_soil`), so
-  `GROWING_PRINT_C = 2`. Those four cases are mapped (`test_the_store_bounded_prints`: each
-  prints such lines); every other case, the crash cases' days before their crash included, is
-  unmapped and so asserts that it prints none.
+- **The one print admission** (Y35, Y41, Y91, D12): on a land with a growing surface and
+  `nitrate` among the pollutants, WSIMOD's node check can print round-off "mass balance error for
+  <pollutant> of x in <land>" lines (`org-phosphorus` or `org-nitrogen`, |x| about 1e-17 kg) when
+  a tank holds a large organic store and the day's flows are small: its `ds_` is a difference of
+  two large stores, its normaliser the flow scale. noodl's own balance closes. Whether a line
+  falls on a given day depends on the last bit of WSIMOD's own `math.exp`, `**` and `log`, so on
+  the platform's C library: the admission is therefore made at every such land of every case,
+  the crash cases' days before their crash included, not only where lines were seen.
+  `assert_matches_wsimod(..., store_bounded_prints={land: c})` admits such a line of an additive
+  pollutant where `|x| <= c * eps * S`, with `eps = 2.22e-16` and `S` the largest store of that
+  pollutant on the land's surfaces and its three residence tanks at the end of that day or the
+  day before (the initial stores on day 0); a line beyond it, a volume line and any line of
+  another land still fail (`test_the_store_bound_admits_nothing_else`, on an added line, so that
+  it holds whatever the platform prints). Measured on Windows (`test_the_store_bounded_prints`,
+  `PRINTS_MEASURED`), the maximum of `|x| / (eps S)` is 1.277 (`growing_spring`, day 908 of its
+  three years; 0.432 and 43 lines in its first 365 days), 0.889 (`variable_area`, 3 lines), 0.610
+  (`growing_lean_soil`), 0.479 (`growing_decay`), 0.404 (`growing_autumn`, 400 days) and 0.170
+  (`surface_overrides`, 1 line); `irrigation`, `irrigation_early` and `garden` print none. Hence
+  `GROWING_PRINT_C = 2`; a platform whose maximum is larger raises `c` to its ceiling, with both
+  maxima recorded. Only `growing_spring` must print a line; another platform's counts are
+  reported by a warning, not a failure.
 - **Irrigation** (`irrigation`, `irrigation_early`, 120 days; `irrigation_without_nutrients`, the crash case below):
   two `IrrigationSurface`s sown on run days 16 and 36 and fed by a `River`, a `Groundwater` and a
   `Reservoir` through the `Land`'s in-arcs, with the eight pollutants. Soils start above capacity,
@@ -1300,6 +1324,9 @@ has to be debugged, not admitted.
   against 240), and that start alone gives its saturated first days (the wet spells never fill
   it), the later ones are not, with wet days (no deficit) and dry
   days (a demand); both outcomes of `deficit` and `saturated` are asserted from the decisions.
+  The run has the eight nutrient pollutants, so both garden surfaces keep a nutrient pool (with
+  an `initial_soil_storage` and monthly fertiliser, manure and deposition data), and the 0 degC
+  garden water enters a tank whose nutrients leave in the pool's proportions.
   Bitwise equal to WSIMOD, and the replay of both `Land`s, handler calls included, is bitwise.
 - **Variable area** (`variable_area`, 100 days): two `VariableAreaSurface`s, `idle` at the default
   `current_surface_area` 0 (no rain, no evaporation) and `half` at half its area, sown on run day 6.
@@ -1331,14 +1358,14 @@ has to be debugged, not admitted.
   rivers, 10 s and more each); each 3b family keeps its cheapest entry in the default selection,
   and a mutation of `pow_python` or of `window_sum` fails a default entry. Of the 32 from 3c, 27
   are `-m slow` (each growing run takes 15 to 30 s alone) and 5 are in the default selection; the
-  whole file under `-m slow` took 413 s in Task 16. The 3a and 3b entries took 229 s with `-n 4` on a
-  shared machine.
+  whole file under `-m slow` took 413 s at the end of 3c. The 3a and 3b entries took 229 s with
+  `-n 4` on a shared machine.
 
 | Run | Days | Modes | Worst difference | Default | Time (`-n 4`) |
 | --- | --- | --- | --- | --- | --- |
-| quickstart | 1456 | quantity-only, pollutant mode | 0 | yes | 41 s, 38 s |
-| oxford | 365 | quantity-only, pollutant mode | 0 | yes | 36 s, 37 s |
-| oxford | 1456 | quantity-only, pollutant mode | 0 | `-m slow` | 142 s, 146 s |
+| quickstart | 1456 | quantity-only, pollutant mode | 0 | yes | 94 s, 97 s (end of 3c) |
+| oxford | 365 | quantity-only, pollutant mode | 0 | yes | 90 s, 92 s (end of 3c) |
+| oxford | 1456 | quantity-only, pollutant mode | 0 | `-m slow` | not timed at the end of 3c |
 | 47 cases (the 3a ones and the decay, treatment, soil-temperature and surface cases of 3b) | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
 | `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes | 3 s a mode |
 | `river_nutrients` | 1100, with decisions | all pollutants | 0 | `-m slow` | about 10 s a mode unloaded (22 s, 27 s and 31 s for the branch assertions measured on a shared machine) |
@@ -1354,7 +1381,7 @@ has to be debugged, not admitted.
 | five growing crash cases | 10 to 20 | the pollutants of each | 0 on the days before WSIMOD's crash | yes | a few seconds each |
 | `deposition_non_additive` | 90 | quantity-only, all pollutants | 0 | yes | 3 s, 4 s |
 | `irrigation`, `irrigation_early` | 120 | quantity-only, the eight nutrient pollutants | 0 (no print admission needed) | yes | 19 s the pollutant mode of each, below 13 s the other |
-| `garden` | 100 | quantity-only, the eight nutrient pollutants | 0 | yes | below 13 s a mode |
+| `garden` | 100 | quantity-only, the eight nutrient pollutants | 0 | yes | 14 s, below 13 s |
 | `variable_area` | 100 | quantity-only, the eight nutrient pollutants | 0 (three round-off lines within 0.889 eps S) | yes | below 13 s a mode |
 | `surface_overrides` | 100 | quantity-only, pollutant mode | 0 | yes | below 13 s a mode |
 | `irrigation_without_nutrients` | 40 | pollutants `phosphate` and `temperature` | noodl only (WSIMOD raises on day 5, L13) | yes | a few seconds |
@@ -1367,30 +1394,15 @@ cannot arise in the demos, and neither has a `QueueGroundwater`; the river and g
 cases cover those classes, with the ties kept independent. WSIMOD's source files are not
 modified; the committed forcing is WSIMOD's (BSD-3, `tests/data/wsimod/LICENSE-WSIMOD`).
 
-**Suite composition.** The wsimod row of the test table (the default selection) takes
-about 315 s with `-n 4` on an unloaded machine (5,798 tests, measured in Task 13), within the 10-minute
-budget. At the end of 3b, with the machine shared and every item 2 to 3 times slower (the four
-demo parity items 91 to 97 s each), the row took 675 s (11 min 14 s, 5,835 tests); earlier shared runs took 11 to 15 min. One case is cut
-(X39): `river_nutrients` runs 400 of its 1100 days by default, which already turns its 366-slot
-register over and holds every branch; its default items take about 3 s a mode (with the register
-sums as CPython's own `sum`, X55; 8 s before), and the 1100-day run with the branch assertions
-from the recorded decisions is `-m slow` (about 10 s a mode on an unloaded machine). `pytest -m slow` on the row also
-adds the full `oxford` run, the full per-node replays and the 19 slow gradients. At the end of
-3c's Task 9b the row took 807 s (6,225 tests, CPU load sampled every 30 s at 0 to 16 %, the
-demo parity items 91 to 97 s each), against 810 s before 3c and 1189 s after Task 9a: the growing
-cases' long horizons moved to `-m slow` (Y68: `growing_spring` 365 of 1096 days,
-`growing_autumn` 300 of 400, `growing_decay` 100 of 200, and with W15 `surface_deposition` 180
-of 450 and `growing_no_nitrate` 365 of 540), and the bookkeeping items run those cases on a
-prefix (`Case.bookkeeping`). Their table times above are from that run.
-
-At the end of 3c (Task 17) the wsimod row (`tests/apps/wsimod`, the allocation and `test_wsimod_*`
-verification files, 1,900 tests, without the core subset) took 1,160 s (19 min 20 s) with `-n 4`
-on a machine with no other jobs, CPU load sampled every 30 s at 1 to 12 % (mean 4 %: its own four
-workers). That is over the 10-minute budget (W15) and no horizon was cut further (Y87): the
-irrigation, garden and variable-area cases, the batches, the replays and the 3c gradients, run
-after Task 9b's measurement, came on top of it. The four demo parity items took 93 to 109 s each,
-against 30 to 40 s unloaded in 3b, so this machine ran about 2.5 times slower than the 3b one,
-and the figure carries that factor. Of the 30 slowest items, 18 are 3c items (the growing, irrigation and
-deposition cases and their batches and replays), against W15's goal of none; the slowest is
-`test_quantity_only_volumes_never_depend_on_3c_pollutant_values` at 52 s. A later review may
-propose splitting the demo items off the row.
+**Suite composition.** The default selection of the wsimod row is quickstart in full (1456 days,
+both modes), oxford for its first 365 days (both modes), the sampled replays, the default
+gradients and every case over its default days. `river_nutrients` runs 400 of its 1100 days
+(X39), which already turns its 366-slot register over and holds every branch, and the growing
+cases a prefix (Y68: `growing_spring` 365 of 1096 days, `growing_autumn` 300 of 400,
+`growing_decay` 100 of 200, `surface_deposition` 180 of 450, `growing_no_nitrate` 365 of 540); the
+bookkeeping items run the long cases on a shorter prefix (`Case.bookkeeping`). The quantity-only
+volume comparison runs by default only on the three cases WSIMOD does not run (Y90). `pytest -m
+slow` adds the full horizons, the full `oxford` run, the full per-node replays, the slow gradients
+and the other quantity-only comparisons. At the end of 3c the row (1,852 tests, without the core
+subset) took 887 s with `-n 4` on the development machine, the four demo parity items 90 to 97 s
+each.

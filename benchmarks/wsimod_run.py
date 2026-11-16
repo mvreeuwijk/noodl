@@ -2,10 +2,13 @@
 
 Runs WSIMOD's two demos, `quickstart` and `oxford` (`tests/data/wsimod/`, quantity-only,
 `pollutants=False`), for 60 days at batch sizes 1, 10 and 100, and then `oxford` once more on
-`config.yml` with `pollutants=True`, where every ported process is live (the surface loads included)
-(decay, treatment, the soil temperature; oxford has no `River`). A last row, `growing_spring`
+`config.yml` with `pollutants=True`, where every ported process is live: the surface loads,
+decay, treatment and the soil temperature (oxford has no `River`). A last row, `growing_spring`
 (built from `tests.verification._wsimod_cases.CASES`, with the eight nutrient pollutants), runs
-the growing surface with its nutrient pool for 120 days, which cross its sowing on run day 90.
+the growing surface with its nutrient pool for 120 days, which end before its sowing on run day
+182 (the pool runs every day, the crop not yet). The script imports the test package for that
+case (`tests.verification._wsimod_cases`), so it is a developer script: run it from the
+repository root with the root on the path.
 The batch is the leading dimension of `wsimod.Arc.capacity` (every instance has the
 same value, so every instance takes the same branches: the cost measured is the batch's tensor
 width, not divergence). Two rows per configuration:
@@ -29,7 +32,8 @@ per-instance Python calls (`pow_python`, `exp_python`, `log_python`, `log10_pyth
 Each time is a single shot (no repeats, no warm-up). Prints and asserts nothing about the
 numbers (times are measured, never asserted).
 
-Run: `.venv/Scripts/python benchmarks/wsimod_run.py`
+Run, from the repository root: `PYTHONPATH=src:. .venv/Scripts/python benchmarks/wsimod_run.py`
+(on Windows `src;.`)
 """
 
 from __future__ import annotations
