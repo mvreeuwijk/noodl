@@ -446,12 +446,15 @@ REFUSALS = [
         "filename",
     ),
     (_override(node={"type_": "Catchment", "name": "a", "data_input_dict": {}}), "data_input_dict"),
-    (
-        _override(
-            node={"type_": "Land", "name": "land", "surfaces": {"g": {"data_input_dict": "x.csv"}}}
-        ),
-        "data_input_dict",
-    ),
+    *[
+        (
+            _override(
+                node={"type_": "Land", "name": "land", "surfaces": {"g": {"data_input_dict": v}}}
+            ),
+            "data_input_dict",
+        )
+        for v in (None, 3, "missing.csv")
+    ],
     (
         _override(node={"type_": "Land", "name": "land", "surfaces": {"g": {"capacity": 1}}}),
         "capacity",

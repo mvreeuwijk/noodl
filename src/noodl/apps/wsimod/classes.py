@@ -319,7 +319,8 @@ _OVERRIDES: dict[str, frozenset[str]] = {
     # (tanks.py:55-68) then takes ``datum``.
     "Tank": frozenset({"datum"}),
     "DecayTank": frozenset({"decays"}),  # tanks.py:430-440 (a Surface's merges per surface: D13)
-    "Surface": frozenset({"surface", "pollutant_load", "area", "depth"}),
+    # ``data_input_dict`` replaces the surface's data (:413-421, Y22)
+    "Surface": frozenset({"surface", "pollutant_load", "area", "depth", "data_input_dict"}),
     # land.py:623-643; ``depth`` is popped and ignored (a printed error)
     "ImperviousSurface": frozenset({"et0_to_e", "pore_depth"}),
     "PerviousSurface": frozenset(  # land.py:843-879

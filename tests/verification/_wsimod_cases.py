@@ -1592,6 +1592,131 @@ def _growing_spring() -> dict:
     )
 
 
+_SURFACE_OVERRIDES_DAYS = 100  # Y68: past the overridden harvest (run day 96)
+
+# every GrowingSurface override (land.py:1376-1431), one value each, within the domain and
+# away from the default
+_GROWING_OVERRIDES = {
+    "ET_depletion_factor": 0.6,
+    "rooting_depth": 0.6,
+    "crop_cover_max": 0.85,
+    "ground_cover_max": 0.25,
+    "satact": 0.5,
+    "thetaupp": 0.13,
+    "thetalow": 0.07,
+    "thetapow": 1.1,
+    "uptake1": 12.0,
+    "uptake2": 1.1,
+    "uptake3": 0.025,
+    "uptake_PNratio": 0.15,
+    "erodibility": 0.003,
+    "sreroexp": 1.1,
+    "cohesion": 1.2,
+    "slope": 4.0,
+    "srfilt": 0.6,
+    "macrofilt": 0.02,
+    "limpar": 0.6,
+    "exppar": 2.2,
+    "hsatINs": 1.2,
+    "denpar": 0.02,
+    "adosorption_nr_limit": 2e-5,  # WSIMOD's spelling
+    "adsorption_nr_maxiter": 25,
+    "kfr": 120.0,
+    "nfr": 0.4,
+    "kadsdes": 0.04,
+    "bulk_density": 1200.0,
+    # the calendar: an autumn crop sown on day 285 and harvested on day 5 (run day 96)
+    "sowing_day": 285,
+    "harvest_day": 5,
+    "crop_factor_stages": [0.4, 1.1, 0.25, 0.25, 0.4],
+    "crop_factor_stage_dates": [0, 150, 200, 280, 365],
+}
+
+
+def _surface_overrides() -> dict:
+    """Task 12 (Y21, Y22, L14, L15): the surface overrides. ``wheat`` (growing) has its data
+    replaced by a **path** (absolute, X27) and every ``GrowingSurface`` override including
+    ``rooting_depth`` and the calendar; ``lawns`` has its deposition data replaced by a
+    **mapping** and a ``pollutant_load`` override merged per key (live); ``roofs`` was built
+    with neither data nor load, so its overridden load and deposition data are unread (L14, L15:
+    the inflows were fixed at construction). Four months of data cover the 100 days."""
+    days = _SURFACE_OVERRIDES_DAYS
+    dates = _land_dates(days)
+    inputs = _monthly(_GROWING_INPUTS, "2003-10", 4)
+    replaced = {k: round(v * 1.5, 10) for k, v in inputs.items()}
+    path = _forcing_file("surface_overrides", replaced)
+    lawn_data = _monthly(_DEPOSITION, "2003-10", 4)
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [
+                    _growing(
+                        "wheat",
+                        area=1e4,
+                        rooting_depth=0.5,
+                        ET_depletion_factor=0.5,
+                        sowing_day=90,
+                        harvest_day=250,
+                        infiltration_capacity=0.01,
+                        initial_storage=_soil_water(1400.0),
+                        initial_soil_storage=dict(_SOIL),
+                        data_input_dict=inputs,
+                        **_SPRING_STAGES,
+                    ),
+                    _pervious(
+                        "lawns",
+                        area=3000.0,
+                        depth=0.25,
+                        wilting_point=0.1,
+                        infiltration_capacity=0.006,
+                        initial_storage=_soil_water(300.0),
+                        data_input_dict=lawn_data,
+                        pollutant_load={"phosphate": 1e-6},
+                    ),
+                    _impervious("roofs", area=1500.0, pore_depth=0.001),
+                ],
+                _growing_forcing(dates, 91),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "overrides": {
+            "nodes": {
+                "land": {
+                    "type_": "Land",
+                    "name": "land",
+                    "surfaces": {
+                        "wheat": {"data_input_dict": path, **_GROWING_OVERRIDES},
+                        "lawns": {
+                            "data_input_dict": {
+                                k: round(v * 1.5, 10) for k, v in lawn_data.items()
+                            },
+                            "pollutant_load": {"ammonia": 2e-6, "phosphate": 3e-6},
+                        },
+                        "roofs": {
+                            "pollutant_load": {"phosphate": 5e-6},
+                            "data_input_dict": dict(lawn_data),
+                        },
+                    },
+                }
+            }
+        },
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
 _GROWING_AUTUMN_DAYS = 300  # Y68: past the harvest (run day 291); 400 under slow
 _GROWING_AUTUMN_SLOW_DAYS = 400
 
@@ -3079,6 +3204,12 @@ CASES: dict[str, Case] = {
         replay=("land",),
         slow_days=_GROWING_SLOW_DAYS,
         bookkeeping_days=250,  # Y68: sown on 182, the uptake caps by 217
+    ),
+    "surface_overrides": Case(
+        build=_surface_overrides,
+        days=_SURFACE_OVERRIDES_DAYS,
+        scale=2000.0,
+        replay=("land",),
     ),
     "growing_autumn": Case(
         build=_growing_autumn,

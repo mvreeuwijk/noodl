@@ -1126,8 +1126,10 @@ def _refuse_surface_data(
                 f"{where}: surface data {variable!r} is not read (a surface's data_input_dict "
                 "holds deposition only, land.py:375-380)"
             )
-    if "nhx-dry" not in variables:
-        return  # land.py:375: no deposition function is built; the data are unread
+    if "nhx-dry" not in surface.constructed_variables:
+        # land.py:375: no deposition function is built (an override that adds ``nhx-dry`` does
+        # not rebuild the inflows, L15); the data are unread
+        return
     absent = [v for v in SURFACE_DEPOSITION if v not in variables]
     if absent:
         raise ValueError(

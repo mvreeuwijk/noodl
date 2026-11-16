@@ -322,7 +322,13 @@ def wsimod_model(source: Path | Mapping, *, config_name: str = "config.yml"):
         model.dates = [to_datetime(x) for x in data["dates"]]
     model.add_nodes(nodes)
     model.add_arcs(arcs)
-    model.add_overrides(data.get("overrides", {}))
+    overrides = data.get("overrides") or {}
+    entries = overrides.get("nodes") or {}
+    for entry in entries.values() if isinstance(entries, Mapping) else entries:
+        for override in (entry.get("surfaces") or {}).values():  # land.py:187
+            if isinstance(override.get("data_input_dict"), Mapping):
+                override["data_input_dict"] = keyed(override["data_input_dict"])
+    model.add_overrides(overrides)
     apply_patches(model)
     return model
 
@@ -593,7 +599,9 @@ def call_forcing(node) -> dict[str, float]:
         out: dict[str, object] = {"forcing.monthyear": str(node.monthyear)}
         for surface in node.surfaces:
             read = ()
-            if "nhx-dry" in {variable for variable, _ in surface.data_input_dict}:
+            # the inflows were fixed at construction (land.py:375-382): an override that adds
+            # ``nhx-dry`` builds no deposition function (L15), so nothing is read
+            if any(f.__name__ == "atmospheric_deposition" for f in surface.inflows):
                 read = DEPOSITION_VARIABLES
             if _runs_nutrients() and hasattr(surface, "nutrient_pool"):
                 read = (*read, *INPUT_VARIABLES)

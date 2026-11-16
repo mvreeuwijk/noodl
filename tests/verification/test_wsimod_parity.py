@@ -362,11 +362,12 @@ MODES = {"quantity": False, "pollutants": True}
 # largest store of that pollutant on the land's surfaces and residence tanks that day or the day
 # before. Measured max |x| / (eps S) per case, over its longest horizon (Task 9b): growing_spring
 # 1.277 (1096 days, day 908; 0.432 over its default 365), growing_autumn 0.404 (400),
-# growing_decay 0.479 (200), growing_lean_soil 0.610 (60); hence c = ceil(1.277) = 2. Every
+# growing_decay 0.479 (200), growing_lean_soil 0.610 (60), surface_overrides 0.170 (100, Task 12;
+# one line); hence c = ceil(1.277) = 2. Every
 # other case is unmapped, and its parity item asserts that it prints no such line.
 GROWING_PRINT_C = 2
 STORE_BOUNDED = frozenset(
-    {"growing_spring", "growing_autumn", "growing_decay", "growing_lean_soil"}
+    {"growing_spring", "growing_autumn", "growing_decay", "growing_lean_soil", "surface_overrides"}
 )
 
 
@@ -516,7 +517,7 @@ def test_the_cases_cover_every_listed_feature():
     surface_decay_nitrification land_run_twice river_nutrients river_double_discharge
     surface_deposition growing_no_nitrate growing_default_depletion growing_spring growing_autumn
     growing_decay deposition_non_additive growing_no_din growing_zero_n growing_nitrite_only
-    growing_empty_soil growing_lean_soil""".split()
+    growing_empty_soil growing_lean_soil surface_overrides""".split()
     assert set(listed) <= set(CASES)
     assert {n for n, spec in CASES.items() if not spec.wsimod} == {
         "wtw_zero_input",

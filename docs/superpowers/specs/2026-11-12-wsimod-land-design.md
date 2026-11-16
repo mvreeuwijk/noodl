@@ -1092,7 +1092,8 @@ New refusals, each by name with a test:
     never used. Its deposition variables are listed in `model.unread`;
   - a `pollutant_load` override on a surface built without a `pollutant_load` is **ignored**.
     Run while writing this spec: the surface's inflows stayed `['ihacres']`. noodl lists it in
-    `model.unread`.
+    `model.unread`, one entry per run-pollutant key, `<land>.surfaces.<surface>.pollutant_load.<key>`
+    (Y58; a key that is no run pollutant is listed by the reader, D15).
   - WSIMOD's override on such a surface also mutates the shared default `{}`
     (`land.py:312`, `:397`). Every surface built afterwards in the same process without a load
     then gets that load. Run while writing this spec: the default became `{'phosphate': 1.0}`,

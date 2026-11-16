@@ -35,6 +35,7 @@ from noodl.apps.wsimod.constants import (
     NON_ADDITIVE_POLLUTANTS,
     POLLUTANTS,
     SURFACE_DEPOSITION,
+    SURFACE_INPUTS,
     UNBOUNDED_CAPACITY,
 )
 from noodl.apps.wsimod.decay import DecaySpec, read_decays
@@ -350,12 +351,19 @@ def _apply_overrides(
     ``liquor_multiplier`` and ``process_parameters`` update the node's own copy, everything
     else is replaced. A key outside the class's chain is refused (WSIMOD only prints)."""
     for key in overrides:
-        # a node's ``filename`` is read by _override_node (X27); a surface's forcing is deposition
-        # data (3c), and no override of ``data_input_dict`` is ported
-        if key == "data_input_dict" or (key == "filename" and surface):
+        # a node's ``filename`` is read by _override_node (X27). ``Node.apply_overrides`` consumes
+        # only ``filename`` (nodes.py:92-100), so a node's ``data_input_dict`` would be stored
+        # unread; no surface consumes ``filename`` (land.py:384-423; Y22): both are refused
+        if key == "data_input_dict" and not surface:
             raise ValueError(
-                f"{where}: an override of {key!r} is not supported (surface and "
-                "data_input_dict forcing overrides are sub-project 3c, land.py:413-421)"
+                f"{where}: an override of 'data_input_dict' on a node is not supported "
+                "(Node.apply_overrides consumes only filename, nodes.py:92-100); override "
+                "'filename' instead (X27)"
+            )
+        if key == "filename" and surface:
+            raise ValueError(
+                f"{where}: an override of 'filename' on a surface is not supported "
+                "(no surface consumes it, land.py:384-423); override 'data_input_dict' (Y22)"
             )
         if surface and key in _POOL_PARAMETERS:
             raise ValueError(_pool_parameter(key, where, "an override"))
@@ -365,7 +373,8 @@ def _apply_overrides(
         # The PerviousSurface soil-temperature keys (soil_temp_w_prev, _w_air, _w_deep, _deep) are
         # state attributes in WSIMOD, not constructor keywords (land.py:753-756); they are
         # stored in the surface's parameters here for the Land task to read from there.
-        if key in ("surfaces", "surface", "filename"):  # filename: _override_node
+        # filename: _override_node; data_input_dict: _override_surface_data
+        if key in ("surfaces", "surface", "filename", "data_input_dict"):
             continue
         if key in ("pollutant_load", "liquor_multiplier"):
             if not isinstance(value, Mapping):
@@ -423,6 +432,47 @@ def _override_filename(
         )
 
 
+def _override_surface_data(
+    surface: SurfaceSpec, value: object, where: str, pollutants: Pollutants
+) -> None:
+    """``Surface.apply_overrides`` (``land.py:413-421``, Y22): a path is read with ``read_csv``
+    as written, relative to the working directory (X27); a mapping replaces the data; anything
+    else is ``ValueError`` in WSIMOD, and is refused here. The constructor fixed the inflows
+    (``:375-382``, L15), so the replacement must keep what the constructor's functions read:
+    ``nhx-dry`` (``KeyError`` at the first run otherwise) and, with ``nitrate``, a growing
+    surface's fertiliser and manure data (``:1649-1710``)."""
+    if isinstance(value, str):
+        path = Path(value)
+        if not path.is_file():
+            raise ValueError(f"{where}: data_input_dict file {value!r} does not exist")
+        data = _read_csv(path)
+    elif isinstance(value, Mapping):
+        data = _inline_data(value, where)
+    else:
+        raise ValueError(
+            f"{where}: data_input_dict {value!r} is not a path or a mapping (WSIMOD raises "
+            "ValueError: not a recognised format, land.py:419-421)"
+        )
+    variables = {variable for variable, _ in data}
+    if "nhx-dry" in surface.constructed_variables and "nhx-dry" not in variables:
+        raise ValueError(
+            f"{where}: the data_input_dict override drops 'nhx-dry', which the surface was "
+            "built with: its deposition functions are kept and raise KeyError at the first run "
+            "(land.py:375-382, :540; L15)"
+        )
+    if "rooting_depth" in SURFACE_SCHEMAS[surface.cls].parameters:  # a growing surface
+        for variable in SURFACE_INPUTS:
+            if variable not in variables and (
+                variable in surface.constructed_variables or "nitrate" in pollutants.names
+            ):
+                raise ValueError(
+                    f"{where}: the data_input_dict override drops {variable!r}: a growing "
+                    "surface reads its fertiliser and manure data (land.py:1649-1710, "
+                    "KeyError; L15)"
+                )
+    surface.data = data
+
+
 def _override_node(
     node: NodeSpec, entry: dict, where: str, unread: list[str], pollutants: Pollutants
 ) -> None:
@@ -450,6 +500,10 @@ def _override_node(
             f"{where}, surface {surface_name!r}",
             surface=True,
         )
+        if "data_input_dict" in override:
+            _override_surface_data(
+                match, override["data_input_dict"], f"{where}, surface {surface_name!r}", pollutants
+            )
         match.name = override.get("surface", match.name)  # land.py:396
 
 
@@ -719,6 +773,18 @@ def read_wsimod_config(
                 for key in load
                 if key not in pollutants.names
             )
+    # land.py:375-382, :397 (L14, Y21, Y58): a load added by override to a surface built without
+    # one is ignored (the inflows were fixed at construction), so its run-pollutant keys are
+    # unread (the keys that are not run pollutants are listed above)
+    for node in nodes:
+        for surface in node.surfaces:
+            if not surface.constructed_load:
+                load = surface.parameters.get("pollutant_load") or {}
+                unread.extend(
+                    f"{node.name}.surfaces.{surface.name}.pollutant_load.{key}"
+                    for key in load
+                    if key in pollutants.names
+                )
     # land.py:1265, :1570 (L22, Y39, D15): a growing surface overwrites its ``et0_coefficient`` at
     # construction and every day, so the configured or overridden value is never read
     for node in nodes:
@@ -733,7 +799,8 @@ def read_wsimod_config(
     for node in nodes:
         for surface in node.surfaces:
             at = f"{node.name}.surfaces.{surface.name}.data_input_dict"
-            present = [v for v in SURFACE_DEPOSITION if v in surface.constructed_variables]
+            variables = {variable for variable, _ in surface.data}  # merged with the override
+            present = [v for v in SURFACE_DEPOSITION if v in variables]
             if "nhx-dry" not in surface.constructed_variables:
                 unread.extend(f"{at}.{v}" for v in present)
                 continue

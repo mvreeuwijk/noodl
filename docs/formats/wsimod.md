@@ -193,8 +193,25 @@ compute derived quantities.
   (WSIMOD opens `""` and raises `FileNotFoundError`), and any other non-string value is refused
   by name (WSIMOD raises `RuntimeError`). On a class that reads no forcing (a `Waste`, say) the file is
   still read and the override is listed in `WsimodNetwork.unread`. A `Groundwater`'s override is
-  its only forcing (X11). A surface's `filename` and any `data_input_dict` override are still
-  refused (sub-project 3c; `land.py:413-421`).
+  its only forcing (X11). A node's `data_input_dict` override is refused for good
+  (`Node.apply_overrides` consumes only `filename`, `nodes.py:92-100`, and would store it unread);
+  so is a surface's `filename` override (no surface consumes it). Override a node's forcing by
+  `filename`, a surface's by `data_input_dict`.
+- A surface's `data_input_dict` override **replaces** its data (`land.py:413-421`), as a mapping in
+  the inline `{(variable, date): value}` form or as a path. A path is read as written, relative
+  to the process's **working directory** (X27: use absolute paths). `None`, a number or any other
+  type is refused by name (`ValueError` in WSIMOD), as is a missing file. The constructor fixed
+  the surface's inflows (`land.py:375-382`) and an override does not rebuild them (L15, Y21):
+  an override that adds deposition data to a surface built without `nhx-dry` is read and never
+  used, and each variable is listed in `WsimodNetwork.unread`; an override that drops `nhx-dry`
+  from a surface built with it (WSIMOD raises `KeyError` at the first run) is refused, and so is
+  one that drops a fertiliser or manure variable of a growing surface.
+- A `pollutant_load` override on a surface built **without** a load is ignored, as in WSIMOD, whose
+  inflows were fixed at construction (L14): each of its run-pollutant keys is listed in
+  `WsimodNetwork.unread` as `<land>.surfaces.<surface>.pollutant_load.<key>` (a key that is no
+  run pollutant is listed as for a configured load). WSIMOD's override also mutates a shared
+  default `{}`, so every later surface built without a load gets it; noodl's loads are per
+  surface. On a surface built with a load the override merges per key and is live.
 - A surface's `data_input_dict` (or constructor `filename`) holds its monthly deposition data:
   the six variables `nhx-dry`, `noy-dry`, `srp-dry`, `nhx-wet`, `noy-wet` and `srp-wet`, in kg/m2/d.
   The data are read when `nhx-dry` is among the constructor's variables (`land.py:375-382`), and

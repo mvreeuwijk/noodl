@@ -9,6 +9,7 @@ The values asserted are WSIMOD's, worked out from ``land.py`` by hand; the repla
 
 from __future__ import annotations
 
+import copy
 import math
 
 import pytest
@@ -1552,3 +1553,172 @@ def test_surface_forcing_drivers():
     driver = model.wsimod_day.drivers["wsimod.nhx-dry"]
     assert driver.labels == [("land", "surfaces.a"), ("land", "surfaces.b")]
     assert driver.unit == "kg/m2/d"
+
+
+# --- the surface data_input_dict override (Task 12; L14, L15, Y21, Y22) ---------------------------
+def _write_data(path, data) -> str:
+    import csv
+
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["variable", "time", "value"])
+        for (variable, date), value in data.items():
+            writer.writerow([variable, date, repr(float(value))])
+    return str(path)
+
+
+def _surface_override(mapping, **override) -> dict:
+    mapping["overrides"] = {
+        "nodes": {"land": {"type_": "Land", "name": "land", "surfaces": {"r": override}}}
+    }
+    return mapping
+
+
+@pytest.mark.parametrize("form", ["path", "mapping"])
+def test_a_surface_data_override_replaces_its_data(form, tmp_path, monkeypatch):
+    """``Surface.apply_overrides`` (``land.py:413-421``): the data are replaced, not merged. A
+    relative path opens from the working directory (X27)."""
+    pytest.importorskip("wsimod")
+    from datetime import datetime
+
+    from tests.verification._wsimod_reference import wsimod_model
+
+    built = _text(_monthly_data(start=(2004, 1), months=3))
+    new = {k: v * 3.0 for k, v in _text(_monthly_data(start=(2004, 1), months=2)).items()}
+    if form == "path":
+        _write_data(tmp_path / "deposition.csv", new)
+        monkeypatch.chdir(tmp_path)
+        value = "deposition.csv"
+    else:
+        value = dict(new)
+    mapping = _surface_override(_dep_mapping(built), data_input_dict=value)
+    ours = read_wsimod_config(mapping).nodes[0].surfaces[0].data
+    theirs = wsimod_model(mapping).nodes["land"].get_surface("r").data_input_dict
+    assert ours == {(v, datetime.strptime(d, "%Y-%m-%d")): x for (v, d), x in new.items()}
+    assert {(v, d._date): x for (v, d), x in theirs.items()} == ours
+
+
+def _results_equal(a, b) -> None:
+    for name in ("arc_flow", "arc_quality", "tank_storage", "tank_quality", "surface_quality"):
+        assert torch.equal(getattr(a, name), getattr(b, name)), name
+    for name, values in a.surface.items():
+        assert torch.equal(values.nan_to_num(), b.surface[name].nan_to_num()), name
+
+
+def _run(mapping):
+    from noodl.apps.wsimod import build_model, wsimod_run
+
+    model, state, drivers = build_model(read_wsimod_config(mapping))
+    return model, wsimod_run(model, state, drivers)
+
+
+def test_deposition_data_added_by_override_are_unread():
+    """L15, Y21: the constructor fixed the inflows without deposition, so the override's
+    variables are read into the data and never used: listed (D15); the run is the run
+    without the override."""
+    pytest.importorskip("wsimod")
+    bare = _dep_mapping({})
+    added = _text(_monthly_data(start=(2004, 1), months=3))
+    over = _surface_override(_dep_mapping({}), data_input_dict=added)
+    model, results = _run(over)
+    assert model.unread == [f"land.surfaces.r.data_input_dict.{v}" for v in _VARIABLES]
+    base_model, base = _run(bare)
+    assert base_model.unread == []
+    _results_equal(results, base)
+    from tests.verification._wsimod_reference import wsimod_model
+
+    surface = wsimod_model(over).nodes["land"].get_surface("r")
+    assert all("deposition" not in f.__name__ for f in surface.inflows)
+
+
+def test_a_load_override_without_a_load_is_unread():
+    """L14, Y21, Y58: the load of a surface built without one is ignored; its run-pollutant
+    keys are listed, per key (a key that is no run pollutant is listed by the reader)."""
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    load = {"phosphate": 1e-6, "nitrite": 2.0}
+    over = _surface_override(_dep_mapping({}), pollutant_load=dict(load))
+    network = read_wsimod_config(over)
+    assert network.unread == [
+        "land.surfaces.r.pollutant_load.nitrite",
+        "land.surfaces.r.pollutant_load.phosphate",
+    ]
+    _, results = _run(over)
+    _, base = _run(_dep_mapping({}))
+    _results_equal(results, base)
+    theirs = wsimod_model(over).nodes["land"].get_surface("r")
+    assert all("simple_deposition" != f.__name__ for f in theirs.inflows)
+
+
+def test_a_load_override_on_a_surface_with_a_load_merges_per_key_and_is_live():
+    mapping = _dep_mapping({})
+    mapping["nodes"][0]["surfaces"][0]["pollutant_load"] = {"phosphate": 1e-6}
+    over = _surface_override(copy.deepcopy(mapping), pollutant_load={"ammonia": 2e-6})
+    network = read_wsimod_config(over)
+    assert network.unread == []
+    assert network.nodes[0].surfaces[0].parameters["pollutant_load"] == {
+        "phosphate": 1e-6,
+        "ammonia": 2e-6,
+    }
+    _, ours = _run(over)
+    _, base = _run(mapping)
+    assert not torch.equal(ours.surface_quality, base.surface_quality)
+
+
+def test_an_override_that_adds_growing_parameters_is_listed_in_a_quantity_only_run():
+    """Y72: the quantity-only list follows the merged configuration."""
+    mapping = _mapping(
+        [{"type_": "GrowingSurface", "surface": "r", "initial_storage": 0.25}], lists=_LISTS
+    )
+    assert [i for i in _validate(mapping) if "soil_temp" not in i] == []
+    over = _surface_override(copy.deepcopy(mapping), kfr=0.01, ET_depletion_factor=0.5)
+    assert [i for i in _validate(over) if "soil_temp" not in i] == ["surfaces.r.kfr"]
+
+
+_EIGHT = [
+    "ammonia",
+    "nitrite",
+    "nitrate",
+    "phosphate",
+    "org-nitrogen",
+    "org-phosphorus",
+    "solids",
+    "temperature",
+]
+
+
+def _growing_data_mapping(**override) -> dict:
+    from noodl.apps.wsimod.constants import SURFACE_INPUTS
+
+    data = _text(_monthly_data(start=(2004, 1), months=3, variables=(*_VARIABLES, *SURFACE_INPUTS)))
+    mapping = _dep_mapping(data, cls="GrowingSurface")
+    mapping.update(pollutants=_EIGHT, additive_pollutants=_EIGHT[:-1])
+    mapping["non_additive_pollutants"] = ["temperature"]
+    return _surface_override(mapping, **override) if override else mapping
+
+
+def _without(*names) -> dict:
+    return {k: v for k, v in _growing_data_mapping()["nodes"][0]["surfaces"][0][
+        "data_input_dict"
+    ].items() if k[0] not in names}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("override", "named"),
+    [
+        (_without("nhx-dry"), "nhx-dry"),  # L15
+        (_without("nhx-fertiliser"), "nhx-fertiliser"),
+        ({}, "nhx-dry"),
+    ],
+)
+def test_surface_override_refusals(override, named):
+    with pytest.raises(ValueError, match=named):
+        read_wsimod_config(_growing_data_mapping(data_input_dict=override))
+
+
+def test_a_data_override_that_keeps_the_built_data_is_accepted():
+    network = read_wsimod_config(_growing_data_mapping(data_input_dict=_without()))
+    assert network.unread == [
+        "land.surfaces.r.et0_coefficient",
+    ]
