@@ -5,10 +5,22 @@ from __future__ import annotations
 
 import pytest
 
-from tests.verification._wsimod_reference import _restore_constructor_defaults
+from tests.verification._wsimod_reference import (
+    _restore_constants,
+    _restore_constructor_defaults,
+    _snapshot_constants,
+)
 
 
 @pytest.fixture(autouse=True)
 def _wsimod_constructor_defaults():
     yield
     _restore_constructor_defaults()
+
+
+@pytest.fixture(autouse=True)
+def _wsimod_constants():
+    """See ``tests/verification/conftest.py`` (Y84): the pollutant lists are restored in place."""
+    snapshot = _snapshot_constants()
+    yield
+    _restore_constants(snapshot)

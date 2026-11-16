@@ -3570,6 +3570,7 @@ CASES: dict[str, Case] = {
         days=_VARIABLE_AREA_DAYS,
         scale=2000.0,
         replay=("land",),
+        bookkeeping_days=60,  # Y83: past the sowing (run day 6), with idle and half-area rain
     ),
     "irrigation_without_nutrients": Case(
         build=_irrigation_without_nutrients,

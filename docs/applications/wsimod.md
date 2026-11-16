@@ -36,9 +36,9 @@ The node classes `Node`, `Waste`, `Catchment`, `Storage`, `Groundwater`, `QueueG
 `PullArc`, `PushArc`, `SewerArc` and `WeirArc`. The soil temperature of a `PerviousSurface` is
 live (below), and so are the treatment works' pollutant treatment and the first-order decay of
 the storage family's tanks, a `QueueGroundwater`'s queue and a land's surfaces, and so is a
-`River`'s biochemistry (below), and the user decay arcs `DecayArc` and `DecayArcAlt`. What
-still changes a pollutant and is not ported (the land's nutrient pools,
-sub-project 3c) is refused unless it is neutral. A surface's `pollutant_load` and its monthly
+`River`'s biochemistry (below), and the user decay arcs `DecayArc` and `DecayArcAlt`. A
+land's growing surfaces (`GrowingSurface`, `IrrigationSurface`, `GardenSurface` and
+`VariableAreaSurface`) and their nutrient pools are ported too (sub-project 3c). A surface's `pollutant_load` and its monthly
 deposition data are live (below).
 
 | Class | Process ported (sub-project 3b) |
@@ -265,7 +265,7 @@ override. Its constructor keywords are `rooting_depth`, `ET_depletion_factor`,
 reachable through overrides only, 31 names with `rooting_depth` (`:1376-1431`). With `nitrate`
 among the pollutants the surface also keeps a nutrient pool, fed by deposition, fertiliser and
 manure and drained by its outflows and its soil processes (below): the transformation, crop
-uptake, erosion and denitrification. Adsorption is the next task of sub-project 3c.
+uptake, erosion, adsorption and denitrification.
 
 `calc_crop_cover` (`land.py:1514-1572`) runs first on the surface each day. It sows on
 `sowing_day` and harvests on `harvest_day` (the raw day of the year), interpolates the crop
@@ -922,9 +922,7 @@ series — are listed by name in
 `model.ignored_by_quantity_only`. What WSIMOD accepts and never reads is `model.unread`
 (`WsimodNetwork.unread`): a `Groundwater`'s or `QueueGroundwater`'s configured `data_input_dict`
 or `filename`, and a `filename` override on a class that reads no forcing (WSIMOD reads the file
-and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) the same configuration is
-refused if a process that is not ported yet would change the pollutants (the
-garden and variable-area surfaces, 3c): until then, such configurations need `pollutants=False`. A surface's
+and ignores it; a `River` reads it when `nitrate` is among the pollutants). With `pollutants=True` (the default) every ported process runs. A surface's
 `pollutant_load` is live (`Surface.simple_deposition`); a key that is not a run pollutant is listed in
 `model.unread`, as `<land>.surfaces.<surface>.pollutant_load.<key>`.
 
@@ -1000,7 +998,7 @@ WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a
 | `Land.push_set_sewer` lacks `self.surface`, and `Land` has no `"Sewer"` check | evident intent: ponded sewer water is forced into the first impervious surface | `test_sewer_ponding_into_land_is_forced_into_the_first_impervious_surface`; `test_case_runs_where_wsimod_crashes_land_sewer_ponding` |
 | `EnfieldFoulSewer.make_discharge` (`storm_exchange` undefined) | refused by name | `test_refusals_name_the_key[mapping7-EnfieldFoulSewer]` |
 | `NonResidentialDemand.get_demand` recurses without end | evident intent: its constant demand, as a house | `test_non_residential_demand_is_its_constant_demand_as_house` |
-| `GrowingSurface.residue` is unwired | sub-project 3c; refused with the other unported classes | `test_refusals_name_the_key` |
+| `GrowingSurface.residue` is unwired | not ported: surface data named `*-residue` is refused by name (Y36, L21) | `test_refusals_name_the_key` |
 | `GrowingSurface`: `if t.is_leap_year:` tests a method, so the day of year shifts after 28 February in every year (L1) | reproduced, documented | `test_every_year_shifts_the_day_after_february`; `test_growing_spring_spans_the_leap_shift` |
 | `GrowingSurface`: an autumn-sown crop (`sowing_day > harvest_day`) has no cover (L2) | reproduced | `test_an_autumn_calendar_has_no_cover_all_year`; case `growing_autumn` |
 | `GrowingSurface`: the stress coefficient divides by `(1 - ET_depletion_factor) * TAW`, which is 0 for the default factor at the wilting point (L3) | `Ks = 0`, event `"crop_water_stress_zero_denominator"` | `test_the_stress_zero_denominator_gives_zero`; `test_case_runs_where_wsimod_crashes[growing_default_depletion-*]` (WSIMOD raises on day 11) |
@@ -1146,10 +1144,9 @@ unloaded medians differ by 5 %).
 
 ## Limitations
 
-- **Sub-project 3c.** The processes that change a pollutant (the land's nutrient pools, `GrowingSurface`, the garden and
-  garden surfaces) are refused unless neutral; a surface's `pollutant_load` and monthly deposition data are live. The soil temperature, the treatment works'
-  pollutant treatment and the decay of the storage family's tanks (a `QueueGroundwater`'s
-  `DecayQueueTank` included) and of a land's surfaces and a River's biochemistry are ported. Until 3c, a configuration with nutrient pools needs `pollutants=False`.
+- **Sub-project 3c.** The land's nutrient pools and every surface class (`GrowingSurface`,
+  `IrrigationSurface`, `GardenSurface`, `VariableAreaSurface`) are ported. Not ported: surface
+  data named `*-residue` (`allocate_residue`, refused by name, Y36, L21) and `EnfieldFoulSewer`.
 - **Input and output.** A configuration is read, not written. `extensions` and
   `unified_data_file` are refused.
 - **Speed (W8).** The day is a transcription of many small operations, with no compilation:

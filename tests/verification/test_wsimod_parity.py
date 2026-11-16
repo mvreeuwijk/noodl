@@ -606,6 +606,7 @@ def test_the_cases_cover_every_listed_feature():
     assert {n: spec.bookkeeping_days for n, spec in CASES.items() if spec.bookkeeping_days} == {
         "growing_spring": 250,
         "growing_autumn": 60,
+        "variable_area": 60,
         "growing_decay": 60,
         "surface_deposition": 90,
         "growing_no_nitrate": 250,

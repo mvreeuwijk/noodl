@@ -4045,3 +4045,35 @@ def test_quantity_only_reads_current_surface_area():
     key = "wsimod.VariableAreaSurface.current_surface_area"
     assert initial_drivers(model)[key].tolist() == [0.0, 5000.0]
     assert model.wsimod_day._drivers[key].unit == "m2"
+
+
+def test_a_batched_get_climate_equals_its_scalar_rows():
+    """Y83: a batch of instances with their own area, ``current_surface_area`` (0, equal, larger
+    and random) and crop coefficient, in one call, equals each row's scalar run bitwise."""
+    rng = random.Random(1583)
+    n = 24
+    areas = [rng.uniform(10.0, 5e4) for _ in range(n)]
+    currents = [(0.0, a, 1.5 * a, rng.uniform(0.0, a))[k % 4] for k, a in enumerate(areas)]
+    rain = [rng.uniform(0.0, 0.03) for _ in range(n)]
+    et0 = [rng.uniform(0.0, 0.007) for _ in range(n)]
+    crop = [rng.uniform(0.2, 1.3) for _ in range(n)]
+
+    def run(shape, area, current, p, e, c):
+        land = _variable_land(area=1.0, rooting_depth=0.5)
+        surface = land.surfaces[0]
+        at(land, 0)
+        land.ctx = Ctx(P, FA, torch.Size(shape), day=0, node_names=["land"])
+        surface.area = torch.as_tensor(area, dtype=F64)
+        surface.bind({"current_surface_area": torch.as_tensor(current, dtype=F64)})
+        land.params = {
+            "precipitation": torch.as_tensor(p, dtype=F64),
+            "et0": torch.as_tensor(e, dtype=F64),
+        }
+        surface.et0_coefficient = torch.as_tensor(c, dtype=F64)
+        return surface.get_climate()
+
+    batch = run((n,), areas, currents, rain, et0, crop)
+    for i in range(n):
+        one = run((), areas[i], currents[i], rain[i], et0[i], crop[i])
+        assert torch.equal(batch[0][i], one[0]) and torch.equal(batch[1][i], one[1]), i
+    assert (batch[0][::4] == 0).all() and (batch[0][1::4] > 0).all()
