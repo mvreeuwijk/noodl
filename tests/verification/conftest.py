@@ -24,7 +24,8 @@ def _wsimod_constructor_defaults(request):
 @pytest.fixture(autouse=True)
 def _wsimod_constants(request):
     """A test that sets ``wsimod.core.constants``' pollutant lists (as a unit test of a WSIMOD
-    object does) leaves them as they were: the lists are refilled in place (Y84)."""
+    object does) leaves them as they were: the lists are refilled in place (Y84), and
+    ``FLOAT_ACCURACY`` is put back (M7)."""
     if "wsimod" not in request.module.__name__:
         yield
         return

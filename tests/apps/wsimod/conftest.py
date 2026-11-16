@@ -20,7 +20,8 @@ def _wsimod_constructor_defaults():
 
 @pytest.fixture(autouse=True)
 def _wsimod_constants():
-    """See ``tests/verification/conftest.py`` (Y84): the pollutant lists are restored in place."""
+    """See ``tests/verification/conftest.py`` (Y84): the pollutant lists are restored in place,
+    and ``FLOAT_ACCURACY`` (M7)."""
     snapshot = _snapshot_constants()
     yield
     _restore_constants(snapshot)

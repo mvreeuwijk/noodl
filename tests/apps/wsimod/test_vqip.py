@@ -218,6 +218,19 @@ def test_pow_python_is_pythons_power_bitwise():
     assert torch.equal(pow_python(base, exponent), expected)
 
 
+def test_pow_python_has_the_slope_of_a_negative_base_with_an_integral_power():
+    """M1: ``d/dx x^y = y x^y / x`` on a negative base (an integral ``y``, as Y65 admits),
+    gradcheck-exact; the slope in ``y`` is 0 there (no real one), and both are 0 at 0."""
+    x = torch.tensor([-2.0, -0.3, 0.0, 0.7], dtype=torch.float64, requires_grad=True)
+    y = torch.tensor([3.0, 2.0, 2.0, 2.0], dtype=torch.float64, requires_grad=True)
+    pow_python(x, y).sum().backward()
+    assert x.grad.tolist() == [3.0 * (-2.0) ** 3 / -2.0, 2.0 * (-0.3) ** 2 / -0.3, 0.0, 2.0 * 0.7]
+    assert y.grad.tolist()[:3] == [0.0, 0.0, 0.0]
+    base = torch.tensor([-2.0, -0.3, -1.5], dtype=torch.float64, requires_grad=True)
+    power = torch.tensor([3.0, 2.0, 4.0], dtype=torch.float64)
+    assert torch.autograd.gradcheck(lambda b: pow_python(b, power), (base,), eps=1e-7, atol=1e-8)
+
+
 @pytest.mark.parametrize(
     ("helper", "reference", "low", "high"),
     [

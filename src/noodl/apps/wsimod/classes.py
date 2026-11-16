@@ -52,6 +52,10 @@ class ClassSchema:
     # (``land.py:371``), ``ImperviousSurface``'s ``depth`` (``:612``), the ``parent`` Land sets
     # (``land.py:103``).
     derived: frozenset[str] = field(default_factory=frozenset)
+    # a surface class whose constructor chain reaches ``GrowingSurface`` (``land.py:1082``), or
+    # ``GardenSurface`` (``:2391``): the configuration's tests of a kind, never of a class name
+    growing: bool = False
+    garden: bool = False
 
 
 # --- constructor chains ----------------------------------------------------------------------
@@ -461,6 +465,8 @@ def _schema(name: str) -> ClassSchema:
         override_keys=override_keys,
         renamed_type=_RENAMED.get(name, name),
         derived=_DERIVED.get(name, frozenset()),
+        growing="GrowingSurface" in _chain(name),
+        garden="GardenSurface" in _chain(name),
     )
 
 

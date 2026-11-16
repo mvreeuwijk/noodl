@@ -277,24 +277,27 @@ _CONSTANT_LISTS = ("POLLUTANTS", "ADDITIVE_POLLUTANTS", "NON_ADDITIVE_POLLUTANTS
 
 
 def _snapshot_constants() -> list:
-    """The pollutant lists of ``wsimod.core.constants`` as ``(name, list object, contents)``;
-    empty without WSIMOD. A test may rebind a name or mutate its list."""
+    """The pollutant lists of ``wsimod.core.constants`` as ``(name, list object, contents)``,
+    then ``("FLOAT_ACCURACY", value, None)`` (M7); empty without WSIMOD. A test may rebind a name,
+    mutate its list or set ``FLOAT_ACCURACY`` (``Model.load``, ``model.py:241``)."""
     try:
         from wsimod.core import constants
     except ImportError:
         return []
-    return [(n, getattr(constants, n), list(getattr(constants, n))) for n in _CONSTANT_LISTS]
+    lists = [(n, getattr(constants, n), list(getattr(constants, n))) for n in _CONSTANT_LISTS]
+    return [*lists, ("FLOAT_ACCURACY", constants.FLOAT_ACCURACY, None)]
 
 
 def _restore_constants(snapshot: list) -> None:
     """Put the snapshot back: the original list objects (other modules hold references to them)
-    rebound to the names and refilled in place."""
+    rebound to the names and refilled in place, and ``FLOAT_ACCURACY`` rebound to its value."""
     if not snapshot:
         return
     from wsimod.core import constants
 
     for name, original, contents in snapshot:
-        original[:] = contents
+        if contents is not None:
+            original[:] = contents
         setattr(constants, name, original)
 
 

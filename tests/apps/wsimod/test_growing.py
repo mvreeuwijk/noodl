@@ -1309,6 +1309,26 @@ def test_nitrate_needs_the_eight_pollutants(name):
             _validate(mapping, pollutants=pollutants)
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("crop_factor_stages", None, "crop_factor_stages None is not a list of numbers"),
+        ("crop_factor_stages", "abc", "crop_factor_stages 'abc' is not a list of numbers"),
+        ("crop_factor_stage_dates", [0, "x"], r"crop_factor_stage_dates \[0, 'x'\] holds 'x'"),
+        ("rooting_depth", "deep", "rooting_depth 'deep' is not a number"),
+        ("ET_depletion_factor", None, "ET_depletion_factor None is not a number"),
+    ],
+)
+def test_malformed_growing_values_are_refused_by_name(name, value, message):
+    """M3: a stage value that is no list of numbers, or a numeric parameter that is no number,
+    is refused naming the surface and the value, in either mode, where it raised a bare
+    ``TypeError`` (or, for a string, was read as a list of characters)."""
+    mapping = _mapping([_complete(**{name: value})])
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match=f"surface 'g'.*{message}"):
+            _validate(mapping, pollutants=pollutants)
+
+
 _DOMAINS = [
     ("rooting_depth", 0.0),
     ("bulk_density", 0.0),
@@ -1926,6 +1946,43 @@ def test_a_negative_theta_with_an_integral_power_runs_as_wsimod():
         ours.calc_soil_moisture_dependence_factor(active=TRUE)
         their = theirs.nutrient_pool.soil_moisture_dependence_factor
         assert float(ours.nutrient_pool.soil_moisture_dependence_factor) == their
+
+
+def test_a_negative_theta_with_an_integral_power_has_its_gradient():
+    """M1 (Y65): with ``thetaupp = -0.1``, ``thetalow = -0.07`` and ``thetapow = 2`` the
+    factor's gradient in ``thetaupp``, ``thetalow`` and the storage is the central difference's
+    (``pow_python``'s ``y x^y / x`` on a negative base), and not 0 on every draw."""
+    rng = random.Random(98)
+    parameters = {**_soil_parameters(rng), "thetaupp": -0.1, "thetalow": -0.07, "thetapow": 2.0}
+    land = _nutrient_land(**parameters)
+    ours = land.surfaces[0]
+    fc_m = parameters["field_capacity"] * parameters["rooting_depth"]
+    wp_m = parameters["wilting_point"] * parameters["rooting_depth"]
+    tank = {"volume": 1.0, "nitrate": 0.1, "ammonia": 0.1, "phosphate": 0.01}
+
+    def factor(thetaupp, thetalow, volume):
+        ours.bind({"thetaupp": thetaupp, "thetalow": thetalow})
+        ours.storage = NUT.to_vqip(tank) * torch.cat([volume.reshape(1), torch.ones(NUT.K)])
+        _nut_ctx(land)
+        ours.calc_soil_moisture_dependence_factor(active=TRUE)
+        return ours.nutrient_pool.soil_moisture_dependence_factor
+
+    moved = 0
+    for _ in range(12):
+        smc = rng.uniform(wp_m, fc_m)
+        values = (-0.1, -0.07, smc * parameters["area"])
+        leaves = [torch.tensor(v, dtype=F64, requires_grad=True) for v in values]
+        grads = torch.autograd.grad(factor(*leaves), leaves, allow_unused=True)
+        for k, grad in enumerate(grads):
+            h = 1e-6 * abs(values[k])
+            up = [torch.tensor(v, dtype=F64) for v in values]
+            down = [torch.tensor(v, dtype=F64) for v in values]
+            up[k], down[k] = up[k] + h, down[k] - h
+            difference = float((factor(*up) - factor(*down)).detach()) / (2 * h)
+            got = 0.0 if grad is None else float(grad)
+            assert got == pytest.approx(difference, rel=1e-6, abs=1e-9), (k, smc)
+            moved += got != 0.0
+    assert moved > 0
 
 
 def _uptake_scale(parameters, days, autumn) -> float:
@@ -3185,7 +3242,9 @@ def test_the_gradients_through_the_guarded_rows_are_finite(name):
     in_, out_ = ours.adsorption(active=active)
     total = in_.sum() + out_.sum() + ours.storage.sum() + ours.nutrient_pool.storage.sum()
     grads = torch.autograd.grad(total, [*leaves.values(), pools], allow_unused=True)
-    for label, grad in zip([*leaves, "pools"], grads, strict=True):
+    named = dict(zip([*leaves, "pools"], grads, strict=True))
+    assert named["kfr"] is not None and named["pools"] is not None  # the graph reaches them
+    for label, grad in named.items():
         assert grad is None or bool(torch.isfinite(grad).all()), label
 
 

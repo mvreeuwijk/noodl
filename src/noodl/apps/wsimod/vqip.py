@@ -169,9 +169,13 @@ class _PowPython(torch.autograd.Function):
     differ from ``float.__pow__`` in the last bit, so the forward pass calls Python's, once per
     instance (the :func:`~noodl.apps.wsimod.storage.pow_half` pattern). An ``int`` exponent in
     WSIMOD (the default ``10``) is converted to a double by ``float.__pow__``, so the float
-    exponent here is the same call. The gradients are ``y x^(y-1)`` and ``x^y ln x`` where
-    ``x > 0``, and 0 where ``x == 0`` (a saturated soil; the slope there is documented, not
-    propagated).
+    exponent here is the same call. The gradient in ``x`` is ``y x^y / x`` wherever ``x != 0``:
+    exact for a positive base, and for a negative base, which reaches the forward only with an
+    integral ``y`` (the soil-moisture factor's negative ``thetaupp`` or ``thetalow``, Y65; a
+    fractional ``y`` gives Python a complex number, and the forward raises). The gradient in
+    ``y`` is ``x^y ln x`` where ``x > 0`` and 0 elsewhere (no real slope in ``y`` for a negative
+    base). At ``x == 0`` (a saturated soil) both are 0: the slope there is documented, not
+    propagated.
     """
 
     @staticmethod
@@ -186,16 +190,17 @@ class _PowPython(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, grad: Tensor) -> tuple[Tensor, Tensor]:
         x, y, out = ctx.saved_tensors
-        positive = x > 0
-        safe = torch.where(positive, x, torch.ones_like(x))
+        nonzero, positive = x != 0, x > 0
+        one = torch.ones_like(x)
         zero = torch.zeros_like(grad)
-        gx = torch.where(positive, grad * y * out / safe, zero)
-        gy = torch.where(positive, grad * out * torch.log(safe), zero)
+        gx = torch.where(nonzero, grad * y * out / torch.where(nonzero, x, one), zero)
+        gy = torch.where(positive, grad * out * torch.log(torch.where(positive, x, one)), zero)
         return gx.sum_to_size(x.shape), gy.sum_to_size(y.shape)
 
 
 def pow_python(x: Tensor, y: Tensor) -> Tensor:
-    """``x ** y`` bitwise as Python computes it for floats; gradient 0 where ``x == 0``."""
+    """``x ** y`` bitwise as Python computes it for floats; gradient 0 where ``x == 0``, and in
+    ``y`` also where ``x < 0`` (:class:`_PowPython`)."""
     return _PowPython.apply(
         torch.as_tensor(x, dtype=torch.float64), torch.as_tensor(y, dtype=torch.float64)
     )

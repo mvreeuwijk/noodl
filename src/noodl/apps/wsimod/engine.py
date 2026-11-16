@@ -369,13 +369,12 @@ class Engine:
             self.arcs[spec.name] = ARC_CLASSES[spec.cls](
                 spec, self.nodes[spec.in_port], self.nodes[spec.out_port], pollutants
             )
-        # D7: a growing surface builds its crop calendar for the network's dates, and refuses
-        # (by name, with the first date) any date whose interpolation would raise
+        # D7: every surface learns the network's dates (a refusal on a run day names it); a
+        # growing surface builds its crop calendar and refuses (by name, with the first date)
+        # any date whose interpolation would raise
         for spec in network.nodes:
             for surface in getattr(self.nodes[spec.name], "surfaces", ()):
-                set_dates = getattr(surface, "set_dates", None)
-                if set_dates is not None:
-                    set_dates(network.dates, network.date_labels)
+                surface.set_dates(network.dates, network.date_labels)
 
     def begin_day(self, ctx: Ctx) -> None:
         """Give every node and arc the day's context."""

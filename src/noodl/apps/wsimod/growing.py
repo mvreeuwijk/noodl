@@ -289,8 +289,15 @@ def _check_structure(values: Mapping, where: str) -> None:
     """The refusals from the parameters alone: the stage lists of one length, whole sowing and
     harvest days, a non-negative integer ``adsorption_nr_maxiter`` (a loop length, ``:2205``) and
     ``wilting_point < field_capacity`` (``TAW > 0``: ``TAW = 0`` divides by zero on day 0, and
-    ``TAW < 0`` only prints in WSIMOD, ``:1360-1366``; L4, Y44)."""
+    ``TAW < 0`` only prints in WSIMOD, ``:1360-1366``; L4, Y44). Both stage values must be
+    lists of numbers (M3: WSIMOD takes their ``len`` and indexes them, ``:1547``)."""
     stages, dates = values["crop_factor_stages"], values["crop_factor_stage_dates"]
+    for name, value in (("crop_factor_stages", stages), ("crop_factor_stage_dates", dates)):
+        if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+            raise ValueError(f"{where}: {name} {value!r} is not a list of numbers")
+        for entry in value:
+            if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+                raise ValueError(f"{where}: {name} {list(value)!r} holds {entry!r}, not a number")
     if len(stages) != len(dates):
         raise ValueError(
             f"{where}: crop_factor_stages has {len(stages)} entries but crop_factor_stage_dates "
@@ -646,6 +653,9 @@ class GrowingSurface(PerviousSurface):
                 for name in GROWING_DEFAULTS
                 if name in surface.parameters and name not in QUANTITY_ONLY_READ
             ]
+            # only the pool reads it (land.py:1308-1324, with nitrate), M2
+            if surface.parameters.get("initial_soil_storage"):
+                ignored.append(f"surfaces.{surface.name}.initial_soil_storage")
         values = {**cls.parameter_defaults, **STRUCTURE_DEFAULTS, **surface.parameters}
         names = network.pollutants.names
         if "nitrate" in names:
@@ -693,6 +703,7 @@ class GrowingSurface(PerviousSurface):
         (``[365, 365]``). A duplicate inside the list is no refusal in itself
         (``[0, 100, 100, 365]`` runs: ``bisect_left`` returns the first duplicate). The calendar
         of the covers is checked the same way."""
+        super().set_dates(dates, labels)
         where = f"{self.site}"
         calendar: list[CalendarDay] = []
         for date, label in zip(dates, labels, strict=True):
@@ -1078,8 +1089,9 @@ class GrowingSurface(PerviousSurface):
         rooting_depth, power = self._param("rooting_depth"), self._param("thetapow")
         satact = self._param("satact")
         one = torch.ones_like(smc)
-        # the bases are positive where they are used; elsewhere 1 (Python's ** of a negative
-        # base would be complex)
+        # the bases are 1 where they are not used; where used they are positive, or negative
+        # with an integral thetapow (a negative thetaupp or thetalow, Y65: real, and its
+        # gradient in the base exact, pow_python); a fractional power is refused there
         fc_diff = fc_m - smc
         fc_comp = pow_python(
             torch.where(between, fc_diff / (self._param("thetaupp") * rooting_depth), one), power
@@ -1289,7 +1301,9 @@ class GrowingSurface(PerviousSurface):
         # :1974-1987
         total_flows = ie_v + ss_v + perc_v
         eroding = total_flows / area * M_TO_MM
-        # the volumes are non-negative, so the base is; an inactive one is replaced
+        # an inactive base is replaced. A negative eroding flow (a negative climate share of a
+        # VariableAreaSurface, refused by name) gives Python's 1.3 power a complex value, where
+        # WSIMOD's min raises TypeError (:1984); Surface.run names it (I1)
         quarter = torch.where(active, eroding / 4, torch.zeros_like(eroding))
         transport = dmin(
             ctx, f"{site}/transport", 1.0, pow_python(quarter, 1.3), active=active, call=call
@@ -1437,7 +1451,10 @@ class GrowingSurface(PerviousSurface):
         (Y16). Every ``log``, ``exp`` and power is Python's, per instance, on an argument
         replaced by a safe one (1, or 0 for ``exp``) where its branch is not taken, so a masked,
         empty, shortcut or stopped instance never overflows, divides by zero or raises a
-        negative number to a fractional power. ``adosorption_nr_limit`` (WSIMOD's spelling)
+        negative number to a fractional power. An active instance can still leave the domain
+        as WSIMOD does: a small ``nfr`` underflows the first guess ``x0`` to 0, and ``0 **
+        (nfr - 1)`` raises ``ZeroDivisionError`` (``:2210``); :meth:`Surface.run` names the
+        surface and the day. ``adosorption_nr_limit`` (WSIMOD's spelling)
         enters only comparisons, so it has no gradient."""
         ctx, pool = self.ctx, self.nutrient_pool
         active = torch.as_tensor(active, dtype=torch.bool)
@@ -1474,7 +1491,9 @@ class GrowingSurface(PerviousSurface):
             running = running & ctx.decide(
                 f"{site}/newton:{j}/residual", fxn.abs(), ">", limit, active=running, call=call
             )
-            # xn > 0 on every instance: x0 = exp(...), the update or 1e-10, and 1 elsewhere
+            # xn >= 0: x0 = exp(...), the update or 1e-10, and 1 elsewhere; x0 underflows to 0
+            # for a small nfr, where 0 ** (nfr - 1) raises as WSIMOD's :2210 does (Surface.run
+            # names it, I1)
             value = xn * smc_mm + coeff * pow_python(xn, nfr) - pool_
             slope = smc_mm + nfr * coeff * pow_python(xn, nfr - 1)
             dx = value / slope
@@ -1715,12 +1734,43 @@ class VariableAreaSurface(GrowingSurface):
         "current_surface_area": 0,
     }
 
+    @classmethod
+    def validate_spec(
+        cls, surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
+    ) -> list[str]:
+        """:meth:`GrowingSurface.validate_spec`, and with ``nitrate`` a pollutant a negative
+        ``current_surface_area`` is refused (:func:`_check_area_share`)."""
+        ignored = super().validate_spec(surface, network, where, pollutants=pollutants)
+        if "nitrate" in network.pollutants.names:
+            _check_area_share({**cls.parameter_defaults, **surface.parameters}, where)
+        return ignored
+
+    def bind(self, parameters: Mapping[str, Tensor]) -> None:
+        """:meth:`GrowingSurface.bind`, refusing a negative ``current_surface_area`` on any
+        instance when the pool runs (:func:`_check_area_share`)."""
+        if self.nutrient_pool is not None:
+            _check_area_share({**self.defaults, **parameters}, self.site)
+        super().bind(parameters)
+
     def get_climate(self) -> tuple[Tensor, Tensor]:
         """``land.py:2455-2459``: ``P`` and ``E = et0 * et0_coefficient`` (the crop's, ``:2456``),
         each times ``current_surface_area / area`` (WSIMOD's ``*=``: the quotient first)."""
         precipitation, evaporation = super().get_climate()
         share = self._param("current_surface_area") / self.area
         return precipitation * share, evaporation * share
+
+
+def _check_area_share(values: Mapping, where: str) -> None:
+    """With ``nitrate``, per instance: ``current_surface_area < 0``. The surface's rain and
+    evaporation are then negative, so is its eroding flow, and erosion's ``(flow / 4) ** 1.3``
+    is a complex number that WSIMOD's ``min`` compares with 1: ``TypeError`` at ``land.py:1984``
+    (I1). Without ``nitrate`` erosion does not run and WSIMOD runs the value, so noodl does."""
+    value = _f64(values["current_surface_area"])
+    if bool((value < 0).any()):
+        raise ValueError(
+            f"{where}: current_surface_area {value.tolist()} is < 0: with 'nitrate' the negative "
+            "eroding flow is raised to 1.3, and WSIMOD's erosion raises TypeError (land.py:1984)"
+        )
 
 
 SURFACE_CLASSES["VariableAreaSurface"] = VariableAreaSurface

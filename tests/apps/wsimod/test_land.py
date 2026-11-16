@@ -1769,3 +1769,21 @@ def test_a_load_override_leaves_no_trace_in_wsimods_defaults():
     _restore_constructor_defaults()  # what the fixture does after each test
     assert Surface.__init__.__defaults__ == _CONSTRUCTOR_DEFAULTS[Surface.__init__][0]
     assert Surface.__init__.__defaults__[-1] is not None
+
+
+def test_the_constants_snapshot_restores_the_lists_and_the_float_accuracy():
+    """M7: the autouse fixture's snapshot puts back a mutated pollutant list (the same list
+    object) and a changed ``FLOAT_ACCURACY`` (``create_oxford.py:180`` sets ``1e-8``)."""
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+
+    from tests.verification._wsimod_reference import _restore_constants, _snapshot_constants
+
+    snapshot = _snapshot_constants()
+    pollutants, accuracy = constants.POLLUTANTS, constants.FLOAT_ACCURACY
+    before = list(pollutants)
+    constants.POLLUTANTS.clear()
+    constants.FLOAT_ACCURACY = 1e-8
+    _restore_constants(snapshot)
+    assert constants.POLLUTANTS is pollutants and constants.POLLUTANTS == before
+    assert constants.FLOAT_ACCURACY == accuracy

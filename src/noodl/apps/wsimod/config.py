@@ -461,7 +461,7 @@ def _override_surface_data(
             "built with: its deposition functions are kept and raise KeyError at the first run "
             "(land.py:375-382, :540; L15)"
         )
-    if "rooting_depth" in SURFACE_SCHEMAS[surface.cls].parameters:  # a growing surface
+    if SURFACE_SCHEMAS[surface.cls].growing:
         for variable in SURFACE_INPUTS:
             if variable not in variables and "nitrate" in pollutants.names:
                 raise ValueError(
@@ -790,12 +790,12 @@ def read_wsimod_config(
         unread.extend(
             f"{node.name}.surfaces.{surface.name}.et0_coefficient"
             for surface in node.surfaces
-            if "rooting_depth" in SURFACE_SCHEMAS[surface.cls].parameters
+            if SURFACE_SCHEMAS[surface.cls].growing
         )
     # land.py:120-128 (L18, Y28, D15): the last GardenSurface of a Land takes its garden
     # handlers, so the earlier ones are never asked
     for node in nodes:
-        gardens = [s.name for s in node.surfaces if s.cls == "GardenSurface"]
+        gardens = [s.name for s in node.surfaces if SURFACE_SCHEMAS[s.cls].garden]
         unread.extend(f"{node.name}.surfaces.{name}.garden_handlers" for name in gardens[:-1])
     # land.py:375-382, :540-581 (D15, Y21): the surface data a surface never reads. Without
     # ``nhx-dry`` in the constructor's data no deposition function is built, so every variable is
