@@ -2682,13 +2682,25 @@ def _adsorption_case(name: str, rng):
         elif name == "no_change":
             # both concentrations far below 1e-6 mg/kg: nothing moves
             pools[ADS][1] = pools[DI][1] = 1e-15 * parameter["area"] * (1 + k)
+        elif name == "zero_pass" and k % 2:
+            _at_equilibrium(parameter, draw)
     parameters[0], draws[0] = _hostile(rng)
     draws[1]["pools"][ADS][1] = draws[1]["pools"][DI][1] = 0.0
     draws[2]["pools"][ADS][1] = 0.0
     return parameters, draws, maxiter
 
 
-_ADSORPTION_CASES = ("empty", "shortcut", "newton", "maxiter", "clamp", "no_change")
+_ADSORPTION_CASES = ("empty", "shortcut", "newton", "maxiter", "clamp", "no_change", "zero_pass")
+
+
+def _at_equilibrium(parameter: dict, draw: dict) -> None:
+    """Set the dissolved inorganic P to ``x0 * smc_mm`` per km², ``x0`` the first guess: then
+    ``f(x0) = x0 * smc_mm + coeff * x0 ** nfr - pool_`` is 0 up to rounding (``coeff * x0 **
+    nfr`` is the adsorbed P per km²), within the limit, and no Newton pass runs."""
+    area, ads = parameter["area"], draw["pools"][ADS][1]
+    conc = ads * 1e6 / (parameter["bulk_density"] * parameter["rooting_depth"] * area)
+    x0 = math.exp((math.log(conc) - math.log(parameter["kfr"])) / parameter["nfr"])
+    draw["pools"][DI][1] = x0 * (draw["tank"]["volume"] / area * 1e3) * (area * 1e-6)
 
 
 @pytest.mark.parametrize("name", _ADSORPTION_CASES)
@@ -2740,10 +2752,15 @@ def test_adsorption_equals_wsimods(name, capsys):
     elif name == "newton":
         assert {"residual", "step"} <= kinds and directions == {True, False}
     elif name == "maxiter":
-        # a residual exit needs two passes at least (the lag), so with two it is never seen
-        assert "maxiter" in kinds and "residual" not in kinds
+        # a residual exit after a pass needs two at least (the lag), so with two it is never
+        # seen; only the zero-pass exit could be
+        assert "maxiter" in kinds
+        assert all(e[1] == 0 for e in exits[3:] if e is not None and e[0] == "residual")
     elif name == "clamp":
         assert clamped
+    elif name == "zero_pass":
+        # a soil at equilibrium: f(x0) is within the limit and no pass runs (xn_1 = x0)
+        assert sum(e == ("residual", 0, False) for e in exits[3:]) >= 15
     else:
         change = sites[f"{S8}/change"]
         assert not bool(change.outcome[change.active].any())
@@ -2763,14 +2780,21 @@ class _Row:
 def _wsimod_residuals(theirs) -> list[float]:
     """Run WSIMOD's ``adsorption`` and return its first ``fxn`` (``land.py:2201``, read at
     ``:2202``), then the ``fxn`` each pass of its ``while`` loop computed (``:2208``, read at
-    ``dx = fxn / fprimxn``, ``:2212``). The tracer in place (coverage's) is restored."""
+    ``dx = fxn / fprimxn``, ``:2212``)."""
+    return [r for (r,) in _wsimod_trace(theirs, (2202, 2212), ("fxn",))]
+
+
+def _wsimod_trace(theirs, lines, names) -> list[tuple]:
+    """Run WSIMOD's ``adsorption`` (its result in ``theirs.last_adsorption``) and return, each
+    time one of ``lines`` of ``land.py`` is about to run, the locals ``names``. The tracer in
+    place (coverage's) is restored."""
     import sys
 
-    residuals: list[float] = []
+    seen: list[tuple] = []
 
     def local(frame, event, arg):
-        if event == "line" and frame.f_lineno in (2202, 2212):
-            residuals.append(frame.f_locals["fxn"])
+        if event == "line" and frame.f_lineno in lines:
+            seen.append(tuple(frame.f_locals[name] for name in names))
         return local
 
     def tracer(frame, event, arg):
@@ -2785,7 +2809,7 @@ def _wsimod_residuals(theirs) -> list[float]:
         theirs.last_adsorption = theirs.adsorption()
     finally:
         sys.settrace(previous)
-    return residuals
+    return seen
 
 
 def test_the_newton_test_lags_one_iteration():
@@ -2794,16 +2818,20 @@ def test_the_newton_test_lags_one_iteration():
     after ``k = m - 1`` passes, which pass ``m - 1`` computed, is already below ``limit``, yet
     WSIMOD and noodl both run ``k + 1`` passes (counted from WSIMOD's executed line 2208 and from
     noodl's decisions); and the first two tests read the same ``f(x0)``, so a residual exit
-    comes after two passes at least. noodl's residual margins are WSIMOD's residuals."""
+    after a pass comes after two at least. Five instances are at equilibrium, where ``f(x0)`` is
+    within the limit and neither runs a pass. noodl's residual margins are WSIMOD's
+    residuals."""
     pytest.importorskip("wsimod")
     rng = random.Random(127)
     parameters = [_adsorption_parameters(rng) for _ in range(60)]
     draws = [_adsorption_draw(rng, p) for p in parameters]
+    for parameter, draw in zip(parameters[:5], draws[:5], strict=True):
+        _at_equilibrium(parameter, draw)
     _, ours, ctx = _our_adsorption(parameters, draws)
     ours.adsorption(active=torch.ones(len(draws), dtype=torch.bool))
     exits = _newton_exits(ctx, len(draws), 20)
     sites = {d.site: d for d in ctx.decisions}
-    lagged = 0
+    lagged = none = 0
     for i, (parameter, draw) in enumerate(zip(parameters, draws, strict=True)):
         how, passes, _ = exits[i]
         first, *residuals = _wsimod_residuals(_wsimod_adsorption(parameter, draw))
@@ -2813,11 +2841,14 @@ def test_the_newton_test_lags_one_iteration():
         for j in range(1, passes):  # the test before pass j reads pass j - 1's residual
             margin = float(sites[f"{S8}/newton:{j}/residual"].margin[i])
             assert margin == abs(residuals[j - 1]) - limit, (i, j)
-        if how == "residual":
+        if how == "residual" and passes == 0:
+            assert abs(first) <= limit, i
+            none += 1
+        elif how == "residual":
             k = passes - 1
             assert k >= 1 and abs(residuals[k]) <= limit < abs(residuals[k - 1]), i
             lagged += 1
-    assert lagged >= 5
+    assert lagged >= 5 and none >= 4
 
 
 def _adsorption_short(direction: str):
@@ -3037,6 +3068,22 @@ def test_the_batched_adsorption_is_pythons_per_instance():
         # a property of the torch build, not of noodl: the parity below still runs, but cannot
         # then tell log_python from torch.log
         warnings.warn("this torch build's batched log matches math.log on the probes", stacklevel=1)
+    # the same premise for exp and **, on the batch's own first guesses: x0 = exp(e) and x0 ** nfr
+    exponents, x0s, powers = [], [], []
+    for p, d in zip(parameters, draws, strict=True):
+        conc = d["pools"][ADS][1] * 1e6 / (p["bulk_density"] * p["rooting_depth"] * p["area"])
+        exponents.append((math.log(conc) - math.log(p["kfr"])) / p["nfr"])
+        x0s.append(math.exp(exponents[-1]))
+        powers.append(x0s[-1] ** p["nfr"])
+    nfrs = torch.tensor([p["nfr"] for p in parameters], dtype=F64)
+    exps = torch.exp(torch.tensor(exponents, dtype=F64)) != torch.tensor(x0s, dtype=F64)
+    pows = torch.pow(torch.tensor(x0s, dtype=F64), nfrs) != torch.tensor(powers, dtype=F64)
+    for what, differs in (("exp", exps), ("pow", pows)):
+        if not bool(differs.any()):
+            warnings.warn(
+                f"this torch build's batched {what} matches Python's on every first guess",
+                stacklevel=1,
+            )
     _, ours, ctx = _our_adsorption(parameters, draws, maxiter=maxiter)
     in_, out_ = ours.adsorption(active=torch.ones(n, dtype=torch.bool))
     margins = torch.stack([d.margin for d in ctx.decisions if d.site.endswith("/residual")], dim=-1)
@@ -3061,3 +3108,114 @@ def test_the_batched_adsorption_is_pythons_per_instance():
     assert torch.equal(out_, torch.tensor(expected["out"], dtype=F64))
     assert torch.equal(ours.storage, torch.tensor(expected["tank"], dtype=F64))
     assert torch.equal(ours.nutrient_pool.storage, torch.stack(expected["pools"]))
+
+
+def test_the_step_test_at_its_boundary_equals_wsimods():
+    """``abs(dx) < (0.000001 * xn)`` (``land.py:2213``) at its boundary: the dissolved P is
+    bisected until the first pass's ``abs(dx)`` lies in ``[1e-6 * (xn - dx), 1e-6 * xn)``
+    (``dx > 0``), read from WSIMOD's frame. WSIMOD breaks there, and so does noodl (the
+    ``step`` decision at pass 0), bitwise, before any update: ``xn_1 = x0`` and nothing moves. A
+    step test against the updated iterate would take the step, and with this large adsorbed pool
+    the step would move the equilibrium by more than 1e-6 mg/kg."""
+    pytest.importorskip("wsimod")
+    rng = random.Random(151)
+    parameter = {**_adsorption_parameters(rng), "adosorption_nr_limit": 1e-12}
+    draw = _adsorption_draw(rng, parameter)
+    area = parameter["area"]
+    draw["pools"][ADS][1] = 0.05 * area
+    _at_equilibrium(parameter, draw)
+    equilibrium = draw["pools"][DI][1]
+
+    def first_step(di: float) -> tuple[float, float]:
+        draw["pools"][DI][1] = di
+        theirs = _wsimod_adsorption(parameter, draw)
+        (dx, xn), *_ = _wsimod_trace(theirs, (2213,), ("dx", "xn"))
+        return dx, xn
+
+    # below the equilibrium dx > 0; far below it the step is large, near it small
+    low, high = equilibrium * (1 - 1e-2), equilibrium
+    for _ in range(200):
+        middle = (low + high) / 2
+        dx, xn = first_step(middle)
+        if abs(dx) < 1e-6 * xn:
+            if not abs(dx) < 1e-6 * (xn - dx):
+                break
+            high = middle
+        else:
+            low = middle
+    else:
+        raise AssertionError("no boundary instance found")
+    assert dx > 0 and abs(dx) < 1e-6 * xn and not abs(dx) < 1e-6 * (xn - dx)
+    _, ours, ctx = _our_adsorption([parameter], [draw])
+    in_, out_ = ours.adsorption(active=torch.ones(1, dtype=torch.bool))
+    sites = {d.site: d for d in ctx.decisions}
+    assert bool(sites[f"{S8}/newton:0/step"].outcome[0])
+    assert not bool(sites[f"{S8}/change"].outcome[0])
+    conc = float(sites[f"{S8}/shortcut"].margin[0])
+    assert conc * parameter["nfr"] * 1e-6 * (1 - 1e-3) > 1e-6  # the step would move P
+    theirs = _wsimod_adsorption(parameter, draw)
+    _assert_same(theirs, _Row(ours, 0), theirs.adsorption(), (in_[0], out_[0]), "boundary")
+
+
+@pytest.mark.parametrize("name", _ADSORPTION_CASES)
+def test_the_gradients_through_the_guarded_rows_are_finite(name):
+    """The ``where`` guards keep the backward finite on every row of a case batch: the masked
+    instance whose first guess would overflow, the empty pool, the shortcut, the clamp, the step
+    and residual exits; with respect to ``kfr``, ``nfr``, ``kadsdes``, ``bulk_density`` and the
+    pools, through the pools, the tank and both VQIPs."""
+    rng = random.Random(_ADSORPTION_CASES.index(name) + 113)
+    parameters, draws, maxiter = _adsorption_case(name, rng)
+    n = len(draws)
+    land, ours, _ = _our_adsorption(parameters, draws, maxiter=maxiter)
+    leaves = {
+        k: torch.tensor([p[k] for p in parameters], dtype=F64, requires_grad=True)
+        for k in ("kfr", "nfr", "kadsdes", "bulk_density")
+    }
+    ours.bind(
+        {
+            **{k: torch.tensor([p[k] for p in parameters], dtype=F64) for k in parameters[0]},
+            **leaves,
+        }
+    )
+    pools = torch.tensor([d["pools"] for d in draws], dtype=F64, requires_grad=True)
+    ours.nutrient_pool.storage = pools * 1.0
+    land.ctx = Ctx(NUT, FA, torch.Size((n,)), day=0, node_names=["land"])
+    active = torch.ones(n, dtype=torch.bool)
+    active[0] = False
+    in_, out_ = ours.adsorption(active=active)
+    total = in_.sum() + out_.sum() + ours.storage.sum() + ours.nutrient_pool.storage.sum()
+    grads = torch.autograd.grad(total, [*leaves.values(), pools], allow_unused=True)
+    for label, grad in zip([*leaves, "pools"], grads, strict=True):
+        assert grad is None or bool(torch.isfinite(grad).all()), label
+
+
+def test_a_kadsdes_whose_exp_overflows_is_refused():
+    """``1 - exp(-kadsdes)`` (``land.py:2230-2232``): below ``-709.782712893384``
+    (``math.log(sys.float_info.max)``) WSIMOD's ``math.exp`` raises ``OverflowError`` on a day
+    adsorption moves P; noodl refuses it by name at build and, per instance, at bind. Just
+    inside the bound WSIMOD runs, and noodl equals it bitwise."""
+    import sys
+
+    pytest.importorskip("wsimod")
+    assert math.log(sys.float_info.max) == 709.782712893384
+    rng = random.Random(157)
+    parameter = _adsorption_parameters(rng)
+    draw = _adsorption_draw(rng, parameter)
+    outside, inside = math.nextafter(-709.782712893384, -math.inf), -709.782712893384
+    with pytest.raises(OverflowError):
+        _wsimod_adsorption({**parameter, "kadsdes": outside}, draw).adsorption()
+    mapping = _mapping([_complete()], overrides={"g": {"kadsdes": outside}}, lists=_NITRATE)
+    for pollutants in (True, False):
+        with pytest.raises(ValueError, match="kadsdes.*overflows"):
+            _validate(mapping, pollutants=pollutants)
+    surface = _nutrient_land(initial_storage=_START).surfaces[0]
+    with pytest.raises(ValueError, match="kadsdes.*overflows"):
+        surface.bind({"kadsdes": torch.tensor([0.03, outside], dtype=F64)})
+    surface.bind({"kadsdes": torch.tensor([0.03, inside], dtype=F64)})
+    parameter["kadsdes"] = inside
+    _, ours, ctx = _our_adsorption([parameter], [draw])
+    in_, out_ = ours.adsorption(active=torch.ones(1, dtype=torch.bool))
+    sites = {d.site: d for d in ctx.decisions}
+    assert bool(sites[f"{S8}/change"].outcome[0])
+    theirs = _wsimod_adsorption(parameter, draw)
+    _assert_same(theirs, _Row(ours, 0), theirs.adsorption(), (in_[0], out_[0]), "inside")

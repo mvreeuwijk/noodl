@@ -337,6 +337,26 @@ def _check_negative_base(values: Mapping, where: str) -> None:
             )
 
 
+# the largest x with a finite math.exp(x): math.log(sys.float_info.max); exp(-kadsdes) overflows
+# beyond it
+_EXP_LIMIT = 709.782712893384
+
+
+def _check_kadsdes(values: Mapping, where: str) -> None:
+    """With ``nitrate``, per instance: ``kadsdes < -709.782712893384`` (``-kadsdes`` above
+    ``math.log(sys.float_info.max)``), where WSIMOD's ``math.exp(-self.kadsdes)`` raises
+    ``OverflowError`` on the first day the adsorbed concentration moves (``land.py:2230-2232``).
+    A negative ``kadsdes`` within that bound is accepted, as WSIMOD runs it (non-physical: the
+    concentration moves away from the equilibrium)."""
+    value = _f64(values["kadsdes"])
+    bad = -value > _EXP_LIMIT
+    if bool(bad.any()):
+        raise ValueError(
+            f"{where}: kadsdes {value.tolist()} is below -{_EXP_LIMIT}: math.exp(-kadsdes) "
+            "overflows, and WSIMOD's adsorption raises OverflowError (land.py:2230-2232)"
+        )
+
+
 def _soil_storage(value: object, where: str) -> Mapping | None:
     """``initial_soil_storage`` (``land.py:1308-1324``, read only with ``nitrate``): falsy (no
     solid pools) or a mapping with :data:`_SOIL_STORAGE_KEYS`, each a number. A float, which
@@ -546,6 +566,7 @@ class GrowingSurface(PerviousSurface):
             values = {**self.defaults, **parameters}
             _check_domain({name: values[name] for name, _, _ in _DOMAIN}, self.site)
             _check_negative_base(values, self.site)
+            _check_kadsdes(values, self.site)
         stages = parameters.pop("crop_factor_stages", None)
         stages = self._stages_default if stages is None else _f64(stages)
         length = len(self.crop_factor_stage_dates)
@@ -605,6 +626,7 @@ class GrowingSurface(PerviousSurface):
                     )
             _check_domain(values, where)
             _check_negative_base(values, where)
+            _check_kadsdes(values, where)
             _soil_storage(values.get("initial_soil_storage"), where)
         _check_structure(values, where)
         if "nitrate" not in names:
@@ -1363,8 +1385,10 @@ class GrowingSurface(PerviousSurface):
           ``1e-10`` where that is not positive (``newton:<j>/positive``, ``:2217``; true is
           ``xn - dx > 0``). A stopped instance keeps its ``xn``, ``xn_1`` and ``fxn``. **The
           residual test lags one pass** (transcribed): it reads the ``fxn`` of the previous
-          pass, the residual of the iterate before its last update, so the loop always takes one
-          step more than the residual needs, and the first two tests read the same ``f(x0)``.
+          pass, the residual of the iterate before its last update, so a loop the residual ends
+          takes one step more than the residual needs: the first two tests read the same
+          ``f(x0)``, so it runs two passes at least, unless ``f(x0)`` is already within the
+          limit, when none runs and the equilibrium is the first guess's.
           WSIMOD's last test, after the ``maxiter``-th pass, decides nothing and is not
           recorded. The equilibrium is ``kfr * xn_1 ** nfr``;
         - where ``abs(equi - conc_sol) > 1e-6`` (``change``, ``:2225``) the request ``P =

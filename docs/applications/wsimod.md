@@ -442,9 +442,10 @@ WSIMOD's order (`land.py:1283-1291`):
   keeps its iterate). A pass stops the loop when its step is below `1e-6` of the iterate, and an
   iterate that is not positive becomes `1e-10`. **The convergence test lags one pass**
   (transcribed): `abs(fxn) > adosorption_nr_limit` reads the residual computed in the previous
-  pass, that of the iterate before its last update, so the loop always takes one step more than
-  the residual needs; the first two tests read the same first residual, so a loop the residual
-  ends runs two passes at least. The adsorbed
+  pass, that of the iterate before its last update, so a loop the residual ends takes one step
+  more than the residual needs; the first two tests read the same first residual, so such a loop
+  runs two passes at least, unless the first guess's residual is already within the limit, when
+  none runs (a soil at equilibrium). The adsorbed
   concentration moves `1 - exp(-kadsdes)` of the way to the equilibrium `kfr * x ** nfr` when
   they differ by more than `1e-6` mg/kg: adsorption takes P from the dissolved inorganic pool
   and the tank's phosphate (`out_`), desorption puts it back into both (`in_`). **With no
@@ -457,7 +458,10 @@ WSIMOD's order (`land.py:1283-1291`):
   extracted > FLOAT_ACCURACY` as `"freundlich_flow_adjusted"`. For gradients, the iteration
   count is structural and the gradient is that of the unrolled passes, not the implicit one at
   the equilibrium; where a pass stops the loop, or the clamp acts, the result jumps. The
-  limit `adosorption_nr_limit` enters only comparisons and has no gradient.
+  limit `adosorption_nr_limit` enters only comparisons and has no gradient. A negative
+  `kadsdes` is accepted, as WSIMOD runs it, though it is non-physical (the concentration moves
+  away from the equilibrium); below `-709.782712893384` WSIMOD's `math.exp(-kadsdes)` overflows,
+  and noodl refuses it by name.
 
 **Uptake and denitrification take all their nitrogen as `nitrate`** (`:1917`, `:2145`), though
 the pool's dissolved inorganic N stands for nitrate, ammonia and nitrite together (L9). When the

@@ -740,8 +740,10 @@ return (in_, out_)
 Here `request = {N: 0, P: …}` (`:2226`), so each extract and receive also moves `N = 0`.
 
 - **The convergence test lags one iteration.** The `while` condition reads the residual computed
-  at the top of the previous pass, which is that of the iterate before the last update. WSIMOD
-  therefore always takes at least one more step than the residual needs. Transcribed.
+  at the top of the previous pass, which is that of the iterate before the last update. A loop
+  the residual ends therefore takes one more step than the residual needs, and runs two passes
+  at least, unless `f(x0)` is already within the limit, when no pass runs and `xn_1 = x0` (a
+  soil near equilibrium; corrected while fixing Task 8b, W2). Transcribed.
 - **The shortcut is common.** The adsorbed pool starts empty unless `initial_soil_storage` or
   dry phosphorus deposition fills it. The shortcut therefore prints on day 0 of an ordinary
   growing surface (run while writing this spec: it printed on day 0 of a 3-day run, and the
@@ -1046,6 +1048,9 @@ New refusals, each by name with a test:
     - `cohesion = 0`, `thetaupp = 0` and `thetalow = 0` (divisions);
     - `hsatINs ≤ 0` (`din_conc + hsatINs` can be 0);
     - `limpar < 0`, with which a dry soil reaches `DI.N / 0`;
+    - per instance, `kadsdes < -709.782712893384` (`math.log(sys.float_info.max)`), where
+      `math.exp(-kadsdes)` raises `OverflowError` on the first day adsorption moves P
+      (`:2230-2232`); a negative `kadsdes` within it runs, as in WSIMOD;
     - `field_capacity ≤ 0` (`smc / field_capacity_m`);
     - per instance, `thetaupp < 0` or `thetalow < 0` where `thetapow` is not integral: the
       soil-moisture factor's base is then negative, Python's `**` is complex and WSIMOD's `min`
