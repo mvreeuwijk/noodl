@@ -31,7 +31,7 @@ class Case:
     ``river_double_discharge``)."""
 
     build: Callable[[], dict]  # the mapping
-    days: int  # the default run: 30-120, 400 for river_nutrients (X39)
+    days: int  # the default run: 30-120, 400 for river_nutrients (X39), 100-365 growing (D21)
     scale: float  # the largest volume in the forcing
     replay: tuple[str, ...] = ()  # nodes the replay test captures
     replay_arcs: tuple[str, ...] = ()  # user Decay* arcs the arc replay captures (D16)
@@ -40,6 +40,29 @@ class Case:
     # D24: the full horizon of a case whose default run is a prefix of its dates; a test marked
     # ``slow`` runs it. ``None``: the default run is the whole case.
     slow_days: int | None = None
+    # D13: WSIMOD raises on this case, as it is: the exception's class name and the
+    # ``"land.py:<line>"`` of its innermost frame in ``nodes/land.py``. A crash case has
+    # ``wsimod=False`` (the generic parity and replay skip it); its own test compares the days
+    # before the crash (``_wsimod_parity.wsimod_until_crash``)
+    crash: tuple[str, str] | None = None
+    crash_day: int | None = None  # D13: the day WSIMOD raises on, which its test pins
+    # Y68: the prefix the bookkeeping items run (``test_run.py``'s balance, parts, windows and
+    # end-of-day tests, and quantity-only), where a long case's branches add nothing; ``None``:
+    # ``days``
+    bookkeeping_days: int | None = None
+
+    @property
+    def bookkeeping(self) -> int:
+        """The days the bookkeeping items run: ``bookkeeping_days``, else ``days``."""
+        return self.days if self.bookkeeping_days is None else self.bookkeeping_days
+
+    def __post_init__(self) -> None:
+        if self.crash is not None and self.wsimod:
+            raise ValueError("a crash case (D13) has wsimod=False")
+        if (self.crash is None) != (self.crash_day is None):
+            raise ValueError("a crash case (D13) names its crash and its crash day together")
+        if self.bookkeeping_days is not None and not 0 < self.bookkeeping_days < self.days:
+            raise ValueError("bookkeeping_days is a proper prefix of days (Y68)")
 
 
 # A short pollutant list: one additive, one more additive, one non-additive.
@@ -1072,18 +1095,39 @@ def _wtw_treatment() -> dict:
 _LAND_DAYS = 40
 
 
+def _land_dates(n: int) -> list[str]:
+    """``n`` daily dates from 2003-10-01: a run crosses a year end, 29 February 2004 and (with
+    monthly data) every month boundary."""
+    start = datetime(2003, 10, 1)
+    return [(start + timedelta(days=k)).strftime("%Y-%m-%d") for k in range(n)]
+
+
+def _monthly(variables: list[str] | tuple[str, ...], start: str, months: int) -> dict:
+    """Monthly surface data (``land.py:462-471``): per variable, ``months`` rows dated the first
+    of each month from ``start`` (``"YYYY-MM"``), in ``kg/m2/d``, seeded per variable."""
+    year, month = (int(x) for x in start.split("-"))
+    data = {}
+    for variable in variables:
+        rng = random.Random(f"monthly-{variable}")
+        for k in range(months):
+            when = f"{year + (month - 1 + k) // 12}-{(month - 1 + k) % 12 + 1:02d}-01"
+            data[(variable, when)] = round(rng.uniform(2e-7, 4e-6), 10)
+    return data
+
+
 def _land_forcing(
     days: int,
     seed: int,
     *,
     rain: tuple[float, ...] = (0.0, 0.0, 2e-4, 1e-3, 4e-3, 8e-3, 1.5e-2),
     et0: tuple[float, float] = (5e-4, 4e-3),
+    dates: list[str] | None = None,
 ) -> dict:
     """A ``Land``'s daily ``precipitation`` (drawn from ``rain``, jittered), ``et0`` and
     ``temperature`` (``land.py:451-460``; all three are read every day, spec Forcing checks)."""
     rng = random.Random(seed)
     data = {}
-    for date in _dates(days):
+    for date in _dates(days) if dates is None else dates:
         depth = rng.choice(rain)
         data[("precipitation", date)] = round(depth * rng.uniform(0.8, 1.2), 7)
         data[("et0", date)] = round(rng.uniform(*et0), 7)
@@ -1273,6 +1317,1049 @@ def _temperature_blending() -> dict:
         "overrides": _neutral_soil("suburb", "lawns"),
         "orchestration": [{"Land": "run"}, {"Sewer": "make_discharge"}],
     }
+
+
+_SURFACE_DEPOSITION_DAYS = 450
+_DEPOSITION = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
+
+
+def _surface_deposition() -> dict:
+    """Monthly ``nhx``, ``noy`` and ``srp`` dry and wet data over 15 months from 2003-10, read
+    on an impervious and a pervious surface (``land.py:462-581``): every day reads the first of
+    its month, across month and year boundaries and 29 February, and the deposition runs before
+    ``simple_deposition`` and ``ihacres``. ``nitrate`` is not a pollutant here, so ``noy`` is
+    read and dropped (D15); a third surface has wet data only, which no function reads. The
+    loads: an additive ``phosphate``, a non-additive ``temperature`` (blended at volume 0, Y43)
+    and ``nitrite``, which is not a pollutant (unread)."""
+    days = _SURFACE_DEPOSITION_DAYS
+    dates = _land_dates(days)
+    data = _monthly(_DEPOSITION, "2003-10", 15)
+    wet_only = {k: v for k, v in _monthly(_DEPOSITION[3:], "2003-10", 15).items()}
+    return {
+        **_POLLUTANTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "suburb",
+                [
+                    _impervious(
+                        "roofs",
+                        area=1500.0,
+                        pore_depth=0.001,
+                        data_input_dict=dict(data),
+                        pollutant_load={"phosphate": 2e-6},
+                    ),
+                    _pervious(
+                        "lawns",
+                        area=3000.0,
+                        depth=0.25,
+                        wilting_point=0.1,
+                        infiltration_capacity=0.006,
+                        initial_storage=250.0,
+                        data_input_dict=dict(data),
+                        pollutant_load={"phosphate": 1e-6, "temperature": 7.0, "nitrite": 1.0},
+                    ),
+                    _impervious("yards", area=400.0, data_input_dict=wet_only),
+                ],
+                _land_forcing(days, 49, dates=dates),
+                surface_residence_time=2,
+            ),
+            _store("storm", "Sewer", capacity=20.0, pipe_time=1),
+            {"name": "brook", "type_": "Node"},
+            _store("river", "Waste"),
+        ],
+        "arcs": [
+            _arc("suburb_to_storm", "suburb", "storm"),
+            _arc("suburb_to_brook", "suburb", "brook"),
+            _arc("storm_to_river", "storm", "river", capacity=15.0),
+            _arc("brook_to_river", "brook", "river"),
+        ],
+        "overrides": _neutral_soil("suburb", "lawns"),
+        "orchestration": [{"Land": "run"}, {"Sewer": "make_discharge"}],
+    }
+
+
+def _growing(name: str, **values) -> dict:
+    return {"surface": name, "type_": "GrowingSurface", **values}
+
+
+_GROWING_DAYS = 540
+# a five-point crop factor over the year (land.py:1547-1549), sown on day 90, harvested on 250
+_GROWING_STAGES = {
+    "crop_factor_stages": [0.3, 0.3, 1.15, 1.15, 0.3],
+    "crop_factor_stage_dates": [0, 90, 160, 250, 365],
+}
+
+
+def _growing_no_nitrate() -> dict:
+    """D21, Y49: a ``GrowingSurface`` (sown on day 90, harvested on 250, ``ET_depletion_factor =
+    0.5``, five crop-factor stages) beside an ``ImperviousSurface``, over the simple pollutants
+    (``phosphate`` and ``temperature``, no ``nitrate``): the crop calendar and IHACRES only, no
+    nutrient pool (``land.py:1276``), and the dry and wet deposition straight into the tank
+    (``adjust_vqip_to_liquid`` does nothing without ``nitrate``, ``:1594``). 540 days from
+    2003-10-01 (365 by default): one season, both covers persisting after the harvest, 29
+    February 2004 and dry spells in which the crop is stressed (``Ks < 1``) on some days and not
+    on others."""
+    days = _GROWING_DAYS
+    dates = _land_dates(days)
+    data = _monthly(_DEPOSITION, "2003-10", 19)
+    return {
+        **_SIMPLE,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [
+                    _growing(
+                        "wheat",
+                        area=1e4,
+                        rooting_depth=0.5,
+                        ET_depletion_factor=0.5,
+                        sowing_day=90,
+                        harvest_day=250,
+                        infiltration_capacity=0.01,
+                        initial_storage=1400.0,
+                        data_input_dict=dict(data),
+                        **_GROWING_STAGES,
+                    ),
+                    _impervious("yard", area=500.0, pore_depth=0.001),
+                ],
+                _land_forcing(
+                    days,
+                    50,
+                    rain=(0.0, 0.0, 0.0, 2e-4, 1e-3, 4e-3, 1e-2),
+                    et0=(5e-4, 5e-3),
+                    dates=dates,
+                ),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+# --- the growing surface with its nutrient pool (Task 9a; spec, Verification 3) ---------------
+_NUTRIENT_EIGHT = [  # a growing surface's pollutants with nitrate (land.py:1294-1307)
+    "ammonia",
+    "nitrite",
+    "nitrate",
+    "phosphate",
+    "org-nitrogen",
+    "org-phosphorus",
+    "solids",
+    "temperature",
+]
+_NUTRIENTS = {
+    "pollutants": _NUTRIENT_EIGHT,
+    "additive_pollutants": _NUTRIENT_EIGHT[:-1],
+    "non_additive_pollutants": ["temperature"],
+}
+# the fertiliser and manure data a growing surface reads with nitrate (land.py:1649-1710)
+_GROWING_INPUTS = (
+    *_DEPOSITION,
+    "nhx-fertiliser",
+    "noy-fertiliser",
+    "srp-fertiliser",
+    "nhx-manure",
+    "noy-manure",
+    "srp-manure",
+)
+_GROWING_SLOW_DAYS = 1096  # D21: three years from 2003-10-01
+# D21 (amended by Y68): growing_spring's default run, one year; L1's common-year shift is pinned
+# from a WSIMOD capture of the full horizon (test_growing_spring_spans_the_leap_shift)
+_GROWING_SPRING_DAYS = 365
+# growing_spring's five crop-factor stages: the factor rises over days 0-90, so the day of year
+# that WSIMOD shifts after 28 February in every year (L1) changes it
+_SPRING_STAGES = {
+    "crop_factor_stages": [0.3, 0.5, 1.15, 1.15, 0.3],
+    "crop_factor_stage_dates": [0, 90, 160, 250, 365],
+}
+_GROWING_MONTHS = 37  # the months 2003-10 .. 2006-10 that the 1096 days touch
+# kg in the solid pools (land.py:1308-1324): every pool starts non-zero
+_SOIL = {
+    "phosphate": 6.0,
+    "ammonia": 4.0,
+    "nitrate": 2.5,
+    "nitrite": 0.25,
+    "org-nitrogen": 40.0,
+    "org-phosphorus": 5.0,
+}
+
+
+def _soil_water(volume: float, temperature: float = 8.0) -> dict:
+    """A growing tank's ``initial_storage``: ``volume`` m3 with the nutrients as masses (kg)."""
+    return {
+        "volume": volume,
+        "ammonia": 2e-3 * volume,
+        "nitrite": 1e-4 * volume,
+        "nitrate": 8e-3 * volume,
+        "phosphate": 4e-4 * volume,
+        "org-nitrogen": 1e-3 * volume,
+        "org-phosphorus": 2e-4 * volume,
+        "solids": 0.0,
+        "temperature": temperature,
+    }
+
+
+def _growing_forcing(dates: list[str], seed: int) -> dict:
+    """A seasonal ``Land`` forcing over ``dates`` (spec, Verification 3): the air temperature
+    swings from about -6 degC in January to 24 degC in July, so that the soil temperature
+    (``land.py:1060-1079``, ``(0.1 T_prev + 0.6 T_air + 1) / 0.8``) falls below 0, into
+    ``(0, 5]`` and above 5 degC every year; the rain is drawn with days above 5 mm (erosion's
+    branch, ``:1943``) and above the 10 mm infiltration capacity (runoff); every 50 days a
+    16-day dry spell under a high ``et0`` dries the soil, so that the crop is stressed
+    (``Ks < 1``)."""
+    rng = random.Random(seed)
+    rain = (0.0, 0.0, 0.0, 2e-4, 1e-3, 3e-3, 6e-3, 9e-3, 1.4e-2, 2.2e-2)
+    data = {}
+    for k, date in enumerate(dates):
+        doy = datetime.strptime(date, "%Y-%m-%d").timetuple().tm_yday
+        season = math.cos(2 * math.pi * (doy - 15) / 365)  # 1 in mid-January
+        dry = k % 50 >= 34
+        depth = 0.0 if dry else rng.choice(rain) * rng.uniform(0.8, 1.2)
+        data[("precipitation", date)] = round(depth, 7)
+        et0 = (2.75e-3 - 2.25e-3 * season) * rng.uniform(0.8, 1.2) * (1.6 if dry else 1.0)
+        data[("et0", date)] = round(et0, 7)
+        data[("temperature", date)] = round(9.0 - 15.0 * season + rng.uniform(-3.0, 3.0), 4)
+    return data
+
+
+def _nutrient_land(surface: dict, days: int, seed: int, *, lists: dict | None = None) -> dict:
+    """One growing ``surface`` on a ``Land`` whose percolation goes to a ``Groundwater`` and
+    whose runoff goes through a ``Node`` to a ``Waste`` (as ``growing_no_nitrate``), with the
+    pollutant ``lists`` (default the eight) and :func:`_growing_forcing`."""
+    dates = _land_dates(days)
+    return {
+        **(_NUTRIENTS if lists is None else lists),
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [surface],
+                _growing_forcing(dates, seed),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+def _growing_spring() -> dict:
+    """D21: a ``GrowingSurface`` sown on day 90 and harvested on 250, ``ET_depletion_factor =
+    0.5``, five crop-factor stages, with monthly dry and wet deposition, fertiliser and manure
+    over 37 months, an ``initial_soil_storage`` and the eight pollutants: every process of
+    ``land.py:1275-1291`` in WSIMOD's order, over three years from 2003-10-01 (29 February
+    2004 and the 1 March days of 2005 and 2006, L1). The default run is the first 365 days
+    (one season, past the harvest on run day 341, Y68); the full horizon is ``slow``. It pins
+    the call order, the double flushing of the dissolved pools (L8) and the nitrate-only
+    removals (L9). Three WSIMOD branches it never reaches are ``growing_lean_soil``'s."""
+    return _nutrient_land(
+        _growing(
+            "wheat",
+            area=1e4,
+            rooting_depth=0.5,
+            ET_depletion_factor=0.5,
+            sowing_day=90,
+            harvest_day=250,
+            infiltration_capacity=0.01,
+            initial_storage=_soil_water(1400.0),
+            initial_soil_storage=dict(_SOIL),
+            data_input_dict=_monthly(_GROWING_INPUTS, "2003-10", _GROWING_MONTHS),
+            **_SPRING_STAGES,
+        ),
+        _GROWING_SLOW_DAYS,
+        90,
+    )
+
+
+_SURFACE_OVERRIDES_DAYS = 100  # Y68: past the overridden harvest (run day 96)
+
+# every GrowingSurface override (land.py:1376-1431), one value each, within the domain and
+# away from the default
+_GROWING_OVERRIDES = {
+    "ET_depletion_factor": 0.6,
+    "rooting_depth": 0.6,
+    "crop_cover_max": 0.85,
+    "ground_cover_max": 0.25,
+    "satact": 0.5,
+    "thetaupp": 0.13,
+    "thetalow": 0.07,
+    "thetapow": 1.1,
+    "uptake1": 12.0,
+    "uptake2": 1.1,
+    "uptake3": 0.025,
+    "uptake_PNratio": 0.15,
+    "erodibility": 0.003,
+    "sreroexp": 1.1,
+    "cohesion": 1.2,
+    "slope": 4.0,
+    "srfilt": 0.6,
+    "macrofilt": 0.02,
+    "limpar": 0.6,
+    "exppar": 2.2,
+    "hsatINs": 1.2,
+    "denpar": 0.02,
+    "adosorption_nr_limit": 2e-5,  # WSIMOD's spelling
+    "adsorption_nr_maxiter": 25,
+    "kfr": 120.0,
+    "nfr": 0.4,
+    "kadsdes": 0.04,
+    "bulk_density": 1200.0,
+    # the calendar: an autumn crop sown on day 285 and harvested on day 5 (run day 96)
+    "sowing_day": 285,
+    "harvest_day": 5,
+    "crop_factor_stages": [0.4, 1.1, 0.25, 0.25, 0.4],
+    "crop_factor_stage_dates": [0, 150, 200, 280, 365],
+}
+
+
+def _surface_overrides() -> dict:
+    """Task 12 (Y21, Y22, L14, L15): the surface overrides. ``wheat`` (growing) has its data
+    replaced by a **path** (absolute, X27) and every ``GrowingSurface`` override including
+    ``rooting_depth`` and the calendar; ``lawns`` has its deposition data replaced by a
+    **mapping** and a ``pollutant_load`` override merged per key (live); ``roofs`` was built
+    with neither data nor load, so its overridden load and deposition data are unread (L14, L15:
+    the inflows were fixed at construction). Four months of data cover the 100 days."""
+    days = _SURFACE_OVERRIDES_DAYS
+    dates = _land_dates(days)
+    inputs = _monthly(_GROWING_INPUTS, "2003-10", 4)
+    replaced = {k: round(v * 1.5, 10) for k, v in inputs.items()}
+    path = _forcing_file("surface_overrides", replaced)
+    lawn_data = _monthly(_DEPOSITION, "2003-10", 4)
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [
+                    _growing(
+                        "wheat",
+                        area=1e4,
+                        rooting_depth=0.5,
+                        ET_depletion_factor=0.5,
+                        sowing_day=90,
+                        harvest_day=250,
+                        infiltration_capacity=0.01,
+                        initial_storage=_soil_water(1400.0),
+                        initial_soil_storage=dict(_SOIL),
+                        data_input_dict=inputs,
+                        **_SPRING_STAGES,
+                    ),
+                    _pervious(
+                        "lawns",
+                        area=3000.0,
+                        depth=0.25,
+                        wilting_point=0.1,
+                        infiltration_capacity=0.006,
+                        initial_storage=_soil_water(300.0),
+                        data_input_dict=lawn_data,
+                        pollutant_load={"phosphate": 1e-6},
+                    ),
+                    _impervious("roofs", area=1500.0, pore_depth=0.001),
+                ],
+                _growing_forcing(dates, 91),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "overrides": {
+            "nodes": {
+                "land": {
+                    "type_": "Land",
+                    "name": "land",
+                    "surfaces": {
+                        "wheat": {"data_input_dict": path, **_GROWING_OVERRIDES},
+                        "lawns": {
+                            "data_input_dict": {
+                                k: round(v * 1.5, 10) for k, v in lawn_data.items()
+                            },
+                            "pollutant_load": {"ammonia": 2e-6, "phosphate": 3e-6},
+                        },
+                        "roofs": {
+                            "pollutant_load": {"phosphate": 5e-6},
+                            "data_input_dict": dict(lawn_data),
+                        },
+                    },
+                }
+            }
+        },
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+# --- IrrigationSurface (Task 13; spec, Verification 3) ------------------------------------------
+_IRRIGATION_DAYS = 120  # Y68: past both sowings (run days 16 and 36) and several dry spells
+
+
+def _irrigated(name: str, **values) -> dict:
+    return {"surface": name, "type_": "IrrigationSurface", **values}
+
+
+def _irrigation_water(volume: float, scale: float = 1.0, temperature: float = 9.0) -> dict:
+    """A source's ``initial_storage``: ``volume`` m3 whose nutrient concentrations are
+    ``scale`` times :func:`_soil_water`'s (kg), so the supply carries nitrate, ammonia, nitrite,
+    phosphate and organic N and P into the pools."""
+    water = _soil_water(volume, temperature)
+    return {k: v if k in ("volume", "temperature") else v * scale for k, v in water.items()}
+
+
+def _irrigation_forcing(dates: list[str], seed: int) -> dict:
+    """A ``Land``'s forcing for irrigation: wet spells (soil full: the saturated test), dry
+    spells under a high ``et0`` (a demand) and mixed days."""
+    rng = random.Random(seed)
+    data = {}
+    for k, date in enumerate(dates):
+        wet = k % 40 < 8
+        dry = 8 <= k % 40 < 30
+        depth = rng.uniform(0.012, 0.03) if wet else 0.0 if dry else rng.choice((0.0, 1e-3, 4e-3))
+        data[("precipitation", date)] = round(depth, 7)
+        data[("et0", date)] = round(rng.uniform(2e-3, 6e-3), 7)
+        data[("temperature", date)] = round(8.0 + 10.0 * math.sin(k / 9) + rng.uniform(-2, 2), 4)
+    return data
+
+
+def _irrigation(
+    *, days: int = _IRRIGATION_DAYS, orchestration: list[dict] | None = None, seed: int = 130
+) -> dict:
+    """An ``IrrigationSurface`` pair fed by a ``River``, a ``Groundwater`` and a ``Reservoir``
+    through the ``Land``'s in-arcs (``land.py:2363-2366``), the eight pollutants so that the
+    supply's nutrients reach the pools (``:2372-2381``). ``irr_a`` (coefficient 0.3) is sown on
+    day 290 (run day 16) and ``irr_b`` (the default 0.1) on day 310 (run day 36): the days before
+    sowing, the sowing day itself (no crop yet, ``days_after_sow = 0``), dry days with demand and
+    saturated days (``cmd <= FLOAT_ACCURACY``: a zero-volume pull, ``:2357-2363``) all occur, and
+    the second surface pulls from the sources the first has drawn on. The default orchestration
+    puts ``apply_irrigation`` after the day's ``Land.run`` (as WSIMOD's own configurations do);
+    ``irrigation_early`` puts it first (D22)."""
+    dates = _land_dates(days)
+    inputs = _monthly(_GROWING_INPUTS, "2003-10", 5)
+    crop = {
+        "area": 1e4,
+        "rooting_depth": 0.5,
+        "ET_depletion_factor": 0.5,
+        "harvest_day": 250,
+        "infiltration_capacity": 0.02,
+        "initial_soil_storage": dict(_SOIL),
+        "data_input_dict": inputs,
+        **_SPRING_STAGES,
+    }
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "farm",
+                [
+                    _irrigated(
+                        "irr_a",
+                        irrigation_coefficient=0.3,
+                        sowing_day=290,
+                        initial_storage=_soil_water(3400.0),
+                        **crop,
+                    ),
+                    _irrigated(
+                        "irr_b",
+                        sowing_day=310,
+                        initial_storage=_soil_water(2800.0, 10.0),
+                        **{**crop, "area": 8000.0},
+                    ),
+                ],
+                _irrigation_forcing(dates, seed),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("brook_src", "Catchment")
+            | {"data_input_dict": _irrigation_catchment(dates, seed + 1)},
+            _river(
+                "stream",
+                damp=0.5,
+                length=2000.0,
+                width=2.0,
+                velocity=1728.0,
+                initial_storage=_irrigation_water(400.0, 0.6, 7.0),
+                # the biochemistry's forcing (nitrate is a pollutant); no discharge is called
+                data_input_dict={("temperature", d): 7.0 for d in dates},
+            ),
+            _store(
+                "well",
+                "Groundwater",
+                capacity=1e5,
+                residence_time=20.0,
+                initial_storage=_irrigation_water(600.0, 1.5, 11.0),
+            ),
+            _store(
+                "tank", "Reservoir", capacity=300.0, initial_storage=_irrigation_water(250.0, 1.0)
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_stream", "brook_src", "stream"),
+            _arc("stream_to_farm", "stream", "farm", preference=2.0),
+            _arc("well_to_farm", "well", "farm", preference=1.0),
+            _arc("tank_to_farm", "tank", "farm", preference=0.5, capacity=40.0),
+            _arc("farm_to_aquifer", "farm", "aquifer"),
+            _arc("farm_to_brook", "farm", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": orchestration
+        or [
+            {"Land": "run"},
+            {"Groundwater": "distribute"},
+            {"Land": "apply_irrigation"},
+            {"Catchment": "route"},
+        ],
+    }
+
+
+def _irrigation_catchment(dates: list[str], seed: int) -> dict:
+    """The ``River``'s upstream: a small flow with nutrients, so that its supply changes."""
+    rng = random.Random(seed)
+    data = {}
+    for date in dates:
+        data[("flow", date)] = round(rng.uniform(4.0, 14.0), 6)
+        data[("temperature", date)] = round(rng.uniform(5.0, 12.0), 4)
+        for pollutant, concentration in (
+            ("ammonia", 1e-3),
+            ("nitrite", 2e-4),
+            ("nitrate", 5e-3),
+            ("phosphate", 3e-4),
+            ("org-nitrogen", 1e-3),
+            ("org-phosphorus", 2e-4),
+            ("solids", 0.0),
+        ):
+            data[(pollutant, date)] = round(concentration * rng.uniform(0.8, 1.2), 9)
+    return data
+
+
+def _irrigation_early() -> dict:
+    """D22: ``Land.apply_irrigation`` before ``Land.run`` in the orchestration, so ``irrigate``
+    reads the surfaces' flows of the previous day (the carried climate, D5; 0 on day 0)."""
+    return _irrigation(
+        orchestration=[
+            {"Land": "apply_irrigation"},
+            {"Land": "run"},
+            {"Groundwater": "distribute"},
+            {"Catchment": "route"},
+        ],
+        seed=132,
+    )
+
+
+_IRRIGATION_CRASH_DAYS = 40
+
+
+# --- GardenSurface and the Demand garden link (Task 14; spec, Verification 3) ---------------------
+_GARDEN_DAYS = 100  # Y68: dry spells (a demand) and wet ones (saturated), both surfaces' branches
+
+
+def _garden_surface(name: str, **values) -> dict:
+    return {
+        "surface": name,
+        "type_": "GardenSurface",
+        "rooting_depth": 0.5,
+        "ET_depletion_factor": 0.5,
+        "infiltration_capacity": 0.02,
+        "sowing_day": 10,
+        "harvest_day": 300,
+        **_SPRING_STAGES,
+        **values,
+    }
+
+
+def _garden() -> dict:
+    """A ``ResidentialDemand`` fed through a ``Distribution`` asks two ``Land`` nodes for garden
+    water (``demand.py:250-301``). ``gardens`` has two ``GardenSurface``s, ``g1`` and ``g2``, and
+    a ``PerviousSurface``: the last garden surface takes the handlers (L18), so ``g2`` is
+    irrigated and ``g1`` only grows, and the water arrives at 0 degC (L19). ``plain`` has no
+    garden surface and answers 0 (``land.py:93-94``). The demand is the previous day's deficit
+    (the check runs before ``Land.run``): 0 on day 0 and, with the forcing's first days wet, on
+    the next ones. ``g2`` starts over capacity (250 m3 against 240), and that start alone gives
+    its saturated days (days 0-5, ``cmd <= FLOAT_ACCURACY``, ``:2416``); the wet spells do not
+    fill the soil.
+
+    The run has the eight pollutants (I2), so both garden surfaces keep the nutrient pool, with
+    an ``initial_soil_storage`` and five months of fertiliser, manure and deposition data, and
+    the 0 degC garden water enters a tank whose nutrients leave in the pool's proportions. The
+    homes load seven of them."""
+    days = _GARDEN_DAYS
+    dates = _dates(days)
+    inputs = _monthly(_GROWING_INPUTS, "2000-01", 5)
+    nutrient = {"data_input_dict": inputs, "initial_soil_storage": dict(_SOIL)}
+    homes = _homes("homes", days, 56)
+    homes["pollutant_load"] = {k: 0.01 * (i + 1) for i, k in enumerate(_NUTRIENT_EIGHT[:-1])}
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_soil_water(900.0, 11.0)),
+            _store("dist", "Distribution", leakage=0.0),
+            homes,
+            _land(
+                "gardens",
+                [
+                    _garden_surface(
+                        "g1", area=800.0, initial_storage=_soil_water(150.0, 11.0), **nutrient
+                    ),
+                    _garden_surface(
+                        "g2", area=1200.0, initial_storage=_soil_water(250.0, 11.0), **nutrient
+                    ),
+                    _pervious(
+                        "lawn", area=500.0, depth=0.5, initial_storage=_soil_water(80.0, 11.0)
+                    ),
+                ],
+                _irrigation_forcing(dates, 57),
+            ),
+            _land(
+                "plain",
+                [
+                    _pervious(
+                        "patch", area=600.0, depth=0.5, initial_storage=_soil_water(90.0, 11.0)
+                    )
+                ],
+                _irrigation_forcing(dates, 58),
+            ),
+            _store("drain", "Sewer", capacity=50.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("supply_to_dist", "supply", "dist"),
+            _arc("dist_to_homes", "dist", "homes"),
+            _arc("homes_to_gardens", "homes", "gardens"),
+            _arc("homes_to_plain", "homes", "plain"),
+            _arc("homes_to_drain", "homes", "drain"),
+            _arc("gardens_to_brook", "gardens", "brook"),
+            _arc("plain_to_brook", "plain", "brook"),
+            _arc("brook_to_sea", "brook", "sea"),
+            _arc("drain_to_sea", "drain", "sea"),
+        ],
+        # the soils keep their temperature (11 degC), so the 0 degC garden water shows (L19)
+        "overrides": {
+            "nodes": {
+                **_neutral_soil("gardens", "g1", "g2", "lawn")["nodes"],
+                **_neutral_soil("plain", "patch")["nodes"],
+            }
+        },
+        "orchestration": [
+            {"ResidentialDemand": "create_demand"},
+            {"Land": "run"},
+            {"Sewer": "make_discharge"},
+        ],
+    }
+
+
+# --- VariableAreaSurface (Task 15; spec, Verification 3) ------------------------------------------
+_VARIABLE_AREA_DAYS = 100  # Y68: past the sowing (run day 6), through wet and dry spells
+
+
+def _variable_area() -> dict:
+    """Two ``VariableAreaSurface``s on one ``Land`` (``land.py:2440-2461``): ``idle`` keeps the
+    default ``current_surface_area = 0`` and so gets no rain and no evaporation (its flows are
+    0.0), and ``half`` uses half its area (5000 of 10000 m2): its rain and evaporation volumes
+    are half a full surface's. Erosion reads the unscaled rain on both (``:1940``), so ``idle``
+    still erodes on a rainy day. The crop (sown on run day 6) multiplies the evaporation by the
+    day's coefficient (``:2456``)."""
+    crop = {
+        "area": 1e4,
+        "rooting_depth": 0.5,
+        "ET_depletion_factor": 0.5,
+        "sowing_day": 280,
+        "harvest_day": 200,
+        "infiltration_capacity": 0.01,
+        "initial_soil_storage": dict(_SOIL),
+        "data_input_dict": _monthly(_GROWING_INPUTS, "2003-10", 5),
+        "crop_factor_stages": [0.4, 1.1, 0.25, 0.25, 0.4],
+        "crop_factor_stage_dates": [0, 150, 200, 280, 365],
+    }
+    mapping = _nutrient_land(
+        {
+            "surface": "idle",
+            "type_": "VariableAreaSurface",
+            "initial_storage": _soil_water(1500.0, 11.0),
+            **crop,
+        },
+        _VARIABLE_AREA_DAYS,
+        151,
+    )
+    mapping["nodes"][0]["surfaces"].append(
+        {
+            "surface": "half",
+            "type_": "VariableAreaSurface",
+            "current_surface_area": 5000.0,
+            "initial_storage": _soil_water(1500.0, 11.0),
+            **crop,
+        }
+    )
+    return mapping
+
+
+def _irrigation_without_nutrients() -> dict:
+    """noodl only, L13: with the pollutants ``phosphate`` and ``temperature`` (no ``nitrate``) the
+    first day with a demand raises ``KeyError: 'org-nitrogen'`` at ``land.py:2373`` (the pool
+    update reads five pollutant keys whatever the pollutants), where noodl updates no pool
+    (Y20). One ``Reservoir`` supplies; the surface is sown on run day 4 and the forcing is dry."""
+    days = _IRRIGATION_CRASH_DAYS
+    dates = _land_dates(days)
+    forcing = {}
+    for k, date in enumerate(dates):
+        forcing[("precipitation", date)] = 0.012 if k < 4 else 0.0
+        forcing[("et0", date)] = 0.004
+        forcing[("temperature", date)] = 10.0 + (k % 4)
+    return {
+        **_SIMPLE,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "farm",
+                [
+                    _irrigated(
+                        "irr",
+                        area=5000.0,
+                        rooting_depth=0.5,
+                        ET_depletion_factor=0.5,
+                        sowing_day=278,
+                        irrigation_coefficient=0.4,
+                        initial_storage=1000.0,
+                        **_SPRING_STAGES,
+                    )
+                ],
+                forcing,
+            ),
+            _store("tank", "Reservoir", capacity=500.0, initial_storage=400.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("tank_to_farm", "tank", "farm"),
+            _arc("farm_to_brook", "farm", "brook"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Land": "apply_irrigation"}],
+    }
+
+
+_GROWING_AUTUMN_DAYS = 300  # Y68: past the harvest (run day 291); 400 under slow
+_GROWING_AUTUMN_SLOW_DAYS = 400
+
+
+def _growing_autumn() -> dict:
+    """L2: sown on day 280 (2003-10-07, run day 6) and harvested on day 200 (2004-07-18): the
+    calendar ``[0, 280, 200, 201, 365]`` is unsorted, so the covers stay 0 all year, and the
+    season crosses the new year. ``sowing_day > 181`` is an autumn crop (``land.py:1346-1349``):
+    its uptake has the temperature function and ``days_after_sow - 25`` (``:1876-1879``)."""
+    return _nutrient_land(
+        _growing(
+            "barley",
+            area=8000.0,
+            rooting_depth=0.6,
+            ET_depletion_factor=0.6,
+            sowing_day=280,
+            harvest_day=200,
+            infiltration_capacity=0.012,
+            initial_storage=_soil_water(1500.0, 11.0),
+            initial_soil_storage=dict(_SOIL),
+            data_input_dict=_monthly(_GROWING_INPUTS, "2003-10", 14),
+            crop_factor_stages=[0.4, 1.1, 0.25, 0.25, 0.4],
+            crop_factor_stage_dates=[0, 150, 200, 280, 365],
+        ),
+        _GROWING_AUTUMN_SLOW_DAYS,
+        91,
+    )
+
+
+_GROWING_DECAY_DAYS = 100  # Y68: past the harvest (run day ~77); 200 under slow
+_GROWING_DECAY_SLOW_DAYS = 200
+
+
+def _growing_decay() -> dict:
+    """Y40: the 12 default pollutants (no lists in the mapping) and ``decays`` on ammonia and
+    nitrite of a growing tank (3b's ``DecayTank`` and the nitrite carry-over, ``land.py:427-439``),
+    which the pool ignores (L9). The tank's nitrogen is mostly ammonia and no nitrate arrives,
+    while the uptake and the denitrification take the pool's N as nitrate (``:1917``,
+    ``:2145``): the tank clamps the nitrate it is asked for (``"nutrient_pool_not_tracking"``)."""
+    water = _soil_water(1300.0, 9.0)
+    water.update({"nitrate": 0.013, "ammonia": 7.8, "do": 8.0, "bod": 0.0, "cod": 0.0, "ph": 7.0})
+    data = _monthly(_GROWING_INPUTS, "2003-10", 8)
+    for key in data:
+        if key[0].startswith("noy-"):
+            data[key] = 0.0
+    mapping = _nutrient_land(
+        _growing(
+            "maize",
+            area=1e4,
+            rooting_depth=0.5,
+            ET_depletion_factor=0.5,
+            sowing_day=275,
+            harvest_day=350,
+            infiltration_capacity=0.01,
+            initial_storage=water,
+            initial_soil_storage=dict(_SOIL),
+            data_input_dict=data,
+            decays={
+                "ammonia": {"constant": 0.002, "exponent": 1.05},
+                "nitrite": {"constant": 0.05, "exponent": 1.04},
+            },
+            **_GROWING_STAGES,
+        ),
+        _GROWING_DECAY_SLOW_DAYS,
+        92,
+    )
+    for key in ("pollutants", "additive_pollutants", "non_additive_pollutants"):
+        del mapping[key]  # WSIMOD's default 12 (constants.py:79-92)
+    return mapping
+
+
+_GROWING_LEAN_SOIL_DAYS = 60
+
+
+def _growing_lean_soil() -> dict:
+    """Task 9b: the WSIMOD branches ``growing_spring`` does not reach, on two autumn-sown
+    surfaces (sown on raw day 274, the first date, so a crop from day 1; ``land.py:1346-1349``).
+
+    ``rye`` is lean: its soil water holds no phosphate and its soil no inorganic P
+    (``initial_soil_storage`` with phosphate 0, its organic P in the fast pool), and no ``srp``
+    arrives. It starts below its wilting point (59 mm against 60 mm of a narrow 0.12-0.14 band)
+    and gets no rain for 20 days: the soil moisture factor is 0
+    (``calc_soil_moisture_dependence_factor/wilted``, ``:1845``), so nothing mineralises,
+    adsorption finds no P (``adsorption/empty``, ``:2176``) and the crop has no water to take
+    nutrients from (``calc_crop_uptake/available_water``, ``:1899``). Once the seasonal rain
+    (:func:`_growing_forcing`) wets it, the mineralisation makes the dissolved P's increase
+    positive (``soil_pool_transformation/inorganic_P``, ``:1781``), and with no adsorbed P the
+    Freundlich step takes its shortcut and prints (``adsorption/shortcut``, ``:2191-2195``).
+
+    ``clover`` is rich: 600 kg of adsorbed P desorb (``adsorption/adsorb`` false, ``:2252``).
+    Three hot days (air at 45 degC on days 1-3) warm both soils above 25 degC, which caps the
+    autumn uptake's temperature function at 1 (``calc_crop_uptake/temperature_cap``,
+    ``:1877``)."""
+    months = _GROWING_LEAN_SOIL_DAYS // 28 + 1
+    lean = {
+        key: 0.0 if key[0].startswith("srp-") else value
+        for key, value in _monthly(_GROWING_INPUTS, "2003-10", months).items()
+    }
+    autumn = {"sowing_day": 274, "harvest_day": 250, **_SPRING_STAGES}
+    mapping = _nutrient_land(
+        _growing(
+            "rye",
+            area=1e4,
+            rooting_depth=0.5,
+            field_capacity=0.14,
+            wilting_point=0.12,
+            ET_depletion_factor=0.5,
+            infiltration_capacity=0.01,
+            initial_storage={**_soil_water(590.0, 12.0), "phosphate": 0.0},
+            initial_soil_storage={**_SOIL, "phosphate": 0.0},
+            data_input_dict=lean,
+            **autumn,
+        ),
+        _GROWING_LEAN_SOIL_DAYS,
+        93,
+    )
+    mapping["nodes"][0]["surfaces"].append(
+        _growing(
+            "clover",
+            area=5000.0,
+            rooting_depth=0.5,
+            ET_depletion_factor=0.5,
+            infiltration_capacity=0.01,
+            initial_storage=_soil_water(700.0, 12.0),
+            initial_soil_storage={**_SOIL, "phosphate": 600.0},
+            data_input_dict=_monthly(_GROWING_INPUTS, "2003-10", months),
+            **autumn,
+        )
+    )
+    forcing = mapping["nodes"][0]["data_input_dict"]
+    for k, date in enumerate(mapping["dates"][:20]):
+        forcing[("precipitation", date)] = 0.0
+        if 1 <= k <= 3:
+            forcing[("temperature", date)] = 45.0
+    return mapping
+
+
+_DEPOSITION_NON_ADDITIVE_DAYS = 90
+
+
+def _deposition_non_additive() -> dict:
+    """Y43 (ruling Y59): ``surface_deposition`` with ``ammonia`` non-additive. The ``nhx``
+    deposition blends into the tank at volume 0 (``core.py:104-114``), which changes the tank's
+    ammonia only by rounding; 90 days cross three month boundaries."""
+    mapping = _surface_deposition()
+    mapping["dates"] = mapping["dates"][:_DEPOSITION_NON_ADDITIVE_DAYS]
+    mapping.update(
+        {
+            "pollutants": ["phosphate", "ammonia", "temperature"],
+            "additive_pollutants": ["phosphate"],
+            "non_additive_pollutants": ["ammonia", "temperature"],
+        }
+    )
+    return mapping
+
+
+_DEFAULT_DEPLETION_DAYS = 20
+
+
+def _growing_default_depletion() -> dict:
+    """noodl only, L3: the default ``ET_depletion_factor = 1`` makes the stress coefficient's
+    denominator ``(1 - ET_depletion_factor) * TAW`` zero (``land.py:1564-1568``). A soil that
+    starts near field capacity dries under ``et0 = 0.01`` and no rain, and when it reaches its
+    wilting point WSIMOD raises ``ZeroDivisionError`` (an empty soil would crash on day 0 and
+    give no day to compare). noodl gives ``Ks = 0`` and records
+    ``"crop_water_stress_zero_denominator"`` (Y17). No ``nitrate``: the pool is a later task."""
+    days = _DEFAULT_DEPLETION_DAYS
+    dates = _land_dates(days)
+    forcing = {}
+    for k, date in enumerate(dates):
+        forcing[("precipitation", date)] = 0.0
+        forcing[("et0", date)] = 0.01
+        forcing[("temperature", date)] = 10.0 + (k % 5)
+    return {
+        **_SIMPLE,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [_growing("barley", area=1000.0, rooting_depth=0.6, initial_storage=179.0)],
+                forcing,
+            ),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("land_to_brook", "land", "brook"), _arc("brook_to_sea", "brook", "sea")],
+        "orchestration": [{"Land": "run"}],
+    }
+
+
+# --- the zero-N crash cases (Task 9b; D13, Y48) -------------------------------------------------
+_ZERO_N_DAYS = 10
+
+
+def _zero_n(
+    *,
+    volume: float,
+    rain_on_day_0: bool,
+    nitrite: float = 0.0,
+    dry_deposition: bool = False,
+    sowing_day: int = 90,
+) -> dict:
+    """D13's zero-N recipe: one growing surface (the eight pollutants, from 2003-10-01, raw day
+    274) whose tank holds no ammonia, nitrate or organic N (``nitrite`` only, if any) and no
+    soil store, with zero fertiliser and manure in its first month (``land.py:1649-1710``) and
+    no deposition unless ``dry_deposition`` (``nhx-dry`` present, ``:375-376``; the dry data
+    non-zero, the wet zero). It rains 10 mm on day 0 when ``rain_on_day_0``, on none of days
+    1-4 and on every day from day 5; ``ET_depletion_factor = 0.5`` keeps L3 away. The day's
+    calls run in WSIMOD's order (``:1275-1291``), so which division raises first is the
+    recipe's."""
+    dates = _land_dates(_ZERO_N_DAYS)
+    variables = (*_DEPOSITION, *_GROWING_INPUTS[6:]) if dry_deposition else _GROWING_INPUTS[6:]
+    data = _monthly(variables, "2003-10", 1)
+    for key in data:
+        if not (dry_deposition and key[0].endswith("-dry")):
+            data[key] = 0.0
+    water = _soil_water(volume)
+    water.update({"ammonia": 0.0, "nitrate": 0.0, "org-nitrogen": 0.0, "nitrite": nitrite})
+    forcing = {}
+    for k, date in enumerate(dates):
+        wet = (k == 0 and rain_on_day_0) or k >= 5
+        forcing[("precipitation", date)] = 0.01 if wet else 0.0
+        forcing[("et0", date)] = 0.002
+        forcing[("temperature", date)] = 10.0 + (k % 3)
+    surface = _growing(
+        "wheat",
+        area=1e4,
+        rooting_depth=0.5,
+        ET_depletion_factor=0.5,
+        sowing_day=sowing_day,
+        harvest_day=250,
+        infiltration_capacity=0.02,
+        initial_storage=water,
+        data_input_dict=data,
+        **_SPRING_STAGES,
+    )
+    return {
+        **_NUTRIENTS,
+        "dates": dates,
+        "nodes": [
+            _land(
+                "land",
+                [surface],
+                forcing,
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("land_to_aquifer", "land", "aquifer"),
+            _arc("land_to_brook", "land", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+def _growing_no_din() -> dict:
+    """L5: rain on day 0 passes through the soil, so ``ihacres`` pulls the subsurface flow
+    from the tank (``land.py:985-996``) and ``pull_storage`` splits the extracted DIN by the
+    tank's ``nitrate + ammonia + nitrite = 0`` (``:1459-1485``): ``ZeroDivisionError`` at
+    ``:1460``. noodl sets the species to 0 and records ``"pull_storage_no_din"``."""
+    return _zero_n(volume=1400.0, rain_on_day_0=True)
+
+
+def _growing_zero_n() -> dict:
+    """L6 (Y48): no rain on day 0, so ``ihacres`` evaporates instead of pulling, and the first
+    zero DIN met is ``soil_pool_transformation``'s ``nitrate / (nitrate + ammonia)``
+    (``land.py:1758``). noodl uses the proportion 0 and records ``"transformation_no_din"``."""
+    return _zero_n(volume=1400.0, rain_on_day_0=False)
+
+
+def _growing_nitrite_only() -> dict:
+    """L6 with a tank holding only nitrite: ``pull_storage``'s denominator counts nitrite, the
+    transformation's ignores it (``land.py:1758``), which raises as in ``growing_zero_n``."""
+    return _zero_n(volume=1400.0, rain_on_day_0=False, nitrite=0.25)
+
+
+def _growing_empty_soil() -> dict:
+    """L7 (Y48): an empty tank (``V = 0``) sown on day 274 (the first date, so
+    ``days_after_sow`` is 0 there and 1 on day 1); the dry deposition puts N into the tank at
+    volume 0 (call order 2, ``land.py:375-376``, ``:2267-2288``), so the transformation's
+    proportion is defined, and on day 1 the crop uptake divides by the volume (``:1899``).
+    ``ET_depletion_factor = 0.5`` keeps L3 away (Y48); no rain before day 5. noodl takes no
+    uptake and records ``"crop_uptake_dry_soil"``."""
+    return _zero_n(volume=0.0, rain_on_day_0=False, dry_deposition=True, sowing_day=274)
 
 
 def _land_percolation_threshold() -> dict:
@@ -2442,6 +3529,153 @@ CASES: dict[str, Case] = {
         days=_LAND_DAYS,
         scale=300.0,
         replay=("suburb", "storm"),
+    ),
+    "surface_deposition": Case(
+        build=_surface_deposition,
+        # Task 9b (W15): 180 days by default (six month boundaries, the year end and 29
+        # February 2004, day 151); the 15 months under slow; the bookkeeping on 90
+        days=180,
+        scale=300.0,
+        replay=("suburb",),
+        slow_days=_SURFACE_DEPOSITION_DAYS,
+        bookkeeping_days=90,
+    ),
+    "growing_no_nitrate": Case(
+        build=_growing_no_nitrate,
+        # Task 9b (W15): one year by default, past the harvest (run day 341); 540 under slow;
+        # the bookkeeping on 250 (sown on run day 182)
+        days=365,
+        scale=2000.0,
+        replay=("land",),
+        slow_days=_GROWING_DAYS,
+        bookkeeping_days=250,
+    ),
+    "growing_spring": Case(
+        build=_growing_spring,
+        days=_GROWING_SPRING_DAYS,
+        scale=2000.0,
+        replay=("land",),
+        slow_days=_GROWING_SLOW_DAYS,
+        bookkeeping_days=250,  # Y68: sown on 182, the uptake caps by 217
+    ),
+    "surface_overrides": Case(
+        build=_surface_overrides,
+        days=_SURFACE_OVERRIDES_DAYS,
+        scale=2000.0,
+        replay=("land",),
+    ),
+    "irrigation": Case(
+        build=_irrigation,
+        days=_IRRIGATION_DAYS,
+        scale=3400.0,
+        replay=("farm",),
+        bookkeeping_days=60,  # Y68: past both sowings, with demands and saturated days
+    ),
+    "irrigation_early": Case(
+        build=_irrigation_early,
+        days=_IRRIGATION_DAYS,
+        scale=3400.0,
+        replay=("farm",),
+        bookkeeping_days=60,  # Y68: past both sowings, with demands and saturated days
+    ),
+    "garden": Case(
+        build=_garden,
+        days=_GARDEN_DAYS,
+        scale=900.0,
+        replay=("gardens", "plain"),
+    ),
+    "variable_area": Case(
+        build=_variable_area,
+        days=_VARIABLE_AREA_DAYS,
+        scale=2000.0,
+        replay=("land",),
+        bookkeeping_days=60,  # Y83: past the sowing (run day 6), with idle and half-area rain
+    ),
+    "irrigation_without_nutrients": Case(
+        build=_irrigation_without_nutrients,
+        days=_IRRIGATION_CRASH_DAYS,
+        scale=1000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("KeyError", "land.py:2373"),
+        crash_day=5,  # sown on run day 4: the demand starts on day 5
+    ),
+    "growing_autumn": Case(
+        build=_growing_autumn,
+        days=_GROWING_AUTUMN_DAYS,
+        scale=2000.0,
+        replay=("land",),
+        slow_days=_GROWING_AUTUMN_SLOW_DAYS,
+        bookkeeping_days=60,
+    ),
+    "growing_decay": Case(
+        build=_growing_decay,
+        days=_GROWING_DECAY_DAYS,
+        scale=2000.0,
+        replay=("land",),
+        slow_days=_GROWING_DECAY_SLOW_DAYS,
+        bookkeeping_days=60,
+    ),
+    "growing_lean_soil": Case(
+        build=_growing_lean_soil,
+        days=_GROWING_LEAN_SOIL_DAYS,
+        scale=2000.0,
+        replay=("land",),
+        # pollutants only: WSIMOD prints its shortcut warning, the event of noodl's pool, which
+        # a quantity-only run does not have
+        modes=("pollutants",),
+    ),
+    "deposition_non_additive": Case(
+        build=_deposition_non_additive,
+        days=_DEPOSITION_NON_ADDITIVE_DAYS,
+        scale=300.0,
+        replay=("suburb",),
+    ),
+    "growing_default_depletion": Case(
+        build=_growing_default_depletion,
+        days=_DEFAULT_DEPLETION_DAYS,
+        scale=200.0,
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1566"),
+        crash_day=11,
+    ),
+    # D13, Y48: the zero-N crashes (L5-L7), nitrate cases, so pollutants only: a quantity-only
+    # run has no pool, hence neither the division nor its event
+    "growing_no_din": Case(
+        build=_growing_no_din,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1460"),
+        crash_day=0,
+    ),
+    "growing_zero_n": Case(
+        build=_growing_zero_n,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1758"),
+        crash_day=0,
+    ),
+    "growing_nitrite_only": Case(
+        build=_growing_nitrite_only,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1758"),
+        crash_day=0,
+    ),
+    "growing_empty_soil": Case(
+        build=_growing_empty_soil,
+        days=_ZERO_N_DAYS,
+        scale=2000.0,
+        modes=("pollutants",),
+        wsimod=False,
+        crash=("ZeroDivisionError", "land.py:1899"),
+        crash_day=1,
     ),
     "land_percolation_threshold": Case(
         build=_land_percolation_threshold,

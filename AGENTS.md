@@ -29,13 +29,13 @@ Add the application you are changing. CI's `branch` job uses the same table
 | electrical | `tests/apps/electrical tests/layers/test_mna*.py tests/test_model_mna.py tests/operators/test_mna_operator.py tests/verification/test_power_flow_parity.py tests/verification/test_modelica_electrical_parity.py` |
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |
 
-The wsimod row runs in about 5 minutes with `-n 4` on an unloaded machine (315 s, 5,798 tests, measured
-in the last 3b task; 675 s, 5,835 tests, on a shared machine at the end of 3b), within the 10-minute
-budget when unloaded, so nothing more is cut: the default composition is quickstart in full (1456 days,
-both modes, 30-40 s each unloaded), oxford for its first 365 days (both modes, similar), the sampled
-replays, the gradients and the cases (the rest); `river_nutrients` runs 400 of its 1100 days by default.
-Full oxford (1456 days, both modes, about
-145 s each) runs under `-m slow`.
+The wsimod row (`tests/apps/wsimod`, the allocation and `test_wsimod_*` verification files,
+1,854 tests) takes about 15 minutes with `-n 4` on the development machine: 891 s at the end of 3c,
+against 810 s and 917 s before it. The four whole-demo parity items take 90 to 97 s each, a tenth
+of the row. The default composition is quickstart in full (1456 days, both modes), oxford for its
+first 365 days (both modes), the sampled replays, the gradients and the cases; `river_nutrients`
+and the growing cases run a prefix of their days by default. Full oxford (1456 days) and the long
+horizons run under `-m slow`.
 
 For example, for the building application:
 

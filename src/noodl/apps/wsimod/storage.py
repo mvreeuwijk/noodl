@@ -47,6 +47,7 @@ from noodl.apps.wsimod.vqip import (
     empty,
     extract_vqip,
     pow_python,
+    python_per_instance,
     safe_den,
     sum_vqip,
     v_change_vqip,
@@ -83,6 +84,11 @@ def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
 
 
+def _half_power(v: float) -> float:
+    """Python's ``v ** 0.5`` (``float.__pow__``)."""
+    return v**0.5
+
+
 class _PowHalf(torch.autograd.Function):
     """``x ** 0.5`` as Python evaluates it (the C library's ``pow``), elementwise.
 
@@ -96,8 +102,7 @@ class _PowHalf(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor) -> Tensor:
         ctx.save_for_backward(x)
-        flat = x.detach().reshape(-1).tolist()
-        return torch.tensor([v**0.5 for v in flat], dtype=torch.float64).reshape(x.shape)
+        return python_per_instance(_half_power, x.detach().reshape(-1).tolist(), shape=x.shape)
 
     @staticmethod
     @once_differentiable
@@ -124,8 +129,7 @@ class _ExpPython(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor) -> Tensor:
-        flat = x.detach().reshape(-1).tolist()
-        out = torch.tensor([math.exp(v) for v in flat], dtype=torch.float64).reshape(x.shape)
+        out = python_per_instance(math.exp, x.detach().reshape(-1).tolist(), shape=x.shape)
         ctx.save_for_backward(out)
         return out
 
@@ -892,8 +896,8 @@ class River(Storage):
     A ``decays`` dict builds a ``DecayTank`` as for any :class:`Storage`: the tank decays at the
     end of the day, from the river's own ``temperature`` forcing (``storage.py:53-59``). The
     tank's ``area`` and ``capacity`` are derived (:func:`river_derived`) and re-derived by
-    :meth:`bind`. The ``("RiparianBuffer", "volume")`` check (``:589``, ``:938-949``) belongs to
-    3c.
+    :meth:`bind`. The ``("RiparianBuffer", "volume")`` check (``:589``, ``:938-949``) is refused for
+    good (Y10).
 
     With biochemistry (D9: ``"nitrate"`` among the run's pollutants, so never in a
     quantity-only run) the river has:
@@ -1077,11 +1081,13 @@ class River(Storage):
         return sum_vqip(self.p, pulled, pulled_)
 
     def pull_check_fp(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
-        """``storage.py:938-949`` reads a ``river_tank`` that does not exist: the riparian
-        buffer is sub-project 3c and is refused by name."""
+        """``storage.py:938-949`` reads a ``river_tank`` that does not exist: WSIMOD 0.8.1 has no
+        ``RiparianBuffer`` class, so the check is refused for good (Y10)."""
         raise KeyError(
-            f"node {self.name!r}: the ('RiparianBuffer', 'volume') pull check is sub-project 3c "
-            "(storage.py:938-949 reads a nonexistent river_tank)"
+            f"node {self.name!r}: the ('RiparianBuffer', 'volume') pull check is refused: there "
+            "is no RiparianBuffer class in WSIMOD 0.8.1, and storage.py:588-589 registers a "
+            "handler whose body (storage.py:938-949) reads a river_tank the River never "
+            "defines (Y10)"
         )
 
     # --- biochemistry (storage.py:723-898) ----------------------------------------------------

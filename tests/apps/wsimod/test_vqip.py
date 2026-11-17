@@ -1,5 +1,7 @@
 """VQIP algebra and decision primitives against WSIMOD's WSIObj (core.py)."""
 
+import math
+
 import pytest
 import torch
 
@@ -9,8 +11,11 @@ from noodl.apps.wsimod.vqip import (
     ds_vqip,
     empty,
     extract_vqip,
+    log10_python,
+    log_python,
     pow_python,
     safe_den,
+    sin_python,
     sum_vqip,
     tmax,
     tmin,
@@ -211,3 +216,41 @@ def test_pow_python_is_pythons_power_bitwise():
         [b**e for b, e in zip(base.tolist(), exponent.tolist(), strict=True)], dtype=torch.float64
     )
     assert torch.equal(pow_python(base, exponent), expected)
+
+
+def test_pow_python_has_the_slope_of_a_negative_base_with_an_integral_power():
+    """M1: ``d/dx x^y = y x^y / x`` on a negative base (an integral ``y``, as Y65 admits),
+    gradcheck-exact; the slope in ``y`` is 0 there (no real one), and both are 0 at 0."""
+    x = torch.tensor([-2.0, -0.3, 0.0, 0.7], dtype=torch.float64, requires_grad=True)
+    y = torch.tensor([3.0, 2.0, 2.0, 2.0], dtype=torch.float64, requires_grad=True)
+    pow_python(x, y).sum().backward()
+    assert x.grad.tolist() == [3.0 * (-2.0) ** 3 / -2.0, 2.0 * (-0.3) ** 2 / -0.3, 0.0, 2.0 * 0.7]
+    assert y.grad.tolist()[:3] == [0.0, 0.0, 0.0]
+    base = torch.tensor([-2.0, -0.3, -1.5], dtype=torch.float64, requires_grad=True)
+    power = torch.tensor([3.0, 2.0, 4.0], dtype=torch.float64)
+    assert torch.autograd.gradcheck(lambda b: pow_python(b, power), (base,), eps=1e-7, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    ("helper", "reference", "low", "high"),
+    [
+        (log_python, math.log, 1e-6, 50.0),
+        (log10_python, math.log10, 1e-6, 50.0),
+        (sin_python, math.sin, 0.0, 0.2),
+        (sin_python, math.sin, -7.0, 7.0),
+    ],
+)
+def test_log_log10_sin_python_are_pythons_bitwise(helper, reference, low, high):
+    """Each helper is ``math.<f>`` per instance (Approach rule 1). Whether torch's own function
+    differs from Python's depends on the platform, so nothing is asserted about it."""
+    generator = torch.Generator().manual_seed(23)
+    x = low + (high - low) * torch.rand(10**4, generator=generator, dtype=torch.float64)
+    got = helper(x).tolist()
+    assert got == [reference(float(v)) for v in x.tolist()]
+
+
+@pytest.mark.parametrize("helper", [log_python, log10_python, sin_python])
+def test_gradcheck_on_the_python_math_helpers(helper):
+    x = (0.5 + torch.rand(5, generator=torch.Generator().manual_seed(3), dtype=torch.float64)) * 2
+    x.requires_grad_(True)
+    assert torch.autograd.gradcheck(helper, (x,))

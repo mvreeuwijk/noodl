@@ -360,9 +360,20 @@ def test_quantity_only_lists_the_ignored_parameters():
     assert "my_land.surfaces.urban.pollutant_load" in ignored
     assert "my_land.surfaces.rural.pollutant_load" in ignored
     model.step(state, drivers, dt=DAY, t=0.0)
-    with pytest.raises(ValueError, match="3c") as refused:
-        build_model(read_wsimod_config(DATA / "quickstart"), pollutants=True)
-    assert "pollutants=False" in str(refused.value)
+
+
+def test_the_pollutant_load_is_live_with_pollutants_on():
+    """Y30: the quickstart's surface loads build with pollutants on, as drivers holding the
+    configured phosphate; nothing about them is unread."""
+    network = read_wsimod_config(DATA / "quickstart")
+    model, _, drivers = build_model(network, pollutants=True)
+    assert not any("pollutant_load" in item for item in model.ignored_by_quantity_only)
+    assert not any("pollutant_load" in item for item in network.unread)
+    k = network.pollutants.names.index("phosphate")
+    for cls in ("ImperviousSurface", "PerviousSurface"):
+        load = drivers[f"wsimod.{cls}.pollutant_load"]
+        assert load.shape == (1, len(network.pollutants.names))
+        assert float(load[0, k]) == 1.0e-07
 
 
 LISTED_3B = {
@@ -567,7 +578,7 @@ def test_quantity_only_driver_shapes():
     alt = read_wsimod_config(CASES["decay_arc_alt"].build())
     assert build_model(alt)[2]["wsimod.DecayArcAlt.decays.constant"].shape == (1, 3)
     # the pollutant run: volume then the additive pollutants, and the constants and exponents
-    network = read_wsimod_config(DATA / "oxford", config_name="config_no_deposition.yml")
+    network = read_wsimod_config(DATA / "oxford")
     model, _, drivers = build_model(network, pollutants=True)
     k = len(network.pollutants.additive)
     for cls, count in n.items():
@@ -642,10 +653,11 @@ def test_a_batch_of_two_capacities_equals_its_single_runs(case, pollutants):
         )
 
 
-@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only"])
+@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only", "growing_decay"])
 def test_a_day_of_batch_three_after_a_day_of_batch_two_resets_the_day(case):
     """I2: the per-day values a class does not reset itself (an FWTW's current_input and
-    solids, a surface's flows) start every day fresh, at the day's batch shape."""
+    solids, a surface's flows, a growing surface's two pool factors) start every day fresh, at
+    the day's batch shape."""
     network = read_wsimod_config(CASES[case].build())
     model, state, drivers = build_model(network)
     capacity = drivers["wsimod.Arc.capacity"]
@@ -799,6 +811,36 @@ def test_the_total_decayed_state_round_trips():
     mapping = CASES["decay_storage"].build()
     model, _, _ = build_model(read_wsimod_config(mapping), pollutants=True)
     assert model.wsimod_day.state_labels("wsimod.total_decayed") == []
+
+
+def test_the_crop_state_is_carried_and_set_by_label():
+    """D4, D5: a growing surface's crop registers are flat state keys, one row
+    ``(land, "surfaces.<name>")`` each and carried; its crop factor and day's
+    ``et0_coefficient`` are per-day stores; ``initial_state`` sets them by label. A land without
+    a growing surface has no rows."""
+    from noodl.apps.wsimod.land import Land
+
+    network = read_wsimod_config(CASES["growing_no_nitrate"].build())
+    model, _, _ = build_model(network, pollutants=False)
+    day = model.wsimod_day
+    land = day.engine.nodes["land"]
+    paths = ["days_after_sow", "crop_cover", "ground_cover", "crop_factor", "et0_coefficient"]
+    assert [f"surfaces.wheat.{f}" for f in paths] == [
+        x for x in land.store_paths if x.split(".")[-1] in paths
+    ]
+    assert land.store_paths == Land.store_paths_of(
+        [("GrowingSurface", "wheat"), ("ImperviousSurface", "yard")], nutrients=False
+    )
+    assert {f"surfaces.wheat.{f}" for f in paths[:3]} <= set(land.carried_paths)
+    assert not {f"surfaces.wheat.{f}" for f in paths[3:]} & set(land.carried_paths)
+    for key in ("wsimod.days_after_sow", "wsimod.crop_cover", "wsimod.ground_cover"):
+        assert day.state_labels(key) == [("land", "surfaces.wheat")]
+    state = initial_state(model, values={"wsimod.days_after_sow": {("land", "surfaces.wheat"): 7}})
+    assert state["wsimod.days_after_sow"].tolist() == [7.0]
+    _, ctx, engine = next(day.run_days(state, days=1))
+    assert float(engine.nodes["land"].surfaces[0].days_after_sow) == 8.0  # sown: counts on
+    plain, _, _ = build_model(read_wsimod_config(CASES["pervious_only"].build()))
+    assert plain.wsimod_day.state_labels("wsimod.days_after_sow") == []
 
 
 # --- the user Decay* arcs (X29, D15) ------------------------------------------------------------

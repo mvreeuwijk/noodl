@@ -75,12 +75,16 @@ from torch import Tensor
 
 from noodl.apps.wsimod.arcs import ARC_EVENTS, DECAY_ARCS, AltQueueArc, Arc, DecayArcAlt, QueueArc
 from noodl.apps.wsimod.config import WsimodNetwork
+from noodl.apps.wsimod.constants import SURFACE_DEPOSITION, SURFACE_INPUTS
 from noodl.apps.wsimod.engine import Ctx, Engine
+from noodl.apps.wsimod.land import PerviousSurface, month_start
+from noodl.apps.wsimod.nutrient_pool import NUTRIENTS, POOLS
 from noodl.apps.wsimod.structure import (
     check_network,
     forcing_readers,
     orchestration_plan,
     river_order,
+    surface_forcing_readers,
 )
 from noodl.apps.wsimod.tanks import DecayQueueTank, DecayTank
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
@@ -109,6 +113,11 @@ STATE_KEYS = (
     "wsimod.total_decayed",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.nutrient_pool",
+    "wsimod.days_after_sow",
+    "wsimod.crop_cover",
+    "wsimod.ground_cover",
+    "wsimod.surface_climate",
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
@@ -118,12 +127,19 @@ STATE_KEYS = (
 # through the next day's carry-over (land.py:427-439), and a DecayQueueTank's is decay its
 # storage has not lost yet (tanks.py:694), so neither is held
 # a River's lag registers hold temperatures and phosphorus masses already in its storage
+# a growing surface's crop registers hold no water at all, and its nutrient pools are outside
+# WSIMOD's balance boundary (Y11)
 _NOT_HELD = (
     "wsimod.active_storage",
     "wsimod.previous_pulled",
     "wsimod.total_decayed",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.nutrient_pool",
+    "wsimod.days_after_sow",
+    "wsimod.crop_cover",
+    "wsimod.ground_cover",
+    "wsimod.surface_climate",
 )
 # keys of one value per row, not a VQIP
 _FLAT_KEYS = (
@@ -131,12 +147,28 @@ _FLAT_KEYS = (
     "wsimod.arc_queue_since",
     "wsimod.river_temperature_lag",
     "wsimod.river_phosphorus_lag",
+    "wsimod.nutrient_pool",
+    "wsimod.days_after_sow",
+    "wsimod.crop_cover",
+    "wsimod.ground_cover",
+    "wsimod.surface_climate",
 )
 _STATE_UNITS = {
     "wsimod.travel_queue_present": "-",
     "wsimod.arc_queue_since": "d",
     "wsimod.river_temperature_lag": "degC",
     "wsimod.river_phosphorus_lag": "kg",
+    "wsimod.nutrient_pool": "kg",
+    "wsimod.days_after_sow": "d",
+    "wsimod.crop_cover": "-",
+    "wsimod.ground_cover": "-",
+    "wsimod.surface_climate": "m3",
+}
+# a growing surface's carried crop register -> its state key (D4)
+_CROP_REGISTERS = {
+    "days_after_sow": "wsimod.days_after_sow",
+    "crop_cover": "wsimod.crop_cover",
+    "ground_cover": "wsimod.ground_cover",
 }
 # a River's store path -> its register's state key (D8)
 _RIVER_REGISTERS = {
@@ -164,6 +196,26 @@ _STATE_TEXT = {
     "wsimod.river_phosphorus_lag": (
         "every biochemistry River's lagged_total_phosphorus register, max_phosphorus_lag + 1 "
         "slots, slot 0 the oldest, zero-padded at the front (X17)"
+    ),
+    "wsimod.nutrient_pool": (
+        "every growing surface's five nutrient pools (np.py:125-136), with nitrate a pollutant: "
+        "10 rows (pool, nutrient) per surface, the pools in POOLS order, each N then P"
+    ),
+    "wsimod.days_after_sow": (
+        "every growing surface's days since sowing (land.py:1531-1544), -1 for WSIMOD's None "
+        "(unsown; 0 on the sowing day)"
+    ),
+    "wsimod.crop_cover": (
+        "every growing surface's crop cover (land.py:1550-1558), kept outside the season until "
+        "the harvest resets it"
+    ),
+    "wsimod.surface_climate": (
+        "the evaporation and precipitation volumes of every irrigation and garden surface's last "
+        "ihacres (land.py:1029-1044, read by :2352 and :2411), two rows per surface"
+    ),
+    "wsimod.ground_cover": (
+        "every growing surface's ground cover (land.py:1550-1558), kept outside the season "
+        "until the harvest resets it"
     ),
 }
 
@@ -214,6 +266,8 @@ _PARAMETER_UNITS = {
     "surface_coefficient": "-",
     "percolation_coefficient": "-",
     "et0_coefficient": "-",
+    "irrigation_coefficient": "-",
+    "current_surface_area": "m2",
     "ihacres_p": "-",
     "soil_temp_w_prev": "-",
     "soil_temp_w_air": "-",
@@ -232,12 +286,52 @@ _PARAMETER_UNITS = {
     "prodPpar": "kg/m3/d",
     "muptNpar": "kg/m2/d",
     "muptPpar": "kg/m2/d",
+    # a GrowingSurface (land.py:1186-1250, WSIMOD's comments; :1170-1180 for the keywords)
+    "ET_depletion_factor": "-",
+    "rooting_depth": "m",
+    "crop_factor_stages": "-",
+    "crop_cover_max": "-",
+    "ground_cover_max": "-",
+    "satact": "-",
+    "thetaupp": "-",
+    "thetalow": "-",
+    "thetapow": "-",
+    "uptake1": "g/m2/y",
+    "uptake2": "-",
+    "uptake3": "1/d",
+    "erodibility": "g*d/(J*mm)",
+    "sreroexp": "-",
+    "cohesion": "kPa",
+    "slope": "-",
+    "srfilt": "-",
+    "macrofilt": "-",
+    "limpar": "-",
+    "exppar": "-",
+    "hsatINs": "mg/l",
+    "denpar": "-",
+    "adosorption_nr_limit": "-",
+    "kfr": "l/kg",
+    "nfr": "-",
+    "kadsdes": "1/d",
+    "bulk_density": "kg/m3",
+    # a growing surface's NutrientPool, "wsimod.<Class>.nutrient_pool.<p>" (np.py:94-97: "-")
+    "degrhpar": "-",
+    "dishpar": "-",
+    "minfpar": "-",
+    "disfpar": "-",
+    "immobdpar": "-",
+    "fraction_manure_to_dissolved_inorganic": "-",
+    "fraction_dry_n_to_dissolved_inorganic": "-",
 }
 _FORCING_UNITS = {
     "precipitation": "m/d",
     "et0": "m/d",
     "temperature": "degC",
     "flow": "m3/d",
+    # a surface's monthly deposition data (land.py:354-359, "kg/m2/timestep"; D8)
+    **dict.fromkeys(SURFACE_DEPOSITION, "kg/m2/d"),
+    # a growing surface's monthly fertiliser and manure (land.py:1167-1172; with nitrate)
+    **dict.fromkeys(SURFACE_INPUTS, "kg/m2/d"),
 }
 # record_all's surface fields (model.py:1135-1170) -> the surface attribute
 _SURFACE_FIELDS = {
@@ -248,6 +342,10 @@ _SURFACE_FIELDS = {
     "subsurface_r": "subsurface_flow",
     "surface_r": "infiltration_excess",
     "tank_recharge": "tank_recharge",
+    # D23: every non-impervious surface's (model.py:1150), a PerviousSurface's its parameter
+    "et0_coef": "et0_coefficient",
+    # noodl's own (Y32): a growing surface's crop factor of the day, NaN on the others
+    "crop_factor": "crop_factor",
 }
 
 
@@ -267,6 +365,8 @@ class DayRecord:
       key ``"Land"`` (``WsimodDay.surface_names``), NaN where WSIMOD records no such field (an
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
     - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
+      ``parts`` the breakdown of the Land's running terms, ``{"in"|"out": {name: VQIP}}``,
+      which is not part of the balance;
       ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``dropped_arcs`` the part
       of it lost inside a ``QueueArc``, ``storage_start`` the water held in every carried
       store when the day began, ``storage_total`` when it was recorded and ``storage_end``
@@ -291,6 +391,7 @@ class DayRecord:
     surface: dict[str, Tensor]
     surface_quality: Tensor
     terms: dict[str, Tensor]
+    parts: dict[str, dict[str, Tensor]]
     dropped: Tensor
     dropped_arcs: Tensor
     storage_total: Tensor
@@ -526,8 +627,19 @@ class WsimodDay:
                 name, fractions = timearea
                 add(f"wsimod.{spec.cls}.{name}", spec.name, node, name, fractions, "time")
             for surface in getattr(node, "surfaces", ()):
+                columns = surface.driver_columns()  # before the pollutant rule (D16)
                 for name, value in surface.defaults.items():
                     value = _f64(value)
+                    if name in columns:
+                        add(
+                            f"wsimod.{surface.spec.cls}.{name}",
+                            (spec.name, surface.name),
+                            node,
+                            f"surfaces.{surface.name}.{name}",
+                            value,
+                            columns[name],
+                        )
+                        continue
                     if value.ndim == 1 and p.K == 0:
                         continue
                     add(
@@ -553,6 +665,13 @@ class WsimodDay:
                     for t, fraction in fractions.items():
                         row[t] = fraction
                     rows.append(row)
+                d.columns = tuple(range(width))
+                d.template = torch.stack(rows)
+            elif d.columns == "stages":  # D16, Y33: padded with 0 to the longest list
+                width = max(len(stages) for stages in values[key])
+                rows = [torch.zeros(width, dtype=F64) for _ in values[key]]
+                for row, stages in zip(rows, values[key], strict=True):
+                    row[: len(stages)] = stages
                 d.columns = tuple(range(width))
                 d.template = torch.stack(rows)
             else:
@@ -597,6 +716,27 @@ class WsimodDay:
                 forcing=True,
                 unit=_FORCING_UNITS[variable],
                 description=f"the {variable} series of the nodes that read it",
+            )
+        # D8: a surface's monthly data, one value per date from the first of its month
+        by_surface = {(n.name, s.name): s for n in network.nodes for s in n.surfaces}
+        for variable, rows in surface_forcing_readers(network).items():
+            series = [
+                [
+                    by_surface[(land, surface)].data[(variable, month_start(date))]
+                    for land, surface in rows
+                ]
+                for date in dates
+            ]
+            key = f"wsimod.{variable}"
+            drivers[key] = _Driver(
+                key,
+                [(land, f"surfaces.{surface}") for land, surface in rows],
+                None,
+                torch.tensor(series, dtype=F64).reshape(len(dates), len(rows)),
+                targets=[(nodes[land], f"surfaces.{surface}.{variable}") for land, surface in rows],
+                forcing=True,
+                unit=_FORCING_UNITS[variable],
+                description=f"the {variable} of the surfaces that read it, monthly (D8)",
             )
         catchments = readers.get("flow", [])
         if catchments and p.K:
@@ -709,6 +849,20 @@ class WsimodDay:
                     size = stores[path].shape[-1]
                     rows = [(spec.name, i) for i in range(size)]
                     put(_RIVER_REGISTERS[path], node, path, rows, (size,))
+                elif path.startswith("surfaces.") and last == "nutrient_pool":
+                    # D4: flat, 10 rows (pool, nutrient) per growing surface; (5, 2) in the engine
+                    rows = [(spec.name, path, pool, n) for pool in POOLS for n in NUTRIENTS]
+                    put("wsimod.nutrient_pool", node, path, rows, (len(POOLS), len(NUTRIENTS)))
+                elif path.startswith("surfaces.") and last in _CROP_REGISTERS:
+                    # D4: flat, one row per growing surface
+                    surface = path.split(".")[1]
+                    rows = [(spec.name, f"surfaces.{surface}")]
+                    put(_CROP_REGISTERS[last], node, path, rows, ())
+                elif path.startswith("surfaces.") and last == "surface_climate":
+                    # D4: flat, the two flows' volumes per irrigation surface; (2,) in the engine
+                    surface = f"surfaces.{path.split('.')[1]}"
+                    rows = [(spec.name, surface, flow) for flow in ("evaporation", "precipitation")]
+                    put("wsimod.surface_climate", node, path, rows, (2,))
                 elif path.startswith("surfaces.") and last == "total_decayed":
                     # X35: the attribute path, not "surface:<name>" (D7)
                     surface = path.split(".")[1]
@@ -887,7 +1041,7 @@ class WsimodDay:
             else:
                 rows = value[..., slot.start : slot.start + slot.rows]
                 batch = rows.shape[:-1]
-            stored = rows.reshape(*batch, *slot.shape)
+            stored = rows.reshape((*batch, *slot.shape))
             by_element.setdefault(id(slot.element), (slot.element, {}))[1][slot.path] = stored
         for element, stores in by_element.values():
             element.load_stores(stores)
@@ -1158,6 +1312,10 @@ class WsimodDay:
                     surface[f].append(s.tank_recharge)
                 elif attribute in s.flow_fields:
                     surface[f].append(getattr(s, attribute)[..., 0])
+                elif attribute == "et0_coefficient" and isinstance(s, PerviousSurface):
+                    surface[f].append(s.crop_et0_coefficient())  # D23
+                elif attribute == "crop_factor" and s.is_growing:
+                    surface[f].append(s.crop_factor)
                 else:  # WSIMOD records no such field for this surface (model.py:1155-1167)
                     surface[f].append(nan)
             quality.append(s.storage[..., 1:])
@@ -1170,6 +1328,7 @@ class WsimodDay:
             surface={f: stack(v, ()) for f, v in surface.items()},
             surface_quality=stack(quality, (p.K,)),
             terms=dict(ctx.terms),
+            parts=self._parts(ctx),
             dropped=self._additive(ctx.dropped, shape),
             dropped_arcs=self._additive(ctx.dropped_arcs, shape),
             storage_total=held,
@@ -1179,6 +1338,11 @@ class WsimodDay:
             maxiter=dict(ctx.maxiter),
             decisions=list(ctx.decisions) if ctx.record_decisions else None,
         )
+
+    @staticmethod
+    def _parts(ctx: Ctx) -> dict[str, dict[str, Tensor]]:
+        """A copy of ``ctx.parts``."""
+        return {direction: dict(table) for direction, table in ctx.parts.items()}
 
     def _additive(self, vqip: Tensor, shape: torch.Size) -> Tensor:
         """``vqip``'s volume and additive columns at the batch shape, ``(..., 1 + K_add)``."""
@@ -1220,6 +1384,7 @@ class WsimodDay:
         record = self.last_record
         record.storage_end = self._held(shape, {})
         record.terms = dict(ctx.terms)
+        record.parts = self._parts(ctx)
         record.dropped = self._additive(ctx.dropped, shape)
         record.dropped_arcs = self._additive(ctx.dropped_arcs, shape)
         record.events = self._events(ctx)

@@ -71,6 +71,39 @@ def test_the_class_schemas_match_wsimods_constructors():
         assert name not in NODE_SCHEMAS | SURFACE_SCHEMAS | ARC_SCHEMAS
 
 
+def test_the_surface_kinds_follow_wsimods_class_hierarchy():
+    """M4: ``ClassSchema.growing`` and ``.garden`` are WSIMOD's ``issubclass`` of
+    ``GrowingSurface`` and ``GardenSurface``, and agree with the flags of noodl's surface
+    classes (``is_growing``, ``is_garden``, ``is_irrigated``), which every ``Surface`` declares."""
+    pytest.importorskip("wsimod")
+    from wsimod.nodes import land
+
+    import noodl.apps.wsimod.growing  # noqa: F401  (registers the growing classes)
+    from noodl.apps.wsimod.land import SURFACE_CLASSES
+
+    assert set(SURFACE_CLASSES) == set(SURFACE_SCHEMAS)
+    for name, schema in SURFACE_SCHEMAS.items():
+        theirs = vars(land)[name]
+        assert schema.growing == issubclass(theirs, land.GrowingSurface), name
+        assert schema.garden == issubclass(theirs, land.GardenSurface), name
+        ours = SURFACE_CLASSES[name]
+        assert ours.is_growing == schema.growing, name
+        assert ours.is_garden == schema.garden, name
+        assert ours.is_irrigated == issubclass(theirs, land.IrrigationSurface), name
+    assert {n for n, s in SURFACE_SCHEMAS.items() if s.growing} == {
+        "GrowingSurface",
+        "IrrigationSurface",
+        "GardenSurface",
+        "VariableAreaSurface",
+    }
+
+
+def test_out_of_scope_holds_only_the_enfield_sewer():
+    """3c ports every surface class (Task 15); only the node WSIMOD cannot run is refused (W4)."""
+    assert set(OUT_OF_SCOPE) == {"EnfieldFoulSewer"}
+    assert "VariableAreaSurface" in SURFACE_SCHEMAS
+
+
 def test_the_renamed_types_are_the_names_wsimod_gives_its_instances():
     pytest.importorskip("wsimod")
     from tests.verification._wsimod_reference import wsimod_model
@@ -412,7 +445,6 @@ REFUSALS = [
     (_with(dates=["2000-01-01 12:00"]), "12:00"),
     (_with(pollutants=["a"], additive_pollutants=["b"], non_additive_pollutants=[]), "'b'"),
     (_node(type_="EnfieldFoulSewer"), "EnfieldFoulSewer"),
-    (_node(type_="Land", surfaces=[{"type_": "GrowingSurface"}]), "3c"),
     (_node(type_="Land", surfaces=[{"type_": "PerviousSurface", "capacity": 1}]), "capacity"),
     (_node(type_="Land", surfaces=[{"type_": "ImperviousSurface", "depth": 1}]), "depth"),
     (_node(type_="Widget"), "Widget"),
@@ -444,12 +476,15 @@ REFUSALS = [
         "filename",
     ),
     (_override(node={"type_": "Catchment", "name": "a", "data_input_dict": {}}), "data_input_dict"),
-    (
-        _override(
-            node={"type_": "Land", "name": "land", "surfaces": {"g": {"data_input_dict": "x.csv"}}}
-        ),
-        "data_input_dict",
-    ),
+    *[
+        (
+            _override(
+                node={"type_": "Land", "name": "land", "surfaces": {"g": {"data_input_dict": v}}}
+            ),
+            "data_input_dict",
+        )
+        for v in (None, 3, "missing.csv")
+    ],
     (
         _override(node={"type_": "Land", "name": "land", "surfaces": {"g": {"capacity": 1}}}),
         "capacity",

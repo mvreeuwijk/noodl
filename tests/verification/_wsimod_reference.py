@@ -69,8 +69,10 @@ __all__ = [
     "capture_events",
     "capture_node_calls",
     "extract_topology",
+    "initial_land_stores",
     "pad_register",
     "record_wsimod_run",
+    "reference_of_rows",
     "reset_wsimod_globals",
     "wsimod_model",
     "wsimod_reference",
@@ -84,6 +86,7 @@ _SURFACE_FIELDS = (
     ("subsurface_r", "subsurface_r"),
     ("surface_r", "surface_r"),
     ("tank_recharge", "tank_recharge"),
+    ("et0_coef", "et0_coef"),  # every non-impervious surface's (model.py:1150, D23)
 )
 
 
@@ -270,6 +273,34 @@ def _restore_constructor_defaults() -> None:
         function.__kwdefaults__ = copy.deepcopy(kwdefaults)
 
 
+_CONSTANT_LISTS = ("POLLUTANTS", "ADDITIVE_POLLUTANTS", "NON_ADDITIVE_POLLUTANTS")
+
+
+def _snapshot_constants() -> list:
+    """The pollutant lists of ``wsimod.core.constants`` as ``(name, list object, contents)``,
+    then ``("FLOAT_ACCURACY", value, None)`` (M7); empty without WSIMOD. A test may rebind a name,
+    mutate its list or set ``FLOAT_ACCURACY`` (``Model.load``, ``model.py:241``)."""
+    try:
+        from wsimod.core import constants
+    except ImportError:
+        return []
+    lists = [(n, getattr(constants, n), list(getattr(constants, n))) for n in _CONSTANT_LISTS]
+    return [*lists, ("FLOAT_ACCURACY", constants.FLOAT_ACCURACY, None)]
+
+
+def _restore_constants(snapshot: list) -> None:
+    """Put the snapshot back: the original list objects (other modules hold references to them)
+    rebound to the names and refilled in place, and ``FLOAT_ACCURACY`` rebound to its value."""
+    if not snapshot:
+        return
+    from wsimod.core import constants
+
+    for name, original, contents in snapshot:
+        if contents is not None:
+            original[:] = contents
+        setattr(constants, name, original)
+
+
 def wsimod_model(source: Path | Mapping, *, config_name: str = "config.yml"):
     """A WSIMOD `Model` built from a configuration directory or a mapping, from default globals.
 
@@ -319,7 +350,13 @@ def wsimod_model(source: Path | Mapping, *, config_name: str = "config.yml"):
         model.dates = [to_datetime(x) for x in data["dates"]]
     model.add_nodes(nodes)
     model.add_arcs(arcs)
-    model.add_overrides(data.get("overrides", {}))
+    overrides = data.get("overrides") or {}
+    entries = overrides.get("nodes") or {}
+    for entry in entries.values() if isinstance(entries, Mapping) else entries:
+        for override in (entry.get("surfaces") or {}).values():  # land.py:187
+            if isinstance(override.get("data_input_dict"), Mapping):
+                override["data_input_dict"] = keyed(override["data_input_dict"])
+    model.add_overrides(overrides)
     apply_patches(model)
     return model
 
@@ -340,6 +377,10 @@ class WsimodReference:
     surface: dict[str, torch.Tensor]  # field -> (T, n_surfaces), NaN where not recorded
     surface_quality: torch.Tensor  # (T, n_surfaces, K)
     printed: list[str] = field(default_factory=list)
+    additive: tuple[str, ...] = ()  # ``constants.ADDITIVE_POLLUTANTS`` of the run
+    # D12: each Land's stores before the first day, its surfaces' then its three residence
+    # tanks' (``land.py:158-162``), as ``{pollutant: storage}`` (the ``S`` of day 0)
+    initial_land_stores: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
 
 def _tensor(rows, key, n_days, width):
@@ -352,19 +393,52 @@ def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
     from wsimod.core import constants
 
     dates = list(model.dates)[:days]
-    pollutants = tuple(constants.POLLUTANTS)
+    initial = initial_land_stores(model)
     out = io.StringIO()
     with redirect_stdout(out):
         flows, tanks, _, surfaces = model.run(dates=dates, verbose=True, record_all=True)
+    return reference_of_rows(
+        dates,
+        flows,
+        tanks,
+        surfaces,
+        out.getvalue().splitlines(),
+        tuple(constants.POLLUTANTS),
+        initial=initial,
+    )
+
+
+def initial_land_stores(model) -> dict[str, list[dict[str, float]]]:
+    """D12: every Land's stores as they stand (before the run), its surfaces' then its
+    ``surface_runoff``, ``subsurface_runoff`` and ``percolation`` tanks' (``land.py:158-162``,
+    the ``mass_balance_ds`` of the node check), each a copy of the ``storage`` VQIP."""
+    stores = {}
+    for name, node in model.nodes_type.get("Land", {}).items():
+        tanks = [s.storage for s in node.surfaces]
+        tanks += [
+            t.storage for t in (node.surface_runoff, node.subsurface_runoff, node.percolation)
+        ]
+        stores[name] = [dict(t) for t in tanks]
+    return stores
+
+
+def reference_of_rows(
+    dates, flows, tanks, surfaces, printed, pollutants, *, initial=None
+) -> WsimodReference:
+    """The :class:`WsimodReference` of ``record_all``'s rows (``model.py:1075-1170``) over
+    ``dates``; with no date it holds no element (a run that crashed on its first day).
+    ``initial`` is :func:`initial_land_stores` of the model before its first day."""
+    from wsimod.core import constants
+
     n_days = len(dates)
 
     def quality(rows, width):
         values = [[row[p] for p in pollutants] for row in rows]
         return torch.tensor(values, dtype=torch.float64).reshape(n_days, width, len(pollutants))
 
-    n_arcs = len(flows) // n_days
-    n_tanks = len(tanks) // n_days
-    n_surfaces = len(surfaces) // n_days
+    n_arcs = len(flows) // max(n_days, 1)
+    n_tanks = len(tanks) // max(n_days, 1)
+    n_surfaces = len(surfaces) // max(n_days, 1)
     return WsimodReference(
         pollutants=pollutants,
         dates=[str(d) for d in dates],
@@ -377,7 +451,9 @@ def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
         surface_names=[(row["node"], row["surface"]) for row in surfaces[:n_surfaces]],
         surface={name: _tensor(surfaces, key, n_days, n_surfaces) for name, key in _SURFACE_FIELDS},
         surface_quality=quality(surfaces, n_surfaces),
-        printed=out.getvalue().splitlines(),
+        printed=list(printed),
+        additive=tuple(constants.ADDITIVE_POLLUTANTS),
+        initial_land_stores={} if initial is None else initial,
     )
 
 
@@ -446,6 +522,25 @@ def pad_register(values: Sequence[float], size: int) -> torch.Tensor:
     return register
 
 
+DEPOSITION_VARIABLES = ("nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet")
+# a growing surface's fertiliser and manure, read with nitrate (land.py:1649-1710)
+INPUT_VARIABLES = (
+    "nhx-fertiliser",
+    "noy-fertiliser",
+    "srp-fertiliser",
+    "nhx-manure",
+    "noy-manure",
+    "srp-manure",
+)
+
+
+def _runs_nutrients() -> bool:
+    """WSIMOD's nutrient switch, ``"nitrate" in constants.POLLUTANTS`` (``land.py:1276``)."""
+    from wsimod.core import constants
+
+    return "nitrate" in constants.POLLUTANTS
+
+
 def _runs_biochemistry(node) -> bool:
     """Whether ``node`` is a WSIMOD ``River`` whose ``calculate_discharge`` runs the
     biochemistry (``"nitrate" in constants.POLLUTANTS``, ``storage.py:919``)."""
@@ -465,13 +560,19 @@ _ARC_METHODS = {  # the end of the arc that makes the call (arcs.py:112-228)
 def _store_paths(node) -> tuple[str, ...]:
     """``Node.store_paths`` of the noodl class of ``node``. ``__qualname__`` survives the
     renames that set ``__class__.__name__`` (``storage.py:294``, ``:1043``, ``demand.py:214``)."""
+    from wsimod.core import constants
+
     from noodl.apps.wsimod.engine import _register_all
+    from noodl.apps.wsimod.land import runs_nutrients
     from noodl.apps.wsimod.node import NODE_CLASSES
 
     _register_all()
     cls = NODE_CLASSES[type(node).__qualname__]
-    if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
-        return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
+    if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces (D5)
+        return cls.store_paths_of(
+            [(type(s).__name__, s.surface) for s in node.surfaces],
+            nutrients=runs_nutrients(constants.POLLUTANTS),
+        )
     tank = type(getattr(node, "tank", None)).__name__
     paths = cls.store_paths
     if tank == "DecayTank":  # D8: a per-day store
@@ -486,7 +587,19 @@ def _store_paths(node) -> tuple[str, ...]:
 def _wsimod_store(node, path: str):
     """The WSIMOD value of a noodl store path: an attribute, except that noodl's dense queue
     (``<tank>.internal_arc.register``/``.present``) is WSIMOD's ``queue`` dict (the rows, by
-    time) and its key set (``tanks.py:481-486``, ``arcs.py:567``)."""
+    time) and its key set (``tanks.py:481-486``, ``arcs.py:567``), and a growing surface's
+    ``days_after_sow`` of ``None`` (unsown) is noodl's ``-1`` (D6), and its ``nutrient_pool`` is
+    the ``(5, 2)`` list of its five stores' ``N`` and ``P`` (D4), and an irrigation surface's
+    ``surface_climate`` the volumes ``[evaporation, precipitation]`` (D5)."""
+    if path.endswith(".days_after_sow"):
+        value = _attribute(node, path)
+        return -1 if value is None else value
+    if path.endswith(".surface_climate"):  # the two flows' volumes (D5)
+        surface = _attribute(node, path.rsplit(".", 1)[0])
+        return [surface.evaporation["volume"], surface.precipitation["volume"]]
+    if path.endswith(".nutrient_pool"):  # the five stores, (5, 2): pools in order, N then P
+        pools = _attribute(node, path).pools
+        return [[pool.storage[n] for n in "NP"] for pool in pools]
     for suffix, make in (
         (".internal_arc.register", lambda queue: queue),
         (".internal_arc.present", lambda queue: sorted(queue)),
@@ -507,6 +620,30 @@ def _attribute(obj, path: str):
     return obj
 
 
+def call_forcing(node) -> dict[str, float]:
+    """The day's forcing the call reads: a biochemistry River's
+    ``get_data_input("temperature")`` (``storage.py:750``)."""
+    if _runs_biochemistry(node):
+        return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
+    if hasattr(node, "surfaces") and hasattr(node, "monthyear"):
+        # a Land: its month (model.py:997) and each deposition surface's monthly value
+        # (get_data_input_surface, land.py:462-471)
+        out: dict[str, object] = {"forcing.monthyear": str(node.monthyear)}
+        for surface in node.surfaces:
+            read = ()
+            # the inflows were fixed at construction (land.py:375-382): an override that adds
+            # ``nhx-dry`` builds no deposition function (L15), so nothing is read
+            if any(f.__name__ == "atmospheric_deposition" for f in surface.inflows):
+                read = DEPOSITION_VARIABLES
+            if _runs_nutrients() and hasattr(surface, "nutrient_pool"):
+                read = (*read, *INPUT_VARIABLES)
+            for variable in read:
+                value = surface.data_input_dict[(variable, node.monthyear)]
+                out[f"forcing.surfaces.{surface.surface}.{variable}"] = value
+        return out
+    return {}
+
+
 @contextmanager
 def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[NodeCall]]]:
     """Record every call into the named nodes while ``model`` runs (spec, Verification 1).
@@ -519,9 +656,16 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     records its two lag lists and ``bio_in``/``bio_out`` among the stores (as WSIMOD's lists and
     dicts; :func:`pad_register` makes a register of a list), and the day's
     ``data_input_dict[("temperature", t)]`` as ``pre["forcing.temperature"]``, so the replay
-    can check it binds the temperature WSIMOD read (``storage.py:750``). A call into a target
-    that is already in a captured call is refused (D22); the error is raised again at exit, because
-    WSIMOD's ``query_handler`` swallows exceptions and retries (``nodes.py:335-343``).
+    can check it binds the temperature WSIMOD read (``storage.py:750``). A ``Land``'s ``monthyear``
+    and each deposition surface's ``(variable, monthyear)`` values (with ``nitrate``, a growing
+    surface's fertiliser and manure too) are ``pre["forcing.monthyear"]`` and
+    ``pre["forcing.surfaces.<surface>.<variable>"]``, which the replay checks the same way. A
+    growing surface's ``nutrient_pool`` store is its five pools' ``(5, 2)`` ``N`` and ``P``; its
+    pool's two factors (``nutrient_pool.<factor>``), ``crop_factor`` and ``et0_coefficient`` are
+    stores like any other.
+    A call into a target that is already in a captured call is refused (D22); the error is
+    raised again at exit, because WSIMOD's ``query_handler`` swallows exceptions and retries
+    (``nodes.py:335-343``).
     Everything is restored on exit.
     """
     targets = {name: model.nodes[name] for name in nodes}
@@ -537,13 +681,6 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
             out[f"arcs.{arc.name}.vqip_in"] = copy.deepcopy(arc.vqip_in)
             out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
         return out
-
-    def forcing(node) -> dict[str, float]:
-        """The day's forcing the call reads: a biochemistry River's
-        ``get_data_input("temperature")`` (``storage.py:750``)."""
-        if _runs_biochemistry(node):
-            return {"forcing.temperature": node.data_input_dict[("temperature", node.t)]}
-        return {}
 
     def install(obj, attr: str, make) -> None:
         own = attr in vars(obj)
@@ -573,7 +710,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                     vqip=copy.deepcopy(vqip),
                     tag=copy.deepcopy(tag),
                     reply=None,
-                    pre={**snapshot(node), **forcing(node)},
+                    pre={**snapshot(node), **call_forcing(node)},
                     post={},
                     arc_calls=[],
                 )

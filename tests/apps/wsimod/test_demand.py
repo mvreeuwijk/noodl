@@ -271,6 +271,40 @@ def test_garden_demand_is_the_land_capacity_times_the_gardening_efficiency():
     assert ResidentialDemand.parameter_defaults["gardening_efficiency"] == 0.6 * 0.7
 
 
+def test_the_garden_demand_reaches_a_garden_surface_at_zero_degrees():
+    """Task 14 (``land.py:2396-2437``, L19): with a ``GardenSurface`` the ``Land`` answers
+    ``max(E - P, 0)`` of its last day's flows, the demand pulls that times
+    ``gardening_efficiency`` from its supply and pushes it with the garden tag; the surface takes
+    it by force, at 0 degC, and cools. A ``NonResidentialDemand`` asks for none."""
+    from noodl.apps.wsimod.config import SurfaceSpec
+
+    spec = SurfaceSpec("g", "GardenSurface", {"area": 100.0, "rooting_depth": 0.5})
+    land = make_node(NodeSpec("land", "Land", "Land", {}, {}, [spec]), None, PP)
+    garden = land.surfaces[0]
+    garden.storage = PP.to_vqip({"volume": 1.0, "temperature": 10.0})
+    garden.evaporation = PP.to_vqip({"volume": 10.0})
+    garden.precipitation = PP.to_vqip({"volume": 2.0})
+    supply = StoreNode("supply", PP, storage=PP.to_vqip({"volume": 50.0, "temperature": 12.0}))
+    homes = make(
+        "ResidentialDemand", "homes", PP, population=10.0, per_capita=0.1, gardening_efficiency=0.5
+    )
+    homes.bind({"temperature": torch.tensor(10.0)})
+    for a, b in (("supply", "homes"), ("homes", "land")):
+        spec_ = ArcSpec(f"{a}_to_{b}", "Arc", a, b, capacity=UNBOUNDED_CAPACITY)
+        nodes = {"supply": supply, "homes": homes, "land": land}
+        _NEW_ARCS.append(ARC_CLASSES["Arc"](spec_, nodes[a], nodes[b], PP))
+    day(homes, land, supply, pollutants=PP)
+    homes.create_demand(active=TRUE)
+    taken = 8.0 * 0.5  # (E - P) x gardening_efficiency
+    assert float(garden.storage[0]) == 1.0 + taken
+    cooled = float(garden.storage[PP.column("temperature")])
+    assert cooled < 10.0 and cooled == pytest.approx(10.0 * 1.0 / (1.0 + taken), rel=1e-12)
+    assert float(supply.storage[0]) == 50.0 - (10 * 0.1 + taken)  # the house water too
+
+    factory = make("NonResidentialDemand", "factory", PP)
+    assert not hasattr(factory, "get_garden_demand")  # demand.py:250 is ResidentialDemand's
+
+
 def test_a_residential_demand_is_batched_over_its_parameters():
     """Two instances, two populations: each equals its own single run."""
     population = torch.tensor([100.0, 40.0], dtype=torch.float64)

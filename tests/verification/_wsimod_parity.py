@@ -15,7 +15,8 @@ from __future__ import annotations
 import io
 import re
 import types
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 
 import torch
@@ -23,7 +24,13 @@ from torch import Tensor
 
 from noodl.apps.wsimod import WsimodResults
 from tests.verification import _wsimod_reference
-from tests.verification._wsimod_reference import WsimodReference, record_wsimod_run, wsimod_model
+from tests.verification._wsimod_reference import (
+    WsimodReference,
+    initial_land_stores,
+    record_wsimod_run,
+    reference_of_rows,
+    wsimod_model,
+)
 
 __all__ = [
     "ADMISSION_MARGIN",
@@ -31,11 +38,18 @@ __all__ = [
     "Admission",
     "assert_matches_wsimod",
     "mass_balance_worst",
+    "store_bounded_lines",
     "wsimod_reference_by_day",
+    "wsimod_until_crash",
+    "wsimod_until_crash_by_day",
 ]
 
 BOUND = 1e-12
 ADMISSION_MARGIN = 1e-9
+EPSILON = 2.220446049250313e-16  # D12: the double's machine epsilon, 2**-52
+# D12: the three residence tanks a Land's node check counts with its surfaces (land.py:158-162)
+_LAND_TANKS = ("surface_runoff", "subsurface_runoff", "percolation")
+_NO_LANDS: Mapping[str, float] = types.MappingProxyType({})
 
 _DEFICIT = re.compile(r"demand deficit of \S+ at (\S+) on (.+)")
 _MAXITER = re.compile(r"Maxiter reached in (\S+) at (.+)")
@@ -66,6 +80,11 @@ _UNDATED = {
     "ponded_water_cant_reenter": re.compile(r"ponded water cant reenter"),
     "more_backflow_than_vqip": re.compile(r"more backflow than vqip\.\.\."),
     "inaccurate_evaporation": re.compile(r"inaccurate evaporation calculation of \S+"),
+    "erosion_pool_short": re.compile(r"weird nutrients"),  # land.py:2054
+    # land.py:2193
+    "adsorption_shortcut": re.compile(
+        r"Warning: soil partP <=0\. Freundlich will give error, take shortcut\."
+    ),
 }
 # WSIMOD's deny handlers (``nodes.py:560-608``) print and return a zero reply; noodl's are silent
 # and record nothing, the reply being all that has an effect (and replies are compared bitwise).
@@ -127,6 +146,7 @@ def assert_matches_wsimod(
     admitted: Sequence[Admission] = (),
     print_days: Sequence[int] | None = None,
     expected_mass_balance_prints: Sequence[str] = (),
+    store_bounded_prints: Mapping[str, float] = _NO_LANDS,
 ) -> dict:
     """Assert noodl's run equals WSIMOD's within ``BOUND * scale`` on every day (module text).
 
@@ -154,6 +174,12 @@ def assert_matches_wsimod(
     WSIMOD's assigned ``bio_in``/``bio_out`` drop the first call's terms. Those nodes' pollutant
     lines are asserted present on every day (``print_days`` is required) and are left out of the
     residual comparison; a volume line of theirs, and every other print, is checked as before.
+
+    ``store_bounded_prints`` (D12, Y41) maps a Land's name to ``c``: WSIMOD's round-off lines
+    ``mass balance error for <p> of x in <land>``, ``p`` an additive pollutant, are admitted
+    where ``|x| <= c * EPSILON * S`` (:func:`store_bounded_lines`; ``print_days`` is required);
+    one beyond it fails, and a volume line of that land is checked as before. An unmapped
+    land's pollutant line fails: that is how zero such lines are asserted.
 
     Returns ``{"worst": the largest absolute difference, "scale": the scale of its series,
     "admissions": the admissions used}``.
@@ -229,7 +255,14 @@ def assert_matches_wsimod(
 
     names = diagnostics["node_names"]
     _check_prints(
-        ours, theirs, diagnostics, case, names, print_days, tuple(expected_mass_balance_prints)
+        ours,
+        theirs,
+        diagnostics,
+        case,
+        names,
+        print_days,
+        tuple(expected_mass_balance_prints),
+        store_bounded_prints,
     )
     return {"worst": worst, "scale": worst_scale, "admissions": used}
 
@@ -242,6 +275,7 @@ def _check_prints(
     names,
     print_days: Sequence[int] | None,
     expected_mass_balance_prints: tuple[str, ...] = (),
+    store_bounded_prints: Mapping[str, float] = _NO_LANDS,
 ):
     """Every print of WSIMOD is one of the kinds above and agrees with noodl's records (module
     text, D13); an unknown print is refused.
@@ -341,11 +375,24 @@ def _check_prints(
     if expected_mass_balance_prints and print_days is None:
         raise ValueError(f"{case}: expected_mass_balance_prints needs print_days (D17)")
     expected_days: dict[str, set[int]] = {n: set() for n in expected_mass_balance_prints}
+    if store_bounded_prints:
+        if print_days is None:
+            raise ValueError(f"{case}: store_bounded_prints needs print_days (D12)")
+        for land, c in store_bounded_prints.items():
+            for line in store_bounded_lines(theirs, print_days, land):
+                if abs(line["x"]) > c * EPSILON * line["S"]:
+                    raise AssertionError(
+                        f"{case}: WSIMOD printed {line['line']!r} on day {line['day']}: |x| is "
+                        f"{abs(line['x']) / (EPSILON * line['S']):.3g} eps S (S "
+                        f"{line['S']:.6g}), beyond the store bound c = {c:g} (D12)"
+                    )
     for k, line in enumerate(printed):
         if m := _MASS_BALANCE.fullmatch(line):
             if m.group(3) in expected_days and m.group(1) != "volume":
                 expected_days[m.group(3)].add(print_days[k])  # D17: a pollutant line
                 continue
+            if m.group(3) in store_bounded_prints and m.group(1) != "volume":
+                continue  # D12: admitted above, within the store bound
             error_days.append(-1 if print_days is None else print_days[k])
             if m.group(1) != "volume" or m.group(3) not in names:
                 raise AssertionError(f"{case}: WSIMOD printed {line!r}")
@@ -373,6 +420,51 @@ def _check_prints(
         )
 
 
+def store_bounded_lines(
+    theirs: WsimodReference, print_days: Sequence[int], land: str
+) -> list[dict]:
+    """D12: WSIMOD's ``mass balance error for <p> of x in <land>`` lines with ``p`` not
+    ``volume``, each as ``{"line", "day", "pollutant", "x", "S"}``. ``x`` is the printed
+    ``in_ - ds_ - out_`` (``core.py:420-427``); ``S`` is the largest ``|storage|`` of ``p`` over
+    ``land``'s surfaces and its three residence tanks (``ds_`` sums both, ``land.py:158-162``) at
+    the end of the line's day and of the day before: WSIMOD's recorded ``surface_quality`` and
+    ``tank_quality`` rows, and ``theirs.initial_land_stores`` before day 0. A ``p`` that is not
+    one of the run's additive pollutants fails (WSIMOD's check prints only those)."""
+    surfaces = [k for k, (node, _) in enumerate(theirs.surface_names) if node == land]
+    tanks = [k for k, (node, prop) in enumerate(theirs.tank_names)
+             if node == land and prop in _LAND_TANKS]  # fmt: skip
+    if len(tanks) != len(_LAND_TANKS):
+        raise AssertionError(f"{land}: not a Land with its three residence tanks recorded")
+    lines = []
+    for line, day in zip(theirs.printed, print_days, strict=True):
+        m = _MASS_BALANCE.fullmatch(line)
+        if m is None or m.group(3) != land or m.group(1) == "volume":
+            continue
+        pollutant = m.group(1)
+        if pollutant not in theirs.additive:
+            raise AssertionError(f"{land}: {line!r} names no additive pollutant of the run")
+        j = theirs.pollutants.index(pollutant)
+        stores = []
+        for d in (day, day - 1):
+            if d >= 0:
+                stores += [float(theirs.surface_quality[d, k, j]) for k in surfaces]
+                stores += [float(theirs.tank_quality[d, k, j]) for k in tanks]
+            elif land in theirs.initial_land_stores:
+                stores += [tank[pollutant] for tank in theirs.initial_land_stores[land]]
+            else:
+                raise ValueError(f"{land}: no initial stores recorded for day 0's S (D12)")
+        lines.append(
+            {
+                "line": line,
+                "day": day,
+                "pollutant": pollutant,
+                "x": float(m.group(2)),
+                "S": max(abs(v) for v in stores),
+            }
+        )
+    return lines
+
+
 def mass_balance_worst(ours: WsimodResults) -> float:
     """The largest daily residual of the system balance in units of its column's scale: the
     largest magnitude of the inflow, outflow and storage change over the run (1 for a column
@@ -398,6 +490,56 @@ class _DayTaggedStdout(io.StringIO):
         *complete, self._pending = self._pending.split("\n")
         self._lines.extend((self._days[0], line) for line in complete)
         return super().write(text)
+
+
+def wsimod_until_crash(mapping) -> tuple[WsimodReference, BaseException, int]:
+    """D13: WSIMOD's own run of ``mapping`` (``wsimod_model``, nothing patched), one day at a
+    time (``Model.run`` over one date continues from the state the last one left), until it
+    raises. Returns the record of the days before the crash day (``reference_of_rows``; empty
+    when it crashes on day 0), the exception and the crash day. A run that never raises fails."""
+    reference, error, day, _ = wsimod_until_crash_by_day(mapping)
+    return reference, error, day
+
+
+def wsimod_until_crash_by_day(
+    mapping,
+) -> tuple[WsimodReference, BaseException, int, list[int]]:
+    """:func:`wsimod_until_crash` plus the day of each line of the reference's ``printed``
+    (``print_days`` of :func:`assert_matches_wsimod`): each day's run prints into its own
+    buffer, so a line's day is the run that printed it."""
+    from wsimod.core import constants
+
+    model = wsimod_model(mapping)
+    initial = initial_land_stores(model)
+    dates = list(model.dates)
+    flows: list = []
+    tanks: list = []
+    surfaces: list = []
+    printed: list[str] = []
+    print_days: list[int] = []
+    for day, date in enumerate(dates):
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                f, t, _, s = model.run(dates=[date], verbose=True, record_all=True)
+        except Exception as error:  # the crash is the result
+            reference = reference_of_rows(
+                dates[:day],
+                flows,
+                tanks,
+                surfaces,
+                printed,
+                tuple(constants.POLLUTANTS),
+                initial=initial,
+            )
+            return reference, error, day, print_days
+        flows += f
+        tanks += t
+        surfaces += s
+        lines = out.getvalue().splitlines()
+        printed += lines
+        print_days += [day] * len(lines)
+    raise AssertionError(f"WSIMOD ran all {len(dates)} days without raising (D13)")
 
 
 def wsimod_reference_by_day(

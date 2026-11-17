@@ -225,6 +225,33 @@ def test_the_replay_notices_a_difference():
         replay(network, "junction", calls, scale=spec.scale)
 
 
+@pytest.mark.parametrize("what", ["temperature_dependence_factor", "nutrient_pool", "crop_factor"])
+def test_the_growing_replay_compares_the_pool_its_factors_and_the_crop_factor(what):
+    """The land replay of a nitrate growing case (``growing_spring``) loads and compares the
+    pool (D4), its two factors (per-day stores, set every day, ``land.py:1813-1856``) and the
+    crop factor: the capture holds the factors with more than one value each, and a one-ulp
+    change to one of them in one call's ``post`` fails the replay."""
+    spec = CASES["growing_spring"]
+    calls = captured("growing_spring")["land"]
+    prefix = "surfaces.wheat.nutrient_pool."
+    for factor in ("temperature_dependence_factor", "soil_moisture_dependence_factor"):
+        assert len({c.post[prefix + factor] for c in calls}) > 10, factor
+    network = read_wsimod_config(spec.build())
+    day = [copy.deepcopy(c) for c in calls if c.day == 250]
+    run = next(c for c in day if c.method == "run")
+    assert replay(network, "land", day, scale=spec.scale) == 0.0
+    if what == "nutrient_pool":
+        pool = run.post["surfaces.wheat.nutrient_pool"]
+        pool[2][0] = math.nextafter(pool[2][0], math.inf)  # DI.N
+    elif what == "crop_factor":
+        key = "surfaces.wheat.crop_factor"
+        run.post[key] = math.nextafter(run.post[key], math.inf)
+    else:
+        run.post[prefix + what] = math.nextafter(run.post[prefix + what], math.inf)
+    with pytest.raises(Mismatch, match=r"day 250, run"):
+        replay(network, "land", day, scale=spec.scale)
+
+
 def test_maxiter_pull_reaches_maxiter_and_noodl_says_so_on_the_same_days():
     """W38: the pull path and the ``MAXITER`` exit, live. WSIMOD's ``pull_distributed`` into the
     reservoir ends at ``MAXITER`` every day (it prints "Maxiter reached"); noodl's
@@ -585,6 +612,31 @@ def test_the_land_cases_reach_the_branches_they_are_built_for():
     garden = [c for c in gardens if c.tag == ("Demand", "Garden")]
     assert [c.method for c in garden] == ["push_check"] * 2 * CASES["residential_with_land"].days
     assert all(c.vqip is None and c.reply["volume"] == 0 for c in garden)
+    # garden (Task 14): the check is asked twice a day (demand.py:262, nodes.py:444). The first
+    # days answer 0 (the climate of day 0, then wet days); then the previous day's deficit. The
+    # push carries the garden water at 0 degC (L19, demand.py:273-287) and cools the soil
+    garden = [c for c in captured("garden")["gardens"] if c.tag == ("Demand", "Garden")]
+    checks = [c for c in garden if c.method == "push_check"]
+    pushes = [c for c in garden if c.method == "push_set"]
+    assert [c.reply["volume"] for c in checks[:4]] == [0.0] * 4
+    assert any(c.reply["volume"] > 0 for c in checks) and any(
+        c.reply["volume"] == 0 for c in checks
+    )
+    assert pushes and all(p.vqip["volume"] > 0 and p.vqip["temperature"] == 0.0 for p in pushes)
+    assert all(p.reply["volume"] == 0 for p in pushes)  # forced in: nothing is returned
+    # the land answers from g2 only: the push is the check's reply times gardening_efficiency
+    for push in pushes:
+        asked = [c for c in checks if c.day == push.day][0].reply["volume"]
+        assert push.vqip["volume"] == pytest.approx(asked * (0.6 * 0.7), rel=1e-12)
+        before, after = push.pre["surfaces.g2.storage"], push.post["surfaces.g2.storage"]
+        assert after["volume"] == before["volume"] + push.vqip["volume"]
+        assert after["temperature"] < before["temperature"]
+        assert push.post["surfaces.g1.storage"] == push.pre["surfaces.g1.storage"]
+    # the land without a garden surface answers 0 every time
+    plain = [c for c in captured("garden")["plain"] if c.tag == ("Demand", "Garden")]
+    assert plain and {c.method for c in plain} <= {"push_check", "push_set"}
+    assert all(c.reply["volume"] == 0 for c in plain)  # the empty answer of land.py:93-94
+    assert all(c.post["surfaces.patch.storage"] == c.pre["surfaces.patch.storage"] for c in plain)
     # temperature_blending: the surfaces' temperature changes from day to day
     suburb = [c for c in captured("temperature_blending")["suburb"] if c.method == "run"]
     assert len({c.post["surfaces.roofs.storage"]["temperature"] for c in suburb}) > 5
@@ -654,13 +706,13 @@ DEMO_CLASSES = {
         "Waste",
     ),
 }
-# (id, demo, config, mode): quantity-only on the demo as saved; every pollutant on the no-deposition
-# configuration, which neutralises only the surfaces' deposition, 3c (README there)
+# (id, demo, config, mode): the demo as saved, quantity-only and with every pollutant and process
+# live (the surface loads included, Y30)
 RUNS = (
     ("", "quickstart", "config.yml", "quantity"),
     ("", "oxford", "config.yml", "quantity"),
-    ("pollutants-", "quickstart", "config_no_deposition.yml", "pollutants"),
-    ("pollutants-", "oxford", "config_no_deposition.yml", "pollutants"),
+    ("pollutants-", "quickstart", "config.yml", "pollutants"),
+    ("pollutants-", "oxford", "config.yml", "pollutants"),
 )
 DEMO_PAIRS = [
     pytest.param(demo, config, mode, cls)
@@ -811,13 +863,9 @@ def test_a_demo_replay_notices_a_difference():
 
 def test_a_pollutant_mode_demo_replay_notices_a_difference():
     """A pollutant column of a captured WWTW reply, moved by 1e-11 x scale, fails the replay."""
-    network = demo_network("oxford", "config_no_deposition.yml")
+    network = demo_network("oxford", "config.yml")
     calls = copy.deepcopy(
-        [
-            c
-            for c in demo_capture("oxford", "config_no_deposition.yml", 365)["oxford_wwtw"]
-            if c.day < 20
-        ]
+        [c for c in demo_capture("oxford", "config.yml", 365)["oxford_wwtw"] if c.day < 20]
     )
     scale = node_scale(calls, volume_only=False)
     reply, key = next(

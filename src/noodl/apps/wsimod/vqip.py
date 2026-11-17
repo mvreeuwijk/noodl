@@ -7,6 +7,7 @@ in the order of :class:`Pollutants`. Each operation transcribes WSIMOD 0.8.1's `
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -160,6 +161,32 @@ def ds_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     return torch.where(p.volume_or_additive_mask, t1 - t2, torch.zeros_like(t1))
 
 
+class PythonMathError(ArithmeticError):
+    """Python's math, evaluated per instance (:func:`python_per_instance`), failed on some
+    instance: ``math.log`` of a non-positive number (``ValueError``), ``0 ** negative``
+    (``ZeroDivisionError``), an overflow, or a complex power that becomes a ``TypeError`` in
+    ``torch.tensor``. The original error is its ``__cause__``. Every caller replaces an inactive
+    instance's argument by a safe one, so the failing instance is an active one, on which WSIMOD
+    evaluates the same expression and raises too (N2)."""
+
+
+def python_per_instance(function, *columns: list, shape: torch.Size) -> Tensor:
+    """``function`` of each instance's Python floats (``columns``, flat lists of one length),
+    as a float64 tensor of ``shape``: the per-instance Python math of Approach rule 1. A
+    failure of the math, or of turning its results into a tensor, is a :class:`PythonMathError`
+    from the original error, so a caller can tell it from an error of noodl's own code."""
+    try:
+        values = [function(*args) for args in zip(*columns, strict=True)]
+        return torch.tensor(values, dtype=torch.float64).reshape(shape)
+    except (ArithmeticError, ValueError, TypeError) as error:
+        raise PythonMathError(f"{type(error).__name__}: {error}") from error
+
+
+def _pow(a: float, b: float) -> float:
+    """Python's ``a ** b`` (``float.__pow__``, the C library's ``pow``)."""
+    return a**b
+
+
 class _PowPython(torch.autograd.Function):
     """``x ** y`` as Python evaluates it for floats (the C library's ``pow``), elementwise.
 
@@ -168,16 +195,24 @@ class _PowPython(torch.autograd.Function):
     differ from ``float.__pow__`` in the last bit, so the forward pass calls Python's, once per
     instance (the :func:`~noodl.apps.wsimod.storage.pow_half` pattern). An ``int`` exponent in
     WSIMOD (the default ``10``) is converted to a double by ``float.__pow__``, so the float
-    exponent here is the same call. The gradients are ``y x^(y-1)`` and ``x^y ln x`` where
-    ``x > 0``, and 0 where ``x == 0`` (a saturated soil; the slope there is documented, not
-    propagated).
+    exponent here is the same call. The gradient in ``x`` is ``y x^y / x`` wherever ``x != 0``:
+    exact for a positive base, and for a negative base, which reaches the forward only with an
+    integral ``y`` (the soil-moisture factor's negative ``thetaupp`` or ``thetalow``, Y65; a
+    fractional ``y`` gives Python a complex number, and the forward raises). The gradient in
+    ``y`` is ``x^y ln x`` where ``x > 0`` and 0 elsewhere (no real slope in ``y`` for a negative
+    base). At ``x == 0`` (a saturated soil) both are 0: the slope there is documented, not
+    propagated.
     """
 
     @staticmethod
     def forward(ctx, x: Tensor, y: Tensor) -> Tensor:
         xb, yb = torch.broadcast_tensors(x.detach(), y.detach())
-        pairs = zip(xb.reshape(-1).tolist(), yb.reshape(-1).tolist(), strict=True)
-        out = torch.tensor([a**b for a, b in pairs], dtype=torch.float64).reshape(xb.shape)
+        out = python_per_instance(
+            _pow,
+            xb.reshape(-1).tolist(),
+            yb.reshape(-1).tolist(),
+            shape=xb.shape,
+        )
         ctx.save_for_backward(x, y, out)
         return out
 
@@ -185,16 +220,56 @@ class _PowPython(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, grad: Tensor) -> tuple[Tensor, Tensor]:
         x, y, out = ctx.saved_tensors
-        positive = x > 0
-        safe = torch.where(positive, x, torch.ones_like(x))
+        nonzero, positive = x != 0, x > 0
+        one = torch.ones_like(x)
         zero = torch.zeros_like(grad)
-        gx = torch.where(positive, grad * y * out / safe, zero)
-        gy = torch.where(positive, grad * out * torch.log(safe), zero)
+        gx = torch.where(nonzero, grad * y * out / torch.where(nonzero, x, one), zero)
+        gy = torch.where(positive, grad * out * torch.log(torch.where(positive, x, one)), zero)
         return gx.sum_to_size(x.shape), gy.sum_to_size(y.shape)
 
 
 def pow_python(x: Tensor, y: Tensor) -> Tensor:
-    """``x ** y`` bitwise as Python computes it for floats; gradient 0 where ``x == 0``."""
+    """``x ** y`` bitwise as Python computes it for floats; gradient 0 where ``x == 0``, and in
+    ``y`` also where ``x < 0`` (:class:`_PowPython`)."""
     return _PowPython.apply(
         torch.as_tensor(x, dtype=torch.float64), torch.as_tensor(y, dtype=torch.float64)
     )
+
+
+def _unary_python(name: str, function, slope):
+    """The autograd function of ``function`` with derivative ``slope(x)``."""
+
+    class Op(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x: Tensor) -> Tensor:
+            ctx.save_for_backward(x)
+            return python_per_instance(function, x.detach().reshape(-1).tolist(), shape=x.shape)
+
+        @staticmethod
+        @once_differentiable
+        def backward(ctx, grad: Tensor) -> Tensor:
+            (x,) = ctx.saved_tensors
+            return grad * slope(x)
+
+    Op.__name__ = Op.__qualname__ = name
+    return Op
+
+
+_LogPython = _unary_python("_LogPython", math.log, lambda x: 1.0 / x)
+_Log10Python = _unary_python("_Log10Python", math.log10, lambda x: 1.0 / (x * math.log(10.0)))
+_SinPython = _unary_python("_SinPython", math.sin, torch.cos)
+
+
+def log_python(x: Tensor) -> Tensor:
+    """``math.log`` per instance, bitwise Python's; ``d/dx = 1/x``."""
+    return _LogPython.apply(torch.as_tensor(x, dtype=torch.float64))
+
+
+def log10_python(x: Tensor) -> Tensor:
+    """``math.log10`` per instance, bitwise Python's; ``d/dx = 1/(x ln 10)``."""
+    return _Log10Python.apply(torch.as_tensor(x, dtype=torch.float64))
+
+
+def sin_python(x: Tensor) -> Tensor:
+    """``math.sin`` per instance, bitwise Python's; ``d/dx = cos x``."""
+    return _SinPython.apply(torch.as_tensor(x, dtype=torch.float64))

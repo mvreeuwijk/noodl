@@ -46,7 +46,7 @@ from noodl.apps.wsimod.vqip import (
     v_change_vqip,
     write,
 )
-from tests.verification._wsimod_reference import pad_register
+from tests.verification._wsimod_reference import INPUT_VARIABLES, pad_register
 
 if TYPE_CHECKING:  # pragma: no cover
     from tests.verification._wsimod_reference import ArcCall, ArcDay
@@ -253,6 +253,14 @@ class StoreNode(Node):
 _RIVER_REGISTERS = ("lagged_temperatures", "lagged_total_phosphorus")
 
 
+def _is_pool(path: str) -> bool:
+    return path.startswith("surfaces.") and path.endswith(".nutrient_pool")
+
+
+def _is_climate(path: str) -> bool:
+    return path.startswith("surfaces.") and path.endswith(".surface_climate")
+
+
 def _is_register(path: str) -> bool:
     return path.endswith("internal_arc.register")
 
@@ -274,9 +282,12 @@ def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
     """A captured store as the noodl tensor ``Node.load_stores`` takes. A ``QueueTank``'s queue
     is WSIMOD's ``{time: vqip}`` dict, captured under the ``register`` path, and its key list
     under the ``present`` path; a River's lag list is padded to its register
-    (:func:`pad_register`, X17); a store that is a number is a scalar."""
+    (:func:`pad_register`, X17); a growing surface's ``nutrient_pool`` is its ``(5, 2)`` list
+    of pools by nutrient (D4); a store that is a number is a scalar."""
     if path in _RIVER_REGISTERS:
         return pad_register(value, node.lag_sizes[_RIVER_REGISTERS.index(path)])
+    if _is_pool(path) or _is_climate(path):  # the (5, 2) pools (D4); the two volumes (D5)
+        return torch.tensor(value, dtype=torch.float64)
     if _is_register(path) or _is_present(path):
         length = _internal_arc(node, path).length
     if _is_register(path):
@@ -295,7 +306,17 @@ def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
 
 def compare_store(compare: _Comparer, label: str, path: str, ours: Tensor, theirs) -> None:
     """``ours`` against the captured store ``theirs`` (see :func:`load_value`); an absent queue
-    key is an empty row; a River's lag list is compared slot by slot with the padding (X17)."""
+    key is an empty row; a River's lag list is compared slot by slot with the padding (X17), and a
+    nutrient pool entry by entry."""
+    if _is_climate(path):
+        for i, value in enumerate(theirs):
+            compare.value(f"{label}[{i}]", ours[..., i], value)
+        return
+    if _is_pool(path):
+        for i, row in enumerate(theirs):
+            for j, value in enumerate(row):
+                compare.value(f"{label}[{i}, {j}]", ours[..., i, j], value)
+        return
     if path in _RIVER_REGISTERS:
         expected = pad_register(theirs, ours.shape[-1])
         for slot in range(ours.shape[-1]):
@@ -343,6 +364,8 @@ def replay(
     p = network.pollutants if pollutants is None else pollutants
     spec = _spec(network, name)
     node = make_node(spec, network, p)
+    for surface in getattr(node, "surfaces", ()):  # the build-time calendar (D7), as Engine's
+        surface.set_dates(network.dates, network.date_labels)
     types = {n.name: NODE_SCHEMAS[n.cls].renamed_type for n in network.nodes}
     script: list = []
     arcs: dict[str, ScriptedArc] = {}
@@ -388,6 +411,23 @@ def replay(
                 node.params["temperature"],
                 call.pre["forcing.temperature"],
             )
+        if "forcing.monthyear" in call.pre:  # a Land: the month and the surface data WSIMOD read
+            month = f"{network.dates[call.day]:%Y-%m}"
+            if call.pre["forcing.monthyear"] != month:
+                raise Mismatch(
+                    f"{label} monthyear: noodl reads {month}, "
+                    f"WSIMOD {call.pre['forcing.monthyear']}"
+                )
+            for key, value in call.pre.items():
+                if key.startswith("forcing.surfaces."):
+                    _, _, surface, variable = key.split(".", 3)
+                    owner = node._surface(surface)
+                    if (
+                        variable in INPUT_VARIABLES
+                        and getattr(owner, "nutrient_pool", None) is None
+                    ):
+                        continue  # a quantity-only replay has no pool: no fertiliser or manure
+                    compare.value(f"{label} {key}", owner.forcing[variable], value)
         node.load_stores(
             {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
         )

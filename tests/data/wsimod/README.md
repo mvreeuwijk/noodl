@@ -1,17 +1,11 @@
 # WSIMOD demo configurations
 
 `quickstart/` and `oxford/` are WSIMOD 0.8.1's two demo models in WSIMOD's own save format
-(`Model.save(dir, "config.yml", compress=True)`): `config.yml`, one `<node>-inputs.csv.gz`
-per node with forcing, and `config_no_deposition.yml`, the same configuration plus an `overrides`
-section that neutralises only the surfaces' `pollutant_load` (surface deposition, which
-sub-project 3c ports). Everything sub-project 3b ports stays live with WSIMOD's defaults: the
-treatment works' pollutant treatment, the soil temperature and the surfaces' (empty) decays.
-Neither demo has a non-empty `decays`, a `River` or a user decay arc; the purpose-built cases do. The
-script writes the file:
-
-```bash
-python scripts/regenerate_wsimod_fixtures.py --no-deposition-only
-```
+(`Model.save(dir, "config.yml", compress=True)`): `config.yml` and one `<node>-inputs.csv.gz`
+per node with forcing. Both run unmodified with every pollutant process live: the surfaces'
+`pollutant_load` (deposition), the treatment works' pollutant treatment, the soil temperature and
+the surfaces' (empty) decays. Neither demo has a non-empty `decays`, a `River` or a user decay arc;
+the purpose-built cases do.
 
 ## Forcing and licence
 

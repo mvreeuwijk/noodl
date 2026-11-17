@@ -81,8 +81,24 @@ refused by name.
   `Waste`, a treatment works other than `FWTW`) is refused if it names one, as WSIMOD raises
   `TypeError`.
 - `surfaces` (a `Land` only): a mapping keyed by name or a list. Each surface has `type_`
-  (`ImperviousSurface` or `PerviousSurface`), `surface` (its name), its parameters, and an
-  optional `filename` or `data_input_dict`.
+  (`ImperviousSurface`, `PerviousSurface`, `GrowingSurface`, `IrrigationSurface`,
+  `GardenSurface` or `VariableAreaSurface`), `surface` (its name), its
+  parameters, and an optional `filename` or `data_input_dict`. A `GrowingSurface` takes
+  `rooting_depth` (its physical depth; `depth` is refused), `ET_depletion_factor`,
+  `crop_factor_stages`, `crop_factor_stage_dates`, `sowing_day`, `harvest_day` and
+  `initial_soil_storage`, and its other 25 attributes (`crop_cover_max`, `kfr`, ...) only as
+  overrides. `crop_factor_stages` and `crop_factor_stage_dates` are lists of one length,
+  `sowing_day` and `harvest_day` whole days of the year; the crop calendar and its refusals are
+  in the [WSIMOD application](../applications/wsimod.md#the-growing-surface). An
+  `IrrigationSurface` takes a `GrowingSurface`'s keys and `irrigation_coefficient` (default 0.1,
+  also an override; see [the irrigation surface](../applications/wsimod.md#the-irrigation-surface)).
+  A `GardenSurface` takes a `GrowingSurface`'s keys and no other; its `ResidentialDemand` asks it
+  for water (see [the garden surface](../applications/wsimod.md#the-garden-surface-and-the-demands-garden-link)).
+  With two or more on a `Land`, the last one takes the demand and the earlier ones are listed in
+  `model.unread` as `<land>.surfaces.<name>.garden_handlers`.
+  A `VariableAreaSurface` takes a `GrowingSurface`'s keys and `current_surface_area` (m2, default
+  0; a constructor key only, refused as an override; see
+  [the variable-area surface](../applications/wsimod.md#the-variable-area-surface)).
 - Every other key must be a constructor keyword of the class's chain (its own `__init__` and
   those its `**kwargs` reach, `noodl.apps.wsimod.classes`). Otherwise it is refused by name,
   where WSIMOD raises `TypeError`. A surface's `capacity` (and an impervious surface's `depth`)
@@ -106,7 +122,6 @@ refused by name.
   `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
   air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
-  `GrowingSurface`, `IrrigationSurface`, `GardenSurface` and `VariableAreaSurface` (3c), and
   `EnfieldFoulSewer`, whose `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
 
 ### Arcs
@@ -187,8 +202,38 @@ compute derived quantities.
   (WSIMOD opens `""` and raises `FileNotFoundError`), and any other non-string value is refused
   by name (WSIMOD raises `RuntimeError`). On a class that reads no forcing (a `Waste`, say) the file is
   still read and the override is listed in `WsimodNetwork.unread`. A `Groundwater`'s override is
-  its only forcing (X11). A surface's `filename` and any `data_input_dict` override are still
-  refused (deposition data, sub-project 3c; `land.py:413-421`).
+  its only forcing (X11). A node's `data_input_dict` override is refused for good
+  (`Node.apply_overrides` consumes only `filename`, `nodes.py:92-100`, and would store it unread);
+  so is a surface's `filename` override (no surface consumes it). Override a node's forcing by
+  `filename`, a surface's by `data_input_dict`.
+- A surface's `data_input_dict` override **replaces** its data (`land.py:413-421`), as a mapping in
+  the inline `{(variable, date): value}` form or as a path. A path is read as written, relative
+  to the process's **working directory** (X27: use absolute paths). `None`, a number or any other
+  type is refused by name (`ValueError` in WSIMOD), as is a missing file. The constructor fixed
+  the surface's inflows (`land.py:375-382`) and an override does not rebuild them (L15, Y21):
+  an override that adds deposition data to a surface built without `nhx-dry` is read and never
+  used, and each variable is listed in `WsimodNetwork.unread`; an override that drops `nhx-dry`
+  from a surface built with it (WSIMOD raises `KeyError` at the first run) is refused, and, when `nitrate`
+  is a pollutant (the only case in which a growing surface reads them, `land.py:1276-1280`), so is
+  one that drops a fertiliser or manure variable of a growing surface; without `nitrate` the drop
+  is accepted and the run is unchanged.
+- A `pollutant_load` override on a surface built **without** a load is ignored, as in WSIMOD, whose
+  inflows were fixed at construction (L14): each of its run-pollutant keys is listed in
+  `WsimodNetwork.unread` as `<land>.surfaces.<surface>.pollutant_load.<key>` (a key that is no
+  run pollutant is listed as for a configured load). WSIMOD's override also mutates a shared
+  default `{}`, so every later surface built without a load gets it; noodl's loads are per
+  surface. On a surface built with a load the override merges per key and is live.
+- A surface's `data_input_dict` (or constructor `filename`) holds its monthly deposition data:
+  the six variables `nhx-dry`, `noy-dry`, `srp-dry`, `nhx-wet`, `noy-wet` and `srp-wet`, in kg/m2/d.
+  The data are read when `nhx-dry` is among the constructor's variables (`land.py:375-382`), and
+  then all six are needed (a missing companion is refused by name, `KeyError` in WSIMOD). Day `t`
+  reads the row dated the first of its month (`get_data_input_surface`, `land.py:462-471`): a row
+  dated `"2004-01"` or `"2004-01-01"` serves every January day, one dated `"2004-01-15"` is
+  never read and the run is refused. Without `nhx-dry` no variable is read and each is listed in
+  `WsimodNetwork.unread` as `<land>.surfaces.<surface>.data_input_dict.<variable>`; so is a
+  deposition of a species (`ammonia`, `nitrate`, `phosphate`) that is not a pollutant. Any other
+  variable, `*-residue` data (residue is not ported) and fertiliser or manure data on a surface
+  that is not a growing one are refused.
 
 ## Units, order and what runs
 
@@ -199,5 +244,6 @@ constructs them and noodl runs them, so it decides the order of every push and p
 WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own is set-hash
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
 (`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
-and run bit for bit as WSIMOD runs them; a configuration with pollutant processes not yet ported
-(deposition, the land's nutrient pools) needs `pollutants=False` until sub-project 3c; each demo's `config_no_deposition.yml` neutralises the surfaces' `pollutant_load` and runs every ported process. See the [WSIMOD application](../applications/wsimod.md).
+and run bit for bit as WSIMOD runs them; every ported process runs on them: each demo's
+`config.yml` runs unmodified, with no second configuration, the surfaces' `pollutant_load`
+included. See the [WSIMOD application](../applications/wsimod.md).

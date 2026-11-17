@@ -30,6 +30,7 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   A tank is not a node: its sites are its owner's with the tank's attribute path,
   ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
   ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,
+  ``node:N/<tank>/pull_pollutants/clip:<additive pollutant|volume>``,
   ``node:N/<tank>/make_decay/cap:<pollutant>`` (a ``Decay``'s cap, evaluated at bind, D5;
   a ``DecayQueueTank``'s is its internal arc's, ``node:N/tank/internal_arc/make_decay/cap:<p>``),
   ``node:N/<tank>/pull_ponded/excess``, ``node:N/<tank>/evaporate/clip``, and for a
@@ -77,8 +78,54 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   path ``surfaces.<name>`` and add ``node:N/surfaces.<name>/precipitation_evaporation/dry``
   (``:660``) and ``node:N/surfaces.<name>/ihacres/{infiltration,excess,evaporation_kink,
   outflow_kink,moisture,through_soil}`` (``:927``, ``:928``, ``:935``, ``:948``, ``:957``,
-  ``:985``); its event is ``"inaccurate_evaporation"`` (``:1003-1021``). Later classes extend
-  the same pattern.
+  ``:985``); its event is ``"inaccurate_evaporation"`` (``:1003-1021``). A growing surface's
+  ``NutrientPool`` (``nutrient_pool.py``) has the path ``surfaces.<name>.nutrient_pool`` and
+  adds ``node:N/surfaces.<name>.nutrient_pool.<pool>/extract/clip:<N|P>`` (``np.py:553``;
+  ``call`` that pool's extract count) for the pools ``fast_pool``, ``humus_pool``,
+  ``dissolved_inorganic_pool``, ``dissolved_organic_pool`` and ``adsorbed_inorganic_pool``.
+  A growing surface adds ``node:N/surfaces.<name>/calc_crop_cover/{unsown,crop,depletion,
+  unstressed,stress_floor,stress_zero_denominator}`` (``:1531``, ``:1550``, ``:1560``, ``:1561``,
+  ``:1564``; the last is noodl's guard for ``(1 - ET_depletion_factor) * TAW == 0``, whose event is
+  ``"crop_water_stress_zero_denominator"``, Y17); its sowing, harvest and leap tests are
+  structural and record nothing (:meth:`GrowingSurface.set_dates`). With ``nitrate`` among
+  the pollutants it adds ``node:N/surfaces.<name>/pull_storage/{empty,clip,no_din}``
+  (``:1446``, ``:1450``; ``no_din`` is noodl's guard for the tank's ``nitrate + ammonia +
+  nitrite == 0``, whose event is ``"pull_storage_no_din"``, L5, Y18) in place of the tank's
+  ``pull_storage`` sites, and ``node:N/surfaces.<name>/adjust_vqip_to_liquid/{N,P}`` (``:1595``,
+  ``:1599``; ``call`` counts the dry deposition, wet deposition, fertiliser and manure calls in
+  that order). Its soil processes add ``node:N/surfaces.<name>/calc_temperature_dependence_factor/
+  {warm,thawed}`` (``:1822``, ``:1826``),
+  ``node:N/surfaces.<name>/calc_soil_moisture_dependence_factor/{saturated,wilted,min:wp,min:fc}``
+  (``:1843``, ``:1845``, and ``:1853``'s three-way ``min`` as two margins in Python's order),
+  ``node:N/surfaces.<name>/soil_pool_transformation/{no_din,inorganic_N,organic_N,inorganic_P,
+  organic_P}`` (``no_din`` is noodl's guard for the tank's ``nitrate + ammonia == 0``, whose
+  event is ``"transformation_no_din"``, L6, Y18; then ``:1770``, ``:1783``, ``:1790``,
+  ``:1797``), ``node:N/surfaces.<name>/calc_crop_uptake/{crop,temperature_cap,temperature_floor,
+  shape,available_water,dry_soil,cap:P,cap:N}`` (``:1872``, ``:1878`` for an autumn-sown crop
+  only, ``:1887``, ``:1899``; ``dry_soil`` is noodl's guard for ``V == 0``, whose event is
+  ``"crop_uptake_dry_soil"``, L7, Y18; ``:1910-1911``),
+  ``node:N/surfaces.<name>/erosion/{rain,runoff,transport,enrichment_cap,flow,phosphorus}``
+  (``:1943``, ``:1959``, ``:1984``'s ``min``, ``:1992``, ``:1994``, ``:2048``; the adsorbed and
+  humus pools' ``extract`` sites follow ``phosphorus``, and a pool short of the eroded P by more
+  than ``FLOAT_ACCURACY`` records ``"erosion_pool_short"``, ``:2051-2054``) and
+  ``node:N/surfaces.<name>/denitrification/{saturated,moist}`` (``:2107``, ``:2109``) and
+  ``node:N/surfaces.<name>/adsorption/{empty,shortcut,newton:<j>/residual,newton:<j>/step,
+  newton:<j>/positive,change,adsorb}`` (``:2176``, ``:2191`` with the event
+  ``"adsorption_shortcut"``; per pass ``j`` of the unrolled Newton loop ``:2206``, ``:2213``
+  and ``:2217``, ``positive`` being ``xn - dx > 0``; ``:2225``, ``:2239``; the pools'
+  ``extract`` sites follow ``adsorb``, and a request above its pool records
+  ``"freundlich_flow_adjusted"``, L11). The
+  transformation, the uptake and denitrification pull from the tank through ``pull_pollutants``
+  (its ``clip`` sites), and record the event ``"nutrient_pool_not_tracking"`` where its clamp
+  removed more than ``FLOAT_ACCURACY`` (WSIMOD's dead check, L10, Y16).
+  An ``IrrigationSurface`` adds ``node:N/surfaces.<name>/irrigate/{crop,deficit,demand,saturated}``
+  (``:2350``, ``:2352``'s ``max``, ``:2356``, ``:2357``), the ``Land``'s ``pull_distributed``
+  sites for its pull and the tank's ``get_excess`` sites; ``Land.apply_irrigation`` makes none of
+  its own (``:192-198``).
+  A ``GardenSurface`` adds
+  ``node:N/surfaces.<name>/calculate_irrigation_demand/{deficit,saturated}`` (``:2411``'s ``max``,
+  ``:2416``) and the tank's ``get_excess`` sites; its push set makes none.
+  Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every
@@ -148,7 +195,7 @@ class Ctx:
     conditions. ``maxiter[(node, method, call index)]`` says whether that distribute loop ran
     all ``MAXITER`` rounds (WSIMOD prints "Maxiter reached", ``nodes.py:405-406``, ``:475-476``).
     ``dropped`` sums the water WSIMOD drops below ``FLOAT_ACCURACY``; ``terms`` the mass-balance
-    terms ``"<Class>.<term>"``.
+    terms ``"<Class>.<term>"``; ``parts`` the breakdown of the running terms by function.
     """
 
     def __init__(
@@ -173,6 +220,9 @@ class Ctx:
         self.dropped: Tensor = self.empty()
         self.dropped_arcs: Tensor = self.empty()  # the part of ``dropped`` lost inside an arc
         self.terms: dict[str, Tensor] = {}
+        # the breakdown of the Land's running terms, ``{"in": {name: VQIP}, "out": {...}}`` (D11);
+        # a diagnostic, never part of the balance
+        self.parts: dict[str, dict[str, Tensor]] = {"in": {}, "out": {}}
         # each WWTW's current_input as of its last treat_current_input (the water that was
         # treated); what is pushed in later vanishes at end_timestep (W69)
         self.treated_input: dict[str, Tensor] = {}
@@ -222,6 +272,14 @@ class Ctx:
         """Add ``vqip`` where ``mask`` to the mass-balance term ``name`` (D11)."""
         old = self.terms.get(name, self.empty())
         self.terms[name] = sum_vqip(self.p, old, _masked(vqip, mask))
+
+    def part(self, name: str, direction: str, vqip: Tensor, mask: Tensor) -> None:
+        """Add ``vqip`` where ``mask`` to the balance part ``name`` of ``direction`` (``"in"`` or
+        ``"out"``, D11). Parts are not terms: they are never summed into the balance."""
+        if direction not in self.parts:
+            raise ValueError(f"part {name!r}: direction {direction!r} is not 'in' or 'out'")
+        table = self.parts[direction]
+        table[name] = sum_vqip(self.p, table.get(name, self.empty()), _masked(vqip, mask))
 
     def call(self, element: str, method: str) -> int:
         """The static index of this call of ``method`` on ``element`` (``"node:N"``,
@@ -282,6 +340,7 @@ def _register_all() -> None:
     """Import every module that registers node classes."""
     import noodl.apps.wsimod.catchment  # noqa: F401
     import noodl.apps.wsimod.demand  # noqa: F401
+    import noodl.apps.wsimod.growing  # noqa: F401
     import noodl.apps.wsimod.land  # noqa: F401
     import noodl.apps.wsimod.sewer  # noqa: F401
     import noodl.apps.wsimod.storage  # noqa: F401
@@ -310,6 +369,12 @@ class Engine:
             self.arcs[spec.name] = ARC_CLASSES[spec.cls](
                 spec, self.nodes[spec.in_port], self.nodes[spec.out_port], pollutants
             )
+        # D7: every surface learns the network's dates (a refusal on a run day names it); a
+        # growing surface builds its crop calendar and refuses (by name, with the first date)
+        # any date whose interpolation would raise
+        for spec in network.nodes:
+            for surface in getattr(self.nodes[spec.name], "surfaces", ()):
+                surface.set_dates(network.dates, network.date_labels)
 
     def begin_day(self, ctx: Ctx) -> None:
         """Give every node and arc the day's context."""

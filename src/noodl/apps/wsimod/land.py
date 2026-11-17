@@ -11,10 +11,11 @@ returns to the land's ``running_inflow_mb`` and ``running_outflow_mb`` (the mass
 ``"Land.running_inflow_mb"`` and ``"Land.running_outflow_mb"``, ``:158-162``; D11). In 3a these
 lists hold the water functions (``precipitation_evaporation``/``push_to_sewers`` of an
 impervious surface, ``ihacres``/``calculate_soil_temperature``/``route`` of a pervious one) and
-``simple_deposition`` when a ``pollutant_load`` is configured, which :meth:`Land.validate`
-admits only with zero loads (3c). The surface deposition of ``nhx-dry``-style data is 3c and
-refused with pollutants on (D21); a quantity-only run ignores it, as its volumes do not depend
-on it.
+``simple_deposition`` when a ``pollutant_load`` is configured, and ``atmospheric_deposition`` and
+``precipitation_deposition`` ahead of them when the surface was constructed with ``nhx-dry``
+data (``:375-382``). That data is monthly (``get_data_input_surface``, ``:462-471``): day ``t``
+reads the row of the first of its month (:func:`month_start`). A quantity-only run ignores the
+data, as its volumes do not depend on it, but its forcing is still checked (D9, D21).
 
 The arithmetic is WSIMOD's ``+ - * /``, ``min``/``max`` in WSIMOD's order, and IHACRES's
 ``exp`` and ``**`` evaluated per instance by Python's own ``math.exp`` and ``float.__pow__``
@@ -32,21 +33,30 @@ through_soil}``, and the tank sites of :class:`~noodl.apps.wsimod.tanks.Tank`. `
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from operator import attrgetter
 from typing import TYPE_CHECKING, ClassVar
 
+import numpy as np
 import torch
 from torch import Tensor
 
-from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
+from noodl.apps.wsimod.constants import (
+    DEPOSITION_SPECIES,
+    SURFACE_DEPOSITION,
+    SURFACE_INPUTS,
+    UNBOUNDED_CAPACITY,
+)
 from noodl.apps.wsimod.decay import Decay, check_inert, read_decays
-from noodl.apps.wsimod.engine import Ctx, dmax, dmin
+from noodl.apps.wsimod.engine import Ctx, _register_all, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
 from noodl.apps.wsimod.storage import exp_python
 from noodl.apps.wsimod.tanks import DecayTank, ResidenceTank, Tank
 from noodl.apps.wsimod.vqip import (
     Pollutants,
+    PythonMathError,
     empty,
     pow_python,
     safe_den,
@@ -59,20 +69,52 @@ if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import NodeSpec, SurfaceSpec, WsimodNetwork
 
 __all__ = [
+    "NO_PART",
+    "PART_NAMES",
     "ImperviousSurface",
     "Land",
     "PerviousSurface",
     "Surface",
+    "month_start",
+    "runs_nutrients",
     "surface_derived",
 ]
+
+# The balance parts (D11): the name each surface function's ``(in, out)`` is recorded under
+# (``Ctx.part``), keyed by the function's name; ``WsimodMassBalance.parts``.
+PART_NAMES = {
+    "atmospheric_deposition": "Surface.atmospheric_deposition",
+    "precipitation_deposition": "Surface.precipitation_deposition",
+    "simple_deposition": "Surface.simple_deposition",
+    "precipitation_evaporation": "ImperviousSurface.precipitation_evaporation",
+    "push_to_sewers": "ImperviousSurface.push_to_sewers",
+    "ihacres": "PerviousSurface.ihacres",
+    "calculate_soil_temperature": "PerviousSurface.calculate_soil_temperature",
+    "route": "PerviousSurface.route",
+    "fertiliser": "GrowingSurface.fertiliser",
+    "manure": "GrowingSurface.manure",
+    "soil_pool_transformation": "GrowingSurface.soil_pool_transformation",
+    "calc_crop_uptake": "GrowingSurface.calc_crop_uptake",
+    "erosion": "GrowingSurface.erosion",
+    "denitrification": "GrowingSurface.denitrification",
+    "adsorption": "GrowingSurface.adsorption",
+}
+NITRITE_CARRY_OVER = "Surface.nitrite_carry_over"
+# the surface functions that return empty VQIPs and so have no part (D11)
+NO_PART = frozenset(
+    {
+        "calc_crop_cover",
+        "effective_precipitation_flushing",
+        "calc_temperature_dependence_factor",
+        "calc_soil_moisture_dependence_factor",
+    }
+)
 
 # land.py:208: where percolation goes; :221: where runoff goes; :711: where ponding goes
 PERCOLATION_TYPES = ("Groundwater",)
 RUNOFF_TYPES = ("River", "Node")
 SEWER_TYPES = ("Sewer",)
 GARDEN_TAG = ("Demand", "Garden")
-# land.py:375-380, :496-544: the surface data the deposition functions read (3c)
-DEPOSITION_KEYS = frozenset({"nhx-dry", "noy-dry", "srp-dry", "nhx-wet", "noy-wet", "srp-wet"})
 # land.py:753-756: state attributes, set only through the overrides
 SOIL_TEMPERATURE_DEFAULTS = {
     "soil_temp_w_prev": 0.1,
@@ -87,7 +129,36 @@ def _f64(x) -> Tensor:
     return torch.as_tensor(x, dtype=torch.float64)
 
 
+def runs_nutrients(pollutants: Sequence[str]) -> bool:
+    """WSIMOD's nutrient switch, ``"nitrate" in constants.POLLUTANTS`` (``land.py:1276``): the one
+    source of a growing surface's ``has_nutrients`` and of ``Land.store_paths_of``'s
+    ``nutrients`` (D5): the pool's stores (``nutrient_pool``) rely on both deriving from it."""
+    return "nitrate" in pollutants
+
+
+def month_start(date: datetime) -> datetime:
+    """The first of ``date``'s month, the row ``get_data_input_surface`` reads
+    (``land.py:462-471``: ``monthyear = date.to_period("M")``, ``model.py:997``, compared by
+    ``to_datetime`` equality, ``model.py:164-170``)."""
+    return datetime(date.year, date.month, 1)
+
+
 # --- derived quantities (D5) -------------------------------------------------------------------
+def is_number(value: object) -> bool:
+    """A real number as a configuration gives one (M3, N1): a ``numbers.Real`` (Python's or
+    numpy's scalars), a real-valued 0-d ``np.ndarray`` or single-element ``torch.Tensor``; not a
+    complex or multi-element array, a boolean, ``None``, a string or a list."""
+    if isinstance(value, (bool, np.bool_)):
+        return False
+    if isinstance(value, np.ndarray):
+        return value.ndim == 0 and bool(
+            np.issubdtype(value.dtype, np.number) and not np.iscomplexobj(value)
+        )
+    if isinstance(value, Tensor):
+        return value.numel() == 1 and not value.dtype.is_complex and value.dtype != torch.bool
+    return isinstance(value, numbers.Real)
+
+
 def _derive(cls: str, values: Mapping):
     """What a surface's constructor computes from its parameters, in WSIMOD's order; the values
     are floats or tensors.
@@ -96,13 +167,17 @@ def _derive(cls: str, values: Mapping):
     ``depth = pore_depth`` (``:612``). ``PerviousSurface`` keeps ``field_capacity_m`` and
     ``wilting_point_m`` on the physical depth and passes the simulated depth
     ``depth * total_porosity`` (``:796-816``), with ``subsurface_coefficient = 1 -
-    percolation_coefficient`` (``:820``).
+    percolation_coefficient`` (``:820``). A growing surface's physical depth is its
+    ``rooting_depth`` (``:1192``, ``:1251``), and after an override too (``:400``, ``:881-884``),
+    so its derived values are construction's.
     """
     if cls == "ImperviousSurface":
         depth = values["pore_depth"]
         return {"capacity": values["area"] * depth, "depth": depth}
-    if cls == "PerviousSurface":
-        physical = values["depth"]
+    if "total_porosity" in values:
+        # a growing surface passes its rooting_depth as the physical depth (``:1192``, ``:1251``)
+        growing = SURFACE_CLASSES[cls].is_growing
+        physical = values["rooting_depth"] if growing else values["depth"]
         depth = physical * values["total_porosity"]
         return {
             "capacity": values["area"] * depth,
@@ -124,6 +199,7 @@ def surface_derived(spec: SurfaceSpec) -> dict[str, float]:
     by the porosity and multiplies it back, so after an override its values can differ from
     construction's by one ulp; construction's are computed here.
     """
+    _register_all()  # ``_derive`` reads the growing classes, which register themselves
     cls = SURFACE_CLASSES[spec.cls]
     values = {**cls.parameter_defaults, **spec.parameters}
     return {k: float(v) for k, v in _derive(spec.cls, values).items()}
@@ -161,8 +237,19 @@ class Surface(DecayTank):
 
     surface_class: ClassVar[str] = "Surface"
     parameter_defaults: ClassVar[dict[str, float]] = {"area": 1, "depth": 1, "datum": 10}
+    # a growing surface (``GrowingSurface`` and its subclasses) also reads the fertiliser and
+    # manure data; ``land.py`` tests the flag, never the class (it does not import ``growing``)
+    is_growing: ClassVar[bool] = False
+    # what the Land asks of a surface (M4): an ``IrrigationSurface`` is irrigated, a
+    # ``GardenSurface`` takes the Land's garden handlers, and a growing surface with ``nitrate``
+    # among the pollutants keeps the nutrient pool (set per instance by ``GrowingSurface``)
+    is_irrigated: ClassVar[bool] = False
+    is_garden: ClassVar[bool] = False
+    has_nutrients: bool = False
     # the per-day state WSIMOD keeps on the surface besides its storage (recorded, model.py:1135)
     flow_fields: ClassVar[tuple[str, ...]] = ()
+    # the registers a class keeps beyond its tank and flows (D5): the carried ones are state
+    carried_fields: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, spec: SurfaceSpec, pollutants: Pollutants, *, parent: Land) -> None:
         self.spec = spec
@@ -175,7 +262,11 @@ class Surface(DecayTank):
         }
         load = values.get("pollutant_load") or {}
         # land.py:381-382: a configured pollutant_load (any entry) adds simple_deposition
-        self.has_load = len(load) > 0
+        # (the constructor's flags, not the merged ones: an override rebuilds nothing, Y21, D9)
+        self.has_load = len(spec.constructed_load) > 0
+        self.has_deposition = "nhx-dry" in spec.constructed_variables
+        # the day's monthly data by variable, bound in ``bind`` (D8): not parameters
+        self.forcing: dict[str, Tensor] = {}
         self.defaults["pollutant_load"] = torch.tensor(
             [float(load.get(name, 0.0)) for name in pollutants.names], dtype=torch.float64
         ).reshape(pollutants.K)
@@ -208,10 +299,49 @@ class Surface(DecayTank):
             path=f"surfaces.{spec.name}",
         )
         self._set_derived(derived)
-        # land.py:375-384: the deposition inflows are 3c (refused, or ignored when quantity-only)
-        self.inflows = [self.simple_deposition] if self.has_load else []
+        # land.py:375-382: the data deposition, then simple_deposition
+        self.inflows = (
+            [self.atmospheric_deposition, self.precipitation_deposition]
+            if self.has_deposition
+            else []
+        )
+        if self.has_load:
+            self.inflows.append(self.simple_deposition)
         self.processes: list = []
         self.outflows: list = []
+        # the network's date labels, which a failure in :meth:`run` names (:meth:`set_dates`)
+        self.date_labels: tuple[str, ...] = ()
+
+    def set_dates(self, dates: Sequence[datetime], labels: Sequence[str]) -> None:
+        """Learn the network's dates, so that a failure of :meth:`run` names its date. A growing
+        surface also builds its crop calendar here (:meth:`GrowingSurface.set_dates`, D7)."""
+        self.date_labels = tuple(labels)
+
+    @classmethod
+    def validate_spec(
+        cls, surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
+    ) -> list[str]:
+        """The refusals of a class beyond :func:`_validate_surface`'s common ones, from the
+        spec alone; returns what a quantity-only run ignores (``[]`` for these surfaces)."""
+        return []
+
+    @classmethod
+    def carried_fields_of(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """The registers of :meth:`state_fields` that the Land carries (D5): ``carried_fields``
+        here; a growing surface adds its pool with ``nutrients``."""
+        return cls.carried_fields
+
+    @classmethod
+    def state_fields(cls, *, nutrients: bool) -> tuple[str, ...]:
+        """The store paths of the class's registers (D5), after its flows: none here. A growing
+        surface's crop registers (and, with ``nutrients``, its pool)."""
+        return ()
+
+    def driver_columns(self) -> dict[str, tuple | str]:
+        """The columns of the surface's non-pollutant vector parameters by name (D16):
+        ``_driver_layout`` consults it before the pollutant-column rule. ``"stages"`` is padded
+        to the class's longest list. None here."""
+        return {}
 
     # --- parameters -----------------------------------------------------------------------------
     def _param(self, name: str) -> Tensor:
@@ -223,9 +353,12 @@ class Surface(DecayTank):
 
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
         """This day's parameters by name; the derived values are computed again from them."""
+        data = {k: v for k, v in parameters.items() if k in (*SURFACE_DEPOSITION, *SURFACE_INPUTS)}
+        parameters = {k: v for k, v in parameters.items() if k not in data}
         unknown = set(parameters) - set(self.defaults)
         if unknown:
             raise KeyError(f"{self.site}: no parameter {sorted(unknown)[0]!r}")
+        self.forcing = {k: _f64(v) for k, v in data.items()}
         self.params = {k: _f64(v) for k, v in parameters.items()}
         values = {name: self._param(name) for name in self.defaults}
         self.area = values["area"]
@@ -257,11 +390,19 @@ class Surface(DecayTank):
     def stores(self) -> dict[str, Tensor]:
         """``storage``, the per-day flows and ``total_decayed``: always held and compared in the
         replay; carried by the Land only when ``nitrite`` is a pollutant (D8)."""
+        # a growing surface's has_nutrients is runs_nutrients(pollutants), as the Land's paths
+        nutrients = self.has_nutrients
         return {
             "storage": self.storage,
             **{f: getattr(self, f) for f in self.flow_fields},
+            # a dotted field is an attribute of an attribute (a growing pool's factors)
+            **{f: attrgetter(f)(self) for f in self.state_fields(nutrients=nutrients)},
             "total_decayed": self.total_decayed,
         }
+
+    def load_store(self, field: str, value: Tensor) -> None:
+        """Set the store ``field`` (a path of :meth:`stores`) from ``value``."""
+        setattr(self, field, value)
 
     def _with_temperature(self, vqip: Tensor, temperature: Tensor) -> Tensor:
         """``vqip["temperature"] = temperature`` (``land.py:685``, ``:991``, ``:1028``); WSIMOD
@@ -301,8 +442,17 @@ class Surface(DecayTank):
                     torch.where(column, parent.running_inflow_mb + moved, parent.running_inflow_mb),
                     parent.running_inflow_mb,
                 )
+                carried = torch.where(column, moved, torch.zeros_like(self.storage))
+                self.ctx.part(NITRITE_CARRY_OVER, "in", carried, active)
         for f in self.inflows + self.processes + self.outflows:
-            in_, out_ = f(active=active)
+            try:
+                in_, out_ = f(active=active)
+            except PythonMathError as error:  # only Python's per-instance math (N2)
+                raise self._failure(f.__name__, error) from error
+            if f.__name__ not in NO_PART:
+                part = PART_NAMES[f.__name__]  # KeyError names a function without a part
+                self.ctx.part(part, "in", in_, active)
+                self.ctx.part(part, "out", out_, active)
             parent.running_inflow_mb = write(
                 active, sum_vqip(p, parent.running_inflow_mb, in_), parent.running_inflow_mb
             )
@@ -310,9 +460,72 @@ class Surface(DecayTank):
                 active, sum_vqip(p, parent.running_outflow_mb, out_), parent.running_outflow_mb
             )
 
+    def _failure(self, function: str, error: PythonMathError) -> ValueError:
+        """The error of :meth:`run` when ``function`` raises in Python's math on an active
+        instance (I1): a parameter or a state outside the domain WSIMOD computes in, such as a
+        negative eroding flow raised to ``1.3`` or an adsorption first guess that underflows to 0
+        and is raised to ``nfr - 1``. WSIMOD raises at the same step on the same input, and
+        Python's math has no per-instance error, so one instance stops the whole batch; the
+        message names the surface, the function, the day and the cause (the
+        :class:`~noodl.apps.wsimod.vqip.PythonMathError`'s own cause). Any other error of a
+        surface function, noodl's own, propagates untouched."""
+        day = self.ctx.day
+        on = f"day {day}"
+        if 0 <= day < len(self.date_labels):
+            on += f" ({self.date_labels[day]})"
+        cause = error.__cause__ if error.__cause__ is not None else error
+        return ValueError(
+            f"{self.site}: {function} raised {type(cause).__name__} ({cause}) on {on}, for at "
+            "least one instance of the batch: a parameter or state outside the domain of "
+            "Python's math, where WSIMOD raises at the same step"
+        )
+
+    def _datum(self, variable: str) -> Tensor:
+        """``get_data_input_surface`` (``land.py:462-471``): today's value of ``variable``."""
+        try:
+            return self.forcing[variable]
+        except KeyError:
+            raise KeyError(f"{self.site}: no {variable!r} data bound (land.py:471)") from None
+
+    def _deposition(self, kind: str) -> Tensor:
+        """``vqip`` of ``atmospheric_deposition`` (``kind="dry"``, ``:540-548``) or
+        ``precipitation_deposition`` (``"wet"``, ``:568-576``): ``ammonia``, ``nitrate`` and
+        ``phosphate`` are ``data * area``, everything else 0. A species that is not a run
+        pollutant has no column: WSIMOD writes a key no sum reads (D15)."""
+        p = self.p
+        amounts = {
+            DEPOSITION_SPECIES[v]: self._datum(f"{v}-{kind}") * self.area
+            for v in DEPOSITION_SPECIES
+        }
+        shape = torch.broadcast_shapes(*(x.shape for x in amounts.values()))
+        zero = torch.zeros(shape, dtype=torch.float64)
+        columns = [zero, *(amounts[n].expand(shape) if n in amounts else zero for n in p.names)]
+        return torch.stack(columns, dim=-1)
+
+    def dry_deposition_to_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:473-487``: the dry deposition is forced into the tank and returned."""
+        self.push_storage(vqip, force=True, active=active)
+        return vqip
+
+    def wet_deposition_to_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``land.py:489-503``: the wet deposition is forced into the tank and returned."""
+        self.push_storage(vqip, force=True, active=active)
+        return vqip
+
+    def atmospheric_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:528-554``: the day's month's dry deposition (``kg/m2/d``) times the area."""
+        in_ = self.dry_deposition_to_tank(self._deposition("dry"), active=active)
+        return in_, self.ctx.empty()
+
+    def precipitation_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
+        """``land.py:556-581``: the day's month's wet deposition (``kg/m2/d``) times the area."""
+        in_ = self.wet_deposition_to_tank(self._deposition("wet"), active=active)
+        return in_, self.ctx.empty()
+
     def simple_deposition(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:510-532``: the loads (additive ones times the area) at volume 0, forced in.
-        :meth:`Land.validate` admits only zero loads with pollutants on (3c)."""
+        A load key that is not a run pollutant is dropped (WSIMOD stores it and never reads it
+        back, D15), and ``volume`` is set to 0."""
         p = self.p
         load = self._param("pollutant_load")
         amounts = torch.where(p.additive_mask[1:], load * self.area[..., None], load)
@@ -462,6 +675,18 @@ class PerviousSurface(Surface):
                     "divide by the simulated depth less it)"
                 )
 
+    def crop_et0_coefficient(self) -> Tensor:
+        """The factor ``get_climate`` multiplies ``et0`` by: the surface's ``et0_coefficient``
+        (``land.py:911``). A growing surface overrides it with the day's, which its
+        ``calc_crop_cover`` writes."""
+        return self._param("et0_coefficient")
+
+    def get_climate(self) -> tuple[Tensor, Tensor]:
+        """``land.py:905-911``: the day's precipitation depth and ``et0 * et0_coefficient``
+        (the order WSIMOD multiplies in)."""
+        precipitation = self.parent.params["precipitation"]
+        return precipitation, self.parent.params["et0"] * self.crop_et0_coefficient()
+
     def ihacres(self, *, active: Tensor) -> tuple[Tensor, Tensor]:
         """``land.py:913-1044``, in WSIMOD's order:
 
@@ -483,8 +708,7 @@ class PerviousSurface(Surface):
         site = f"{self.site}/ihacres"
         area = self.area
         # get_climate (land.py:905-911) and the temperature (:924)
-        precipitation = parent.params["precipitation"]
-        evaporation_depth = parent.params["et0"] * self._param("et0_coefficient")
+        precipitation, evaporation_depth = self.get_climate()
         temperature = parent.params["temperature"]
         # land.py:927-928
         infiltrated = dmin(
@@ -604,8 +828,10 @@ class Land(Node):
     ``"surfaces.<name>.<parameter>"``.
 
     Handlers (``land.py:91-129``): pushes with the default tag and their checks are denied; the
-    ``("Demand", "Garden")`` check and push answer empty, as without a ``GardenSurface`` (3c,
-    W16), so a garden demand is 0. W4: ``push_set_sewer`` (``:246-264``) reads a nonexistent
+    ``("Demand", "Garden")`` check and push answer empty (``:91-94``, W16), so a garden demand is
+    0, unless the land has a ``GardenSurface``: the last one's ``calculate_irrigation_demand`` and
+    ``receive_irrigation_demand`` replace them (``:120-128``, L18). W4: ``push_set_sewer``
+    (``:246-264``) reads a nonexistent
     ``self.surface`` and there is no ``"Sewer"`` check, so ponding from a sewer crashes WSIMOD;
     noodl does the evident intent, a check that accepts everything when the land has an
     ``ImperviousSurface`` (empty otherwise) and a set that forces the water into the first one.
@@ -640,12 +866,17 @@ class Land(Node):
             name: _f64(values.get(name, default))
             for name, default in self.parameter_defaults.items()
         }
-        # land.py:91-94 (no GardenSurface: W16), :120-123, W4's "Sewer" check
+        # land.py:91-94 (no GardenSurface: W16), W4's "Sewer" check
         self.push_check_handler[GARDEN_TAG] = self.push_check_deny
         self.push_set_handler[GARDEN_TAG] = self.push_set_garden
         self.surfaces: list[Surface] = [
             SURFACE_CLASSES[s.cls](s, pollutants, parent=self) for s in spec.surfaces
         ]
+        # land.py:120-128: the last GardenSurface's methods overwrite the empty answers (L18)
+        for surface in self.surfaces:
+            if surface.is_garden:
+                self.push_check_handler[GARDEN_TAG] = surface.calculate_irrigation_demand
+                self.push_set_handler[GARDEN_TAG] = surface.receive_irrigation_demand
         self.push_set_handler["default"] = self.push_set_deny
         self.push_check_handler["default"] = self.push_check_deny
         self.push_set_handler["Sewer"] = self.push_set_sewer
@@ -669,24 +900,48 @@ class Land(Node):
         # land.py:155-156
         self.running_inflow_mb = empty(pollutants, ())
         self.running_outflow_mb = empty(pollutants, ())
-        self.store_paths = self.store_paths_of([(s.cls, s.name) for s in spec.surfaces])
+        nutrients = runs_nutrients(pollutants.names)
+        self.store_paths = self.store_paths_of(
+            [(s.cls, s.name) for s in spec.surfaces], nutrients=nutrients
+        )
         # carried: the residence tanks and the surfaces' storage; the surfaces' flows and the
         # running mass balance are the day's (W75). A surface's total_decayed is carried when
-        # "nitrite" is a pollutant: the next day's run reads it (D8)
+        # "nitrite" is a pollutant: the next day's run reads it (D8). A surface's registers
+        # (``carried_fields``: a growing surface's crop state, D5) are carried always
         carried = [x for x in self.store_paths if x.endswith(".storage")]
         if "nitrite" in pollutants.names:
             carried += [x for x in self.store_paths if x.endswith(".total_decayed")]
+        carried += [
+            f"surfaces.{s.name}.{f}"
+            for s in self.surfaces
+            for f in type(s).carried_fields_of(nutrients=nutrients)
+        ]
         self.carried_paths = tuple(carried)
 
     @classmethod
-    def store_paths_of(cls, surfaces: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+    def store_paths_of(
+        cls, surfaces: Sequence[tuple[str, str]], *, nutrients: bool = False
+    ) -> tuple[str, ...]:
         """The store paths of a ``Land`` with ``surfaces`` ``[(class, name), ...]``: the
-        residence tanks in ``dir()`` order (D10), each surface's ``storage``, per-day flows and
-        ``total_decayed``, and the running mass balance."""
+        residence tanks in ``dir()`` order (D10), each surface's ``storage``, per-day flows,
+        registers (``Surface.state_fields``; a growing surface's pool only with ``nutrients``,
+        ``"nitrate"`` among the run's pollutants, D5) and ``total_decayed``, and the running mass
+        balance."""
+        _register_all()  # the classes that register themselves (growing)
         paths = [f"{tank}.storage" for tank in cls._TANKS]
         for surface_cls, name in surfaces:
-            fields = ("storage", *SURFACE_CLASSES[surface_cls].flow_fields)
-            paths += [f"surfaces.{name}.{field}" for field in (*fields, "total_decayed")]
+            surface = SURFACE_CLASSES[surface_cls]
+            # every carried register is a store (Land.__init__ carries carried_fields_of)
+            assert set(surface.carried_fields_of(nutrients=nutrients)) <= set(
+                surface.state_fields(nutrients=nutrients)
+            )
+            fields = (
+                "storage",
+                *surface.flow_fields,
+                *surface.state_fields(nutrients=nutrients),
+                "total_decayed",
+            )
+            paths += [f"surfaces.{name}.{field}" for field in fields]
         return (*paths, "running_inflow_mb", "running_outflow_mb")
 
     # --- the day's context and parameters -------------------------------------------------------
@@ -711,7 +966,19 @@ class Land(Node):
     def configured_parameters(self, date: datetime) -> dict[str, Tensor]:
         """The day's ``precipitation``, ``et0`` and ``temperature`` (``land.py:451-460``)."""
         data = self.spec.data
-        return {v: torch.tensor(data[(v, date)], dtype=torch.float64) for v in LAND_FORCING}
+        out = {v: torch.tensor(data[(v, date)], dtype=torch.float64) for v in LAND_FORCING}
+        month = month_start(date)
+        for surface in self.surfaces:
+            # the deposition data (land.py:375-382) and, on a growing surface with nitrate, the
+            # fertiliser and manure (:1649-1710)
+            read = SURFACE_DEPOSITION if surface.has_deposition else ()
+            if surface.has_nutrients:
+                read = (*read, *SURFACE_INPUTS)
+            for v in read:
+                out[f"surfaces.{surface.name}.{v}"] = torch.tensor(
+                    surface.spec.data[(v, month)], dtype=torch.float64
+                )
+        return out
 
     def bind(self, parameters: Mapping[str, Tensor]) -> None:
         """This day's parameters: the residence times reach the tanks; the keys
@@ -764,7 +1031,7 @@ class Land(Node):
             value = _f64(value)
             if path.startswith("surfaces."):
                 _, name, field = path.split(".", 2)
-                setattr(self._surface(name), field, value)
+                self._surface(name).load_store(field, value)
             elif "." in path:
                 tank, field = path.split(".")
                 setattr(getattr(self, tank), field, value)
@@ -810,7 +1077,13 @@ class Land(Node):
 
     # --- orchestration --------------------------------------------------------------------------
     def apply_irrigation(self, *, active: Tensor) -> None:
-        """``land.py:192-198``: only ``lambda: None`` (``:97``); irrigation surfaces are 3c."""
+        """``land.py:192-198``: every irrigation surface's ``irrigate`` in surface order
+        (``irrigation_functions``, ``:97``, ``:115-118``; the first entry is ``lambda: None``).
+        The functions' return values are not summed."""
+        active = torch.as_tensor(active, dtype=torch.bool)
+        for surface in self.surfaces:
+            if surface.is_irrigated:
+                surface.irrigate(active=active)
 
     def run(self, *, active: Tensor) -> None:
         """``land.py:200-244``:
@@ -899,18 +1172,65 @@ class Land(Node):
         return direction == "pull" and tag == "default"
 
 
+def _refuse_surface_data(
+    surface: SurfaceSpec, variables: set[str], network: WsimodNetwork, where: str
+) -> None:
+    """The refusals of a surface's data (D21): a variable ``get_data_input_surface`` never
+    reads, ``*-residue`` (unwired, Y36, L21), fertiliser and manure on a surface that is not a
+    growing one, a missing companion of ``nhx-dry`` (L25: ``KeyError`` in WSIMOD) and a missing
+    ``(variable, first of the month)`` on a run date (``:471``)."""
+    for variable in sorted(variables):
+        if variable.endswith("-residue"):
+            raise ValueError(
+                f"{where}: surface data {variable!r}: residue is not ported (np.py:312 calls a "
+                "dict, land.py:1281 leaves it unwired; Y36, L21); drop it"
+            )
+        if variable in SURFACE_INPUTS and not SURFACE_CLASSES[surface.cls].is_growing:
+            raise ValueError(
+                f"{where}: surface data {variable!r}: fertiliser and manure are read by a "
+                f"growing surface only, and a {surface.cls} is not one"
+            )
+        if variable not in SURFACE_DEPOSITION and variable not in SURFACE_INPUTS:
+            raise ValueError(
+                f"{where}: surface data {variable!r} is not read (a surface's data_input_dict "
+                "holds deposition only, land.py:375-380)"
+            )
+    if "nhx-dry" not in surface.constructed_variables:
+        # land.py:375: no deposition function is built (an override that adds ``nhx-dry`` does
+        # not rebuild the inflows, L15); the data are unread
+        return
+    absent = [v for v in SURFACE_DEPOSITION if v not in variables]
+    if absent:
+        raise ValueError(
+            f"{where}: surface data has 'nhx-dry' but not {', '.join(map(repr, absent))}: the "
+            "deposition functions read all six (land.py:540-576, KeyError at the first run; L25)"
+        )
+    for date in network.dates:
+        month = month_start(date)
+        for variable in SURFACE_DEPOSITION:
+            if (variable, month) not in surface.data:
+                raise ValueError(
+                    f"{where}: no {variable!r} data on {month:%Y-%m-%d}, the first of the month "
+                    f"of {date:%Y-%m-%d} (get_data_input_surface reads it, land.py:471)"
+                )
+
+
 def _validate_surface(
     surface: SurfaceSpec, network: WsimodNetwork, where: str, *, pollutants: bool
 ) -> list[str]:
     """One surface's refusals; returns its parameters a quantity-only run ignores.
 
-    - Surface data (D21): only the deposition keys (``land.py:375-380``) are accepted, and with
-      pollutants on they are refused (3c).
-    - ``pollutant_load``: with pollutants on, every entry must be 0 and additive (3c).
-    - ``PerviousSurface``: ``total_porosity`` above ``field_capacity`` and ``wilting_point``
-      (``:942``, ``:950`` divide by the difference), a positive simulated depth less either, a
-      non-zero ``area`` (``get_cmd`` divides, ``:893``) and ``ihacres_p >= 0`` (``0 ** p`` with
-      ``p < 0`` raises ``ZeroDivisionError`` on a saturated soil). With pollutants on, a
+    - Surface data (D21): only the six deposition variables (``land.py:375-380``) are read;
+      ``nhx-dry`` needs the five others (L25) and every ``(variable, first of the month)`` of
+      the run's dates, in either mode. A quantity-only run ignores the values.
+    - ``pollutant_load``: any value is accepted (``simple_deposition``); a quantity-only run
+      ignores it, and the pollutants of a VQIP ``initial_storage``.
+    - ``PerviousSurface`` and the growing classes (whose physical depth is ``rooting_depth``, D18),
+      then the class's own :meth:`Surface.validate_spec`: ``total_porosity`` above
+      ``field_capacity`` and ``wilting_point`` (``:942``, ``:950`` divide by the difference), a
+      positive simulated depth less either, a non-zero ``area`` (``get_cmd`` divides, ``:893``)
+      and ``ihacres_p >= 0`` (``0 ** p`` with ``p < 0`` raises ``ZeroDivisionError`` on a
+      saturated soil). With pollutants on, a
       ``temperature`` pollutant (``calculate_soil_temperature`` reads it, ``:1069``) and a
       non-zero total soil weight ``soil_temp_w_air + soil_temp_w_deep + soil_temp_w_prev``
       (``:1073``; ``ZeroDivisionError`` in WSIMOD).
@@ -922,34 +1242,30 @@ def _validate_surface(
     if decays and not pollutants:  # X49: a quantity-only run reads no decay value
         ignored.append(f"{prefix}.decays")
     variables = {variable for variable, _ in surface.data}
-    other = sorted(variables - DEPOSITION_KEYS)
-    if other:
-        raise ValueError(
-            f"{where}: surface data {other[0]!r} is not read (a surface's data_input_dict holds "
-            "deposition only, land.py:375-380)"
-        )
-    if variables:
-        if pollutants:
-            raise ValueError(
-                f"{where}: surface deposition data {sorted(variables)[0]!r} is sub-project 3c; "
-                "run build_model(network, pollutants=False) until sub-project 3c"
-            )
+    _refuse_surface_data(surface, variables, network, where)
+    if variables and not pollutants:
         ignored.append(f"{prefix}.data_input_dict")
-    load = surface.parameters.get("pollutant_load") or {}
-    if load:
-        if pollutants:
-            for key, value in load.items():
-                if float(value) != 0 or key in network.pollutants.non_additive:
-                    raise ValueError(
-                        f"{where}: pollutant_load {key!r}: {value!r} is deposition, sub-project "
-                        "3c (only zero loads of additive pollutants are accepted); "
-                        "run build_model(network, pollutants=False) until sub-project 3c"
-                    )
-        else:
-            ignored.append(f"{prefix}.pollutant_load")
-    if surface.cls != "PerviousSurface":
+    # pollutant_load (land.py:381-382, :510-532) is live with pollutants on; a key that is not a
+    # run pollutant is unread (D15, listed by the reader)
+    if surface.parameters.get("pollutant_load") and not pollutants:
+        ignored.append(f"{prefix}.pollutant_load")
+    # a VQIP initial_storage's pollutants, as a node tank's (X49, M2)
+    initial = surface.parameters.get("initial_storage", 0)
+    if not pollutants and isinstance(initial, Mapping) and any(k != "volume" for k in initial):
+        ignored.append(f"{prefix}.initial_storage")
+    _register_all()  # the classes that register themselves (growing), as the build does
+    cls = SURFACE_CLASSES[surface.cls]
+    # M3: a numeric parameter that is not a number would raise a bare TypeError in the
+    # derivations below (and in WSIMOD's constructor arithmetic)
+    for name in cls.parameter_defaults:
+        value = surface.parameters.get(name, 0)
+        if not is_number(value):
+            raise ValueError(f"{where}: {name} {value!r} is not a number")
+    if not issubclass(cls, PerviousSurface):
         return ignored
-    values = {**PerviousSurface.parameter_defaults, **surface.parameters}
+    values = {**cls.parameter_defaults, **surface.parameters}
+    if cls.is_growing:  # a growing surface's physical depth (D18)
+        values["depth"] = values["rooting_depth"]
     porosity = values["total_porosity"]
     for name in ("field_capacity", "wilting_point"):
         if not porosity > values[name]:
@@ -958,10 +1274,11 @@ def _validate_surface(
                 "(land.py:942, :950 divide by depth * (total_porosity - it))"
             )
     derived = surface_derived(surface)
+    depth = "rooting_depth" if cls.is_growing else "depth"
     for name in ("field_capacity_m", "wilting_point_m"):
         if not derived["depth"] - derived[name] > 0:
             raise ValueError(
-                f"{where}: the simulated depth less {name} is not positive (depth "
+                f"{where}: the simulated depth less {name} is not positive ({depth} "
                 f"{values['depth']}, total_porosity {porosity}; land.py:942, :950 divide by it)"
             )
     if float(values["area"]) == 0:
@@ -971,6 +1288,7 @@ def _validate_surface(
             f"{where}: ihacres_p {values['ihacres_p']} is negative (land.py:950 raises "
             "ZeroDivisionError on a saturated soil)"
         )
+    ignored += cls.validate_spec(surface, network, where, pollutants=pollutants)
     weights = {k: float(values[k]) for k in SOIL_TEMPERATURE_DEFAULTS}
     # ``neutral`` only decides which soil weights are listed as ignored when pollutants=False
     neutral = (

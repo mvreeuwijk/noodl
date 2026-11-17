@@ -125,6 +125,14 @@ def test_the_prints_that_carry_the_node_and_the_date_match_the_records(case, eve
         ("decay_queue_groundwater", 40),
         ("decay_arc", 30),
         ("river_nutrients", 60),
+        ("growing_spring", 60),  # 3c: the pools carried through model.step
+        ("growing_spring", 200),  # crosses the sowing (run day 182): days_after_sow, the covers
+        # 3c-ii: irr_a is sown on run day 16 (days_after_sow, the irrigate decisions from day 17);
+        # its soil leaves saturation on day 48, and the slow run carries the state into the days
+        # that pull water and feed the pools
+        ("irrigation", 20),
+        pytest.param("irrigation", 50, marks=pytest.mark.slow),
+        ("garden", 12),  # g2 leaves saturation on day 6: the garden water of days 6-11
     ],
 )
 def test_step_by_step_equals_wsimod_run(case, days):
@@ -411,6 +419,396 @@ def test_quantity_only_volumes_never_depend_on_3b_values(case, days):
     assert torch.equal(base.tank_storage, other.tank_storage)
 
 
+# --- 3c: batches, stepping, state and quantity-only structure (Task 10) -----------------------
+G = "wsimod.GrowingSurface."
+SPRING = "node:land/surfaces.wheat/"
+# growing_spring's crop is sown on run day 182, so the uptake caps (Review Focus 1) differ between
+# instances only from day 211: that half runs 250 days and is ``slow`` (33 s measured, alone); the
+# default batch runs 100 days and shows the Newton iteration counts (day 32)
+_SPRING_PLAN = {
+    G + "kfr": [1.0, 0.2, 5.0, 0.05],
+    G + "uptake1": [1.0, 0.5, 2.0, 0.1],
+    G + "ET_depletion_factor": [1.0, 0.6, 1.4, 0.8],
+    G + "crop_factor_stages": [1.0, 1.3, 0.7, 1.0],
+    G + "nutrient_pool.degrhpar": [1.0, 0.5, 2.0, 0.1],
+    "wsimod.nhx-fertiliser": [1.0, 0.0, 3.0, 0.5],
+}
+_FOUR = [1.0, 0.0, 2.0, 0.5]
+BATCH_3C = {
+    "growing_spring": ("growing_spring", 100, _SPRING_PLAN),
+    "growing_spring_caps": ("growing_spring", 250, _SPRING_PLAN),
+    "surface_deposition": (
+        "surface_deposition",
+        100,
+        {
+            "wsimod.ImperviousSurface.pollutant_load": [1.0, 0.0, 3.0, 0.5],
+            "wsimod.PerviousSurface.pollutant_load": [1.0, 2.0, 0.0, 4.0],
+            "wsimod.srp-dry": [1.0, 0.0, 2.0, 5.0],
+            "wsimod.ImperviousSurface.area": [1.0, 0.5, 2.0, 1.5],
+        },
+    ),
+    # 3c-ii (Task 16): one parameter each, 0 in instance 1. The garden water starts on day 6 (g2
+    # leaves saturation), the variable-area crop is sown on day 6
+    "irrigation": ("irrigation", 10, {"wsimod.IrrigationSurface.irrigation_coefficient": _FOUR}),
+    "garden": ("garden", 12, {"wsimod.ResidentialDemand.gardening_efficiency": _FOUR}),
+    "variable_area": (
+        "variable_area",
+        10,
+        {"wsimod.VariableAreaSurface.current_surface_area": _FOUR},
+    ),
+}
+# the configured soils of ``irrigation`` are saturated until run day 48 and its crops are sown on
+# days 16 and 36 (no water is pulled before them, whatever the coefficient): its batch starts both
+# crops sown and both soils below capacity, so both pull from day 0 and the coefficient of 0 makes
+# no demand (``irrigate/demand``) where the others do
+BATCH_STATE = {
+    "irrigation": {
+        "wsimod.storage": {
+            ("farm", "surface:irr_a"): {"volume": 1900.0, "temperature": 10.0},
+            ("farm", "surface:irr_b"): {"volume": 1500.0, "temperature": 10.0},
+        },
+        "wsimod.days_after_sow": {("farm", "surfaces.irr_a"): 5.0, ("farm", "surfaces.irr_b"): 5.0},
+    }
+}
+BATCH_SITE = {"irrigation": "node:farm/surfaces.irr_a/irrigate/demand"}
+
+
+def _newton_passes(records: list, instance: int) -> int:
+    """The passes of one instance's adsorption Newton loop on one day, read from the per-iteration
+    ``residual`` decisions (the loop reports no count): the iterations whose test held."""
+    passes = 0
+    for r in records:
+        if r.site.startswith(f"{SPRING}adsorption/newton:") and r.site.endswith("/residual"):
+            passes += bool(r.active[instance]) and bool(r.outcome[instance])
+    return passes
+
+
+@pytest.mark.parametrize(
+    "name",
+    [pytest.param(n, marks=pytest.mark.slow) if n.endswith("_caps") else n for n in BATCH_3C],
+)
+def test_a_batch_of_four_3c_parameter_sets_equals_its_single_runs(name):
+    """Four instances of the growing surface differ in ``kfr``, ``uptake1``,
+    ``ET_depletion_factor``, the crop-factor stages, a pool rate and a fertiliser column; of the
+    deposition surfaces in the loads, a deposition column and the area; of the irrigated, garden
+    and variable-area surfaces in ``irrigation_coefficient``, the demand's
+    ``gardening_efficiency`` and ``current_surface_area``. Each equals its single run, state
+    included."""
+    case, days, plan = BATCH_3C[name]
+    model, state, drivers = _case(case)
+    if name in BATCH_STATE:
+        state = initial_state(model, values=BATCH_STATE[name])
+    batched = _scaled(drivers, plan)
+    if case == "surface_deposition":  # only the phosphate column of the loads varies
+        for key in plan:
+            if key.endswith("pollutant_load"):
+                varied = drivers[key].expand(4, *drivers[key].shape).clone()
+                varied[:, :, 0] *= _tensors(*plan[key]).reshape(4, 1)
+                batched[key] = varied
+    diagnostics = {"decisions": True}
+    ran = wsimod_run(model, state, batched, days=days, diagnostics=diagnostics)
+    together = _comparable(ran, dict(model.wsimod_day.last_state))
+    assert ran.arc_flow.shape[0] == 4
+    if case == "growing_spring":
+        # on some day two instances take different Newton iteration counts, and (250 days) on
+        # some day different uptake caps (calc_crop_uptake/cap:N or cap:P among those reaching it)
+        counts = [
+            len({_newton_passes(records, i) for i in range(4)})
+            for records in diagnostics["decisions"]
+        ]
+        assert max(counts) > 1
+        capped = [
+            d
+            for records in diagnostics["decisions"]
+            for d in records
+            if d.site in (f"{SPRING}calc_crop_uptake/cap:N", f"{SPRING}calc_crop_uptake/cap:P")
+            and len(set(d.outcome[d.active].tolist())) > 1
+        ]
+        if days == 250:  # the caps differ only once the crop is established (day 211)
+            assert capped
+    elif case == "surface_deposition":
+        assert not torch.equal(ran.tank_quality[0], ran.tank_quality[1])
+    else:  # every pair of instances moves different water
+        assert all(
+            not torch.equal(ran.arc_flow[i], ran.arc_flow[j])
+            for i in range(4)
+            for j in range(i + 1, 4)
+        )
+    if name in BATCH_SITE:  # instances that reach the site take different outcomes on some day
+        assert any(
+            len(set(d.outcome[d.active].tolist())) > 1
+            for records in diagnostics["decisions"]
+            for d in records
+            if d.site == BATCH_SITE[name]
+        ), BATCH_SITE[name]
+    for i in range(4):
+        single_drivers = {k: (v[i] if k in plan else v) for k, v in batched.items()}
+        single = wsimod_run(model, state, single_drivers, days=days)
+        alone = _comparable(single, dict(model.wsimod_day.last_state))
+        assert alone.keys() == together.keys()
+        for name, value in alone.items():
+            assert torch.equal(value, together[name][i]), (name, i)
+
+
+LAND_STATE = {
+    "wsimod.nutrient_pool": {
+        ("land", "surfaces.wheat.nutrient_pool", "fast_pool", "N"): 3.5,
+        ("land", "surfaces.wheat.nutrient_pool", "humus_pool", "P"): 1.25,
+    },
+    "wsimod.days_after_sow": {("land", "surfaces.wheat"): 40.0},
+    "wsimod.crop_cover": {("land", "surfaces.wheat"): 0.3},
+    "wsimod.ground_cover": {("land", "surfaces.wheat"): 0.4},
+}
+
+
+def test_the_3c_state_round_trips():
+    """The pools (one row per pool and nutrient, D4), ``days_after_sow`` and both covers are set
+    by label and reach day 0 (the sown crop is 41 days old after it); a run warm-started
+    from a run's last state equals the continuation. The pool factors are per-day stores and are
+    not carried (Y69): they are not in the state."""
+    model, default, drivers = _case("growing_spring")
+    state = initial_state(model, values=LAND_STATE)
+    day = model.wsimod_day
+    assert not any("factor" in key for key in state)
+    for key, rows in LAND_STATE.items():
+        labels = day.state_labels(key)
+        for label, value in rows.items():
+            assert float(state[key][labels.index(label)]) == value
+            assert not torch.equal(
+                state[key][labels.index(label)], default[key][labels.index(label)]
+            )
+    first = model.step(state, drivers, dt=DAY, t=0.0)
+    assert float(first["wsimod.days_after_sow"]) == 41.0
+    assert float(model.step(default, drivers, dt=DAY, t=0.0)["wsimod.days_after_sow"]) == -1.0
+
+    def stepped(start, k0, k1):
+        out, flows = start, []
+        for k in range(k0, k1):
+            out = model.step(out, drivers, dt=DAY, t=k * DAY)
+            flows.append(model.wsimod_day.last_record.arc_flow)
+        return out, flows
+
+    whole, whole_flows = stepped(state, 0, 10)
+    middle, early = stepped(state, 0, 4)
+    resumed, late = stepped(middle, 4, 10)
+    for key in whole:
+        assert torch.equal(whole[key], resumed[key]), key
+    assert all(torch.equal(a, b) for a, b in zip(whole_flows, early + late, strict=True))
+    other, _ = stepped(default, 0, 10)
+    assert not torch.equal(whole["wsimod.nutrient_pool"], other["wsimod.nutrient_pool"])
+    assert not torch.equal(whole["wsimod.days_after_sow"], other["wsimod.days_after_sow"])
+
+
+def test_a_warm_start_mid_season_crosses_the_harvest():
+    """Review Focus 4: one model stepped for 360 days passes day 300 mid-season (2004-07-26,
+    ``days_after_sow > 0``); a second model warm-started from that day's state runs the 60 days
+    after it, across the harvest (raw day 250, 2004-09-06, run day 341). The continuation equals
+    days 300-360 of the first, flows and final state (``torch.equal``), and ``days_after_sow``
+    is -1 from the harvest day on."""
+    model, state, drivers = _case("growing_spring")
+    whole, whole_flows, midway = state, [], None
+    for k in range(360):
+        if k == 300:
+            midway = dict(whole)
+        whole = model.step(whole, drivers, dt=DAY, t=k * DAY)
+        whole_flows.append(model.wsimod_day.last_record.arc_flow)
+    assert float(midway["wsimod.days_after_sow"]) > 0.0
+    second, _, drivers_2 = _case("growing_spring")
+    stepped, flows, sown = midway, [], []
+    for k in range(300, 360):
+        stepped = second.step(stepped, drivers_2, dt=DAY, t=k * DAY)
+        flows.append(second.wsimod_day.last_record.arc_flow)
+        sown.append(float(stepped["wsimod.days_after_sow"]))
+    assert torch.equal(torch.stack(flows), torch.stack(whole_flows[300:360]))
+    for key, value in whole.items():
+        assert torch.equal(stepped[key], value), key
+    assert sown[341 - 300 - 1] > 0.0  # the day before the harvest
+    assert all(value == -1.0 for value in sown[341 - 300 :]), sown
+
+
+# 3c-ii (Task 16): the carried climate of the surface that reads it on day 0. ``irrigate`` reads it
+# only when ``apply_irrigation`` runs before ``Land.run`` (``irrigation_early``; in the default
+# orchestration ``Land.run`` overwrites the flows first), and the garden check always (it runs in
+# ``create_demand``, before ``Land.run``). Both soils start below capacity, so that the day-0
+# check is not cut to 0 by a saturated soil (``land.py:2358``, ``:2416``), and irr_a is sown
+CLIMATE_STATE = {
+    "irrigation_early": (
+        "farm",
+        "irr_a",
+        {
+            "wsimod.storage": {("farm", "surface:irr_a"): {"volume": 1900.0, "temperature": 10.0}},
+            "wsimod.days_after_sow": {("farm", "surfaces.irr_a"): 5.0},
+        },
+    ),
+    "garden": (
+        "gardens",
+        "g2",
+        {"wsimod.storage": {("gardens", "surface:g2"): {"volume": 100.0, "temperature": 11.0}}},
+    ),
+}
+
+
+def _day_0_water(case: str, results: WsimodResults) -> float:
+    """The water the day-0 check asked for: the irrigation pulled into ``farm``, or the garden
+    water pushed to the two ``Land`` nodes."""
+    if case == "garden":
+        arcs = ("homes_to_gardens", "homes_to_plain")
+    else:
+        arcs = ("stream_to_farm", "well_to_farm", "tank_to_farm")
+    return sum(float(results.arc_flow[0, results.arc_names.index(a)]) for a in arcs)
+
+
+@pytest.mark.parametrize("case", list(CLIMATE_STATE))
+def test_the_climate_state_round_trips(case):
+    """``"wsimod.surface_climate"`` is set by label (evaporation 3, precipitation 1) and reaches
+    day 0: ``irrigation_early`` pulls ``max(3 - 1, 0) * irrigation_coefficient`` (0.3) and the
+    garden check answers 2.0, which ``gardening_efficiency`` (0.42) turns into the garden water;
+    with the configured climate (0) neither asks for water. The state set by label equals one
+    holding those flows in its tensor, and a run warm-started from a run's last state equals the
+    continuation (``torch.equal``)."""
+    node, surface, others = CLIMATE_STATE[case]
+    model, _, drivers = _case(case)
+    day = model.wsimod_day
+    flows = {
+        (node, f"surfaces.{surface}", "evaporation"): 3.0,
+        (node, f"surfaces.{surface}", "precipitation"): 1.0,
+    }
+    state = initial_state(model, values={**others, "wsimod.surface_climate": flows})
+    held = initial_state(model, values=others)
+    assert not bool(held["wsimod.surface_climate"].any())
+    labels = day.state_labels("wsimod.surface_climate")
+    climate = held["wsimod.surface_climate"].clone()
+    for label, value in flows.items():
+        climate[labels.index(label)] = value
+    held["wsimod.surface_climate"] = climate
+    for key in state:
+        assert torch.equal(state[key], held[key]), key
+    efficiency = 0.42 if case == "garden" else 0.3
+    first = wsimod_run(model, state, drivers, days=1)
+    assert _day_0_water(case, first) == pytest.approx(max(3.0 - 1.0, 0.0) * efficiency, rel=1e-12)
+    unset = wsimod_run(model, initial_state(model, values=others), drivers, days=1)
+    assert _day_0_water(case, unset) == 0.0
+
+    def stepped(start, k0, k1):
+        out, flows = start, []
+        for k in range(k0, k1):
+            out = model.step(out, drivers, dt=DAY, t=k * DAY)
+            flows.append(model.wsimod_day.last_record.arc_flow)
+        return out, flows
+
+    whole, whole_flows = stepped(state, 0, 10)
+    middle, early = stepped(state, 0, 4)
+    resumed, late = stepped(middle, 4, 10)
+    assert bool(middle["wsimod.surface_climate"].any())  # a day's flows, carried
+    for key in whole:
+        assert torch.equal(whole[key], resumed[key]), key
+    assert all(torch.equal(a, b) for a, b in zip(whole_flows, early + late, strict=True))
+    assert torch.equal(torch.stack(whole_flows)[:1], first.arc_flow)
+
+
+def _quantity_only_pair(case: str, days: int, scale: dict):
+    """``case``'s quantity-only volumes, with the drivers of ``scale`` (name -> factor) as they are
+    and multiplied."""
+    model, state, drivers = build_model(read_wsimod_config(CASES[case].build()), pollutants=False)
+    base = wsimod_run(model, state, drivers, days=days)
+    changed = {k: (v * scale[k] if k in scale else v) for k, v in drivers.items()}
+    assert set(scale) <= set(drivers), set(scale) - set(drivers)
+    other = wsimod_run(model, state, changed, days=days)
+    return base, other
+
+
+def test_quantity_only_volumes_never_depend_on_3c_pollutant_values():
+    """``growing_spring`` and ``surface_deposition``: every driver a quantity-only run lists as
+    ignored or never reads (uptake, erosion, adsorption, denitrification, the deposition,
+    fertiliser and manure forcing) is changed and the volumes are ``torch.equal``; the same for
+    the configuration's ``data_input_dict`` and ``pollutant_load`` values. ``growing_spring``'s
+    drivers run 200 days, past its sowing (run day 182); the deposition and configuration
+    variants 30 days (Y90)."""
+    names = (
+        "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion srfilt macrofilt "
+        "limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes bulk_density "
+        "crop_cover_max ground_cover_max satact thetaupp thetalow thetapow slope"
+    ).split()
+    scale = {G + n: 1.7 for n in names}
+    for kind in ("fertiliser", "manure"):
+        scale.update({f"wsimod.{p}-{kind}": 3.0 for p in ("nhx", "noy", "srp")})
+    scale.update({f"wsimod.{p}-dry": 2.0 for p in ("nhx", "noy", "srp")})
+    base, other = _quantity_only_pair("growing_spring", 200, scale)
+    assert float(base.arc_flow.abs().max()) > 0.0
+    assert torch.equal(base.arc_flow, other.arc_flow)
+    assert torch.equal(base.tank_storage, other.tank_storage)
+    scale = {f"wsimod.{p}-{w}": 4.0 for p in ("nhx", "noy", "srp") for w in ("dry", "wet")}
+    base, other = _quantity_only_pair("surface_deposition", 30, scale)
+    assert float(base.arc_flow.abs().max()) > 0.0
+    assert torch.equal(base.arc_flow, other.arc_flow)
+    assert torch.equal(base.tank_storage, other.tank_storage)
+    # the values written in the configuration
+    for case in ("growing_spring", "surface_deposition"):
+        mapping = CASES[case].build()
+        changed = copy.deepcopy(mapping)
+        for node in changed["nodes"]:
+            for surface in node.get("surfaces") or []:
+                for key, series in (surface.get("data_input_dict") or {}).items():
+                    surface["data_input_dict"][key] = series * 2.0
+                for name in surface.get("pollutant_load") or {}:
+                    if name != "temperature":
+                        surface["pollutant_load"][name] *= 3.0
+        assert changed != mapping
+        runs = []
+        for configuration in (mapping, changed):
+            model, state, drivers = build_model(read_wsimod_config(configuration), pollutants=False)
+            runs.append(wsimod_run(model, state, drivers, days=30))
+        assert torch.equal(runs[0].arc_flow, runs[1].arc_flow)
+        assert torch.equal(runs[0].tank_storage, runs[1].tank_storage)
+
+
+def test_quantity_only_lists_the_3c_parameters():
+    """What the configuration writes and a quantity-only run never reads is listed (Y72): the
+    surface data, the loads, the soil-temperature weights and every growing parameter but the
+    ones the run reads (``ET_depletion_factor``, ``rooting_depth``, ``crop_factor_stages``). The
+    nutrient-pool drivers do not exist in a quantity-only run and are not listed. The
+    ``initial_soil_storage`` and the pollutants of a surface's ``initial_storage`` are listed
+    (M2), as a node tank's are."""
+    ignored_growing = (
+        "uptake1 uptake2 uptake3 uptake_PNratio erodibility sreroexp cohesion slope srfilt "
+        "macrofilt limpar exppar hsatINs denpar adosorption_nr_limit kfr nfr kadsdes "
+        "bulk_density crop_cover_max ground_cover_max satact thetaupp thetalow thetapow"
+    ).split()
+    mapping = CASES["growing_spring"].build()
+    # the growing parameters are WSIMOD overrides (land.py:1376-1410), as the soil weights are
+    nodes = mapping.setdefault("overrides", {}).setdefault("nodes", {})
+    entry = nodes.setdefault("land", {"type_": "Land", "name": "land"})
+    surface = entry.setdefault("surfaces", {}).setdefault("wheat", {})
+    for name in ignored_growing:
+        surface[name] = {"adosorption_nr_limit": 2e-5, "slope": 4}.get(name, 0.02)
+    read = ("ET_depletion_factor", "rooting_depth", "crop_factor_stages")
+    (given,) = [s for n in mapping["nodes"] if n["name"] == "land" for s in n["surfaces"]]
+    assert all(name in given for name in read)  # the configuration gives them: not listed
+    network = read_wsimod_config(mapping)
+    model, _, _ = build_model(network, pollutants=False)
+    listed = model.ignored_by_quantity_only
+    assert "land.surfaces.wheat.data_input_dict" in listed
+    assert "land.surfaces.wheat.soil_temp_w_prev" in listed
+    # M2: only the pool reads initial_soil_storage, and the volume alone of the tank's VQIP
+    assert "land.surfaces.wheat.initial_soil_storage" in listed
+    assert "land.surfaces.wheat.initial_storage" in listed
+    for name in ignored_growing:
+        assert f"land.surfaces.wheat.{name}" in listed, name
+    for name in read:
+        assert f"land.surfaces.wheat.{name}" not in listed, name
+    assert not any("nutrient_pool" in item for item in listed)
+    model, _, _ = _case("growing_spring")
+    assert model.ignored_by_quantity_only == []
+    # the deposition surfaces
+    model, _, _ = build_model(
+        read_wsimod_config(CASES["surface_deposition"].build()), pollutants=False
+    )
+    for surface in ("roofs", "lawns"):
+        for name in ("pollutant_load", "data_input_dict"):
+            assert f"suburb.surfaces.{surface}.{name}" in model.ignored_by_quantity_only
+    assert "suburb.surfaces.yards.data_input_dict" in model.ignored_by_quantity_only
+
+
 def test_the_results_follow_wsimods_record_layout():
     model, state, drivers = _case("residential_with_land")
     results = wsimod_run(model, state, drivers, days=7)
@@ -431,6 +829,8 @@ def test_the_results_follow_wsimods_record_layout():
         "subsurface_r",
         "surface_r",
         "tank_recharge",
+        "et0_coef",  # model.py:1150 (D23)
+        "crop_factor",  # noodl's own (Y32)
     }
     assert all(v.shape == (t, n) for v in results.surface.values())
     assert results.surface_quality.shape == (t, n, k)
@@ -440,8 +840,9 @@ def test_the_results_follow_wsimods_record_layout():
     assert all(not attribute.startswith("surface:") for _, attribute in results.tank_names)
     model, state, drivers = _case("impervious_only")
     results = wsimod_run(model, state, drivers, days=5)
-    for field in ("percolation", "subsurface_r", "surface_r", "tank_recharge"):
+    for field in ("percolation", "subsurface_r", "surface_r", "tank_recharge", "et0_coef"):
         assert torch.isnan(results.surface[field]).all(), field
+    assert torch.isnan(results.surface["crop_factor"]).all()
     for field in ("storage", "evaporation", "precipitation"):
         assert not torch.isnan(results.surface[field]).any(), field
 
@@ -556,12 +957,14 @@ def test_the_mass_balance_closes_by_hand():
 
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_the_mass_balance_closes_on_every_case(name, mode):
-    """Every case, both modes, over its default ``days``: the residual is within ``1e-12 *
+    """Every case, both modes, over its bookkeeping prefix (``Case.bookkeeping``, Y68: the
+    default ``days`` but for the long growing cases): the residual is within ``1e-12 *
     scale`` on every day; ``evaporation_clamp`` apart, whose residual is the clamp gap (W75,
     tested below)."""
     model, state, drivers = _case(name, mode)
     diagnostics: dict = {}
-    results = wsimod_run(model, state, drivers, days=CASES[name].days, diagnostics=diagnostics)
+    days = CASES[name].bookkeeping
+    results = wsimod_run(model, state, drivers, days=days, diagnostics=diagnostics)
     event = diagnostics["events"]["inaccurate_evaporation"].any(dim=-1)
     if name == "evaporation_clamp":
         assert bool(event.any())  # its residual is the clamp gap: the tests below
@@ -575,6 +978,49 @@ def test_the_mass_balance_closes_on_every_case(name, mode):
         float(balance.outflow.abs().sum() + balance.inflow.abs().sum()) > 0.0
         or float(balance.storage_change.abs().sum()) > 0.0
     )
+
+
+def _has_land(name: str) -> bool:
+    nodes = CASES[name].build()["nodes"]
+    return any(n.get("type_") == "Land" for n in nodes)
+
+
+LAND_RUN_CASES = [(name, mode) for name, mode in RUN_CASES if _has_land(name)]
+
+
+@pytest.mark.parametrize(("name", "mode"), LAND_RUN_CASES)
+def test_the_parts_sum_to_the_running_terms(name, mode):
+    """D11: the per-function parts of each direction sum to the Land's running term (WSIMOD
+    adds sequentially, ``land.py:444-449``; the parts differ by summation order only), over
+    the case's bookkeeping prefix (Y68)."""
+    model, state, drivers = _case(name, mode)
+    results = wsimod_run(model, state, drivers, days=CASES[name].bookkeeping)
+    balance = results.mass_balance
+    tolerance = 1e-12 * CASES[name].scale
+    for direction, term in (("in", "Land.running_inflow_mb"), ("out", "Land.running_outflow_mb")):
+        total = sum(balance.parts[direction].values())
+        assert float((total - balance.terms[term]).abs().max()) <= tolerance
+    if name == "surface_decay_nitrification" and mode == "pollutants":
+        assert float(balance.parts["in"]["Surface.nitrite_carry_over"].abs().max()) > 0.0
+
+
+def test_the_parts_are_not_in_the_balance():
+    model, state, drivers = _case("pervious_only")
+    results = wsimod_run(model, state, drivers, days=CASES["pervious_only"].days)
+    balance = results.mass_balance
+    assert balance.parts["in"] and balance.parts["out"]
+    for names in balance.parts.values():
+        assert not set(names) & set(balance.terms)
+    day = model.wsimod_day
+    direction: dict[str, str] = {}
+    for element in [*day.engine.nodes.values(), *day.engine.arcs.values(), *day._internal_arcs]:
+        direction.update(element.mass_balance)
+    inflow = sum(v for k, v in balance.terms.items() if direction.get(k) == "in")
+    outflow = (
+        sum(v for k, v in balance.terms.items() if direction.get(k) == "out")
+        + balance.terms["dropped"]
+    )
+    assert torch.equal(balance.residual, inflow - outflow - balance.storage_change)
 
 
 def test_drops_are_recorded_where_waters_are_dropped():
@@ -915,10 +1361,10 @@ def _completed_records(day, **kw) -> list:
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_consecutive_balance_windows_meet(name, mode):
     """X8: a day's window ends at the state ``end_timestep`` leaves, which is the next day's
-    loaded state, so consecutive windows meet exactly."""
+    loaded state, so consecutive windows meet exactly (the case's bookkeeping prefix, Y68)."""
     model, _, _ = _case(name, mode)
-    records = _completed_records(model.wsimod_day, days=CASES[name].days)
-    assert len(records) == CASES[name].days
+    records = _completed_records(model.wsimod_day, days=CASES[name].bookkeeping)
+    assert len(records) == CASES[name].bookkeeping
     for d in range(len(records) - 1):
         assert torch.equal(records[d + 1].storage_start, records[d].storage_end), (name, d)
 
@@ -926,17 +1372,18 @@ def test_consecutive_balance_windows_meet(name, mode):
 @pytest.mark.parametrize(("name", "mode"), RUN_CASES)
 def test_end_timestep_records_no_decision_and_no_maxiter(name, mode):
     """D22: ``end_timestep`` records no decision and no ``maxiter``; a later one that does
-    fails here, and ``_finish_record`` would have to re-snapshot it."""
+    fails here, and ``_finish_record`` would have to re-snapshot it (the case's bookkeeping
+    prefix, Y68)."""
     model, _, _ = _case(name, mode)
     day = model.wsimod_day
     day.record_decisions = True
     seen = []
     try:
-        for _, ctx, _ in day.run_days(days=CASES[name].days):
+        for _, ctx, _ in day.run_days(days=CASES[name].bookkeeping):
             seen.append((ctx, len(ctx.decisions), dict(ctx.maxiter)))
     finally:
         day.record_decisions = False
-    assert len(seen) == CASES[name].days
+    assert len(seen) == CASES[name].bookkeeping
     for ctx, decisions, maxiter in seen:
         assert decisions > 0 and len(ctx.decisions) == decisions
         assert ctx.maxiter.keys() == maxiter.keys()
