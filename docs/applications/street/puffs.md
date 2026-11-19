@@ -1,419 +1,215 @@
-# Street puffs: unsteady above-roof transport
+# Unsteady above-roof puffs
 
-The design and the measurements behind `noodl.apps.street_aq.puff`, the unsteady
-above-roof puff model of the street application. How to use it is in
-[Street air quality: Unsteady above-roof transport](index.md#unsteady-above-roof-transport-puffs);
-this page says what SIRANERISK does, what noodl does differently and why, and what was
-measured. The section numbers are the ones the source docstrings cite as "design Sect. N".
-All numbers were taken in November 2026 on a shared Windows machine (CPU, float64); timings
-on that machine varied by up to 2x between runs, so treat them as orders of magnitude.
+How to model a short release, or any cloud that passes in minutes, with Gaussian puffs above the roofs. `build_model(..., puffs=PuffOptions(...))` replaces the steady above-roof relation of [Above-roof concentration](above-roof.md) with puffs fed by the streets and feeding back into them. The streets stay one well-mixed box each, stepped by `Model.step`; what changes is who writes their boundary `C_ext`. The model is described on the [physics page](physics.md#unsteady-puffs-above-the-roofs), and the cost measurements are in the [design note](../../project/design/street_puffs.md).
 
-Common setup of the accuracy measurements, unless a section says otherwise:
-`twelve_street_grid()` (L, W, H = 100, 20, 20 m), u* = 0.5 m/s, wind 0.3 rad, h = 800 m,
-neutral, sigma_theta = 6 degrees, H_R = 20 m, z0 = 1 m, d = 13 m, x_max = 700 m, default
-empirical inputs, `junction_source="upward"`.
+## A short release above the roofs
 
-## 1. SIRANERISK and what noodl keeps of it
+```python
+import math
+import torch
+from noodl.apps.street_aq import (
+    PuffOptions, PuffState, build_model, mass_in_streets, pending_roof_mass, puff_mass,
+    twelve_street_grid,
+)
 
-SIRANERISK (Soulhac et al. 2016) is SIRANE's unsteady version for accidental releases. Above
-the roofs it carries the material in Gaussian puffs whose spreads follow a covariance
-equation with Lagrangian time scales (Eqs. 4-6 of that paper); inside the streets it follows
-the material in Lagrangian boxes that move along each street (its Sect. 2.2). The puffs are
-fed by the streets' roof fluxes and the junctions' vertical fluxes and feed back into the
-streets through the same roof exchange as the steady model. The comparison of its
-above-roof puffs with a Lagrangian model over flat ground is in the HARMO 14 paper, not
-the 2016 one.
+DT = torch.float64
 
-noodl keeps the structure (puffs above the roofs, two-way through the roof exchange) and
-departs from SIRANERISK where the steady model has to remain its limit:
+net, names = twelve_street_grid()               # 12 streets, L = 100 m, W = H = 20 m
+model, state, drivers = build_model(net, background="per_street", puffs=PuffOptions(
+    sigma_theta=math.radians(6.0),              # wind-direction spread, rad
+    n_releases=1,                               # one explicit above-roof release
+))
+c_bg = torch.zeros(12, dtype=DT)                # background above each roof, kg/m3
+drivers = {
+    **drivers,
+    "street.x_boundary": c_bg,
+    "u_star": torch.tensor(0.5, dtype=DT),      # friction velocity, m/s
+    "theta_w": torch.tensor(0.3, dtype=DT),     # rad CCW from east, blowing TOWARD
+    "h_abl": torch.tensor(800.0, dtype=DT),     # boundary-layer depth, m
+    "puff.release_xy": torch.tensor([[-150.0, 20.0]], dtype=DT),  # m
+    "puff.release_z": torch.tensor([30.0], dtype=DT),             # release height, m
+    "puff.release_rate": torch.tensor([3e-3], dtype=DT),          # kg/s
+    "puff.release_start": torch.tensor([12.0], dtype=DT),         # s
+    "puff.release_duration": torch.tensor([17.0], dtype=DT),      # s
+}
 
-| | SIRANERISK | noodl |
+dt, c_ext, x = 5.0, [], []
+for k in range(80):                             # 400 s
+    state = model.step(state, drivers, dt, t=dt * k)
+    c_ext.append(state["puff.c_ext"])           # C_ext over step k, kg/m3
+    x.append(state["street.x"])                 # street concentration at its end, kg/m3
+c_ext, x = torch.stack(c_ext), torch.stack(x)
+
+dose = x.sum(0) * dt                            # kg s/m3
+s = int(dose.argmax())
+print(f"most exposed street {names[s]}: dose {float(dose[s]):.3g} kg s/m3")
+print(f"C_ext first above zero at t = {int((c_ext[:, s] > 0).nonzero()[0]) * dt:.0f} s, "
+      f"peaks at t = {int(c_ext[:, s].argmax()) * dt:.0f} s")
+print(f"street concentration peaks at t = {(int(x[:, s].argmax()) + 1) * dt:.0f} s")
+
+# the mass budget: streets + puffs + left + dropped - drawn down + not yet emitted
+puff = PuffState.from_state(state)
+emitted, drawn = pending_roof_mass(model, state, c_bg)
+held = (mass_in_streets(model, state, c_bg) + puff_mass(puff) + puff.mass_out
+        + puff.mass_dropped - puff.mass_drawn_down + emitted - drawn)
+print(f"released {3e-3 * 17.0:.6f} kg, accounted for {float(held[0]):.6f} kg")
+```
+
+```text
+most exposed street 6: dose 3.93e-06 kg s/m3
+C_ext first above zero at t = 35 s, peaks at t = 60 s
+street concentration peaks at t = 85 s
+released 0.051000 kg, accounted for 0.051000 kg
+```
+
+The release is 50 m west of the grid's western street ends and 10 m above the roofs. Its cloud
+reaches the streets after the travel time and passes; `C_ext` above the most exposed street
+peaks before the street itself, which then flushes at its own exchange rate. A steady run
+would have spread the same release over the whole hour.
+
+A release inside a street is a source on the street layer: any `"street.sources"` history
+the caller writes, or the `PulseSource` closure, which adds a top-hat release
+(`"pulse.rate"` kg/s from `"pulse.start"` for `"pulse.duration"` s, shared over the streets
+by `"pulse.weights"`) whose start and duration are differentiable even inside a step. It
+runs before the flow closure, and the puff closure is bound to the new model:
+
+```py
+from noodl.apps.street_aq.puff import PulseSource
+from noodl.model import Model
+
+pulsed = Model(model.net, model.layers, closures=[PulseSource(model.net, names),
+                                                  *model.closures])
+model.closures[-1].bind(pulsed)                 # the puff closure reads its wiring
+```
+
+## Options and drivers
+
+`PuffOptions`, all keyword arguments:
+
+| Option | Default | Unit | What it sets |
+|---|---|---|---|
+| `h_canopy`, `z0`, `d` | 20, 1, 13 | m | The tables' canopy (reflection) height $H_R$, roughness length and displacement height, as `plume_table`'s. |
+| `sigma_theta` | `None` | rad | The tables' wind-direction spread; `None` reads the `"sigma_theta"` driver. |
+| `junction_source` | `"upward"` | | `"upward"` or `"net"`, as for `street_steady_with_plume`; under `"upward"` the puff material that incoming vents carry down into the streets is counted in `mass_drawn_down`. |
+| `along_wind` | `"sigma_y"` | | The along-wind profile (table on the [physics page](physics.md#puffs-and-their-mass)). |
+| `capacity` | 4096 | puffs | Slots per batch instance. When they are full the faintest live puffs are evicted into `mass_dropped` and `PuffClosure.last["evicted"]` counts them; raise the capacity until that count is zero (a 577-street city case peaks at 6350 live puffs and needs 8192). |
+| `puff_dt` | `None` | s | The emission interval. `None` gives one puff per source per street step. A number (a multiple of the street step) accumulates each source's mass over the interval into one puff whose slug spans it. It saves capacity, not time: the work of evaluating `C_ext` follows the area the cloud covers, not the number of puffs. Within an interval the newest material is pending rather than a puff, so `C_ext` near the sources lags by up to one interval and short releases are smeared over it. On `twelve_street_grid` with 30 s intervals and 5 s steps a steady `C_ext` flickers by up to 0.74 of its peak each interval (street concentrations stay within 3 %), and a 17 s release's peak street concentration is off by 0.38 of it and its dose by 2.5 %. |
+| `drop_below` | 1e-3 | | The faint threshold, relative to the brightest puff of the instance by a cheap peak estimate; dropped mass goes to `mass_dropped`. Against 1e-6 it changes street concentrations and `C_ext` by about 1e-4 of their peak. |
+| `cutoff_sigma` | 4 | standard deviations | The profiles' cut-off, as the steady kernel's. |
+| `x_max` | 700 | m | The steady kernel's downwind cut-off. Under `retire="distance"` it is the tables' extent, and a puff retires, into `mass_out`, when its centre passes it, while the near end of its slug may still be inside, so receptors within half a slug of `x_max` see a small step in `C_ext`. Under `"domain"` the tables reach the network's diagonal plus `x_max`. |
+| `retire` | `"distance"` | | How a puff leaves, into `mass_out`: `"distance"` past `x_max` from its source, as the steady kernel; `"domain"` once the whole network lies upwind of its rear edge ([the physics page](physics.md#puffs-and-their-mass)), for releases whose cloud crosses the network. |
+| `n_releases` | 0 | | The number of explicit above-roof releases. |
+| `shear` | `False` | | Wind-shear stretching along the wind (Sykes and Henn, 1995; [physics](physics.md#wind-shear-stretching)); needs `along_wind="sigma_y"` (with `"none"` it is refused by name). |
+| `table_kwargs` | `{}` | | The empirical inputs passed on to `puff_tables` (`theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"` entry (m) is the centre-law constant of the street and junction sources' table. |
+
+The drivers the closure reads, one value per batch instance. Under `meteo="per_street"`
+the meteorology carries a street axis whose values must all be equal, since the tables
+take one meteorology per instance; a gradient with respect to such a driver reaches its
+first entry only.
+
+| Driver | Unit | What it is |
 |---|---|---|
-| Spreads of a puff | its own covariance equation with Lagrangian time scales | SIRANE's steady plume laws, read from the steady kernel's own table at the puff's age (Sect. 4.4) |
-| Inside a street | Lagrangian boxes moving along the street | one well-mixed box per street, as the steady model |
-| Along the wind | plain Gaussian puffs | a slug of the length the puff train covers in one step, alone (`"none"`) or convolved with a Gaussian of `sigma_y` (`"sigma_y"`, the default) (Sect. 4.3) |
-| Puff records | one per emission | one per source (street, junction, release) per step; a street's sub-sources are expanded at evaluation (Sect. 4.3) |
-| Emission | within the step | one step late: the closure emits at the start of a step what the street step before it moved (Sect. 4.2) |
-| Housekeeping | not described in the 2016 paper | fixed capacity per batch instance, puffs retired past the domain and below a relative faint threshold, with every retired mass counted (Sect. 4.8) |
-
-The reason for the first and third choices is the consistency claim the paper makes: under
-constant meteorology and emissions the puff model must converge to the steady kernel as the
-step shrinks (with along-wind spreading off). That holds exactly as built (Sect. 2); it
-would not hold with SIRANERISK's covariance equation, whose spreads are not the steady
-table's.
-
-## 2. The steady limits
-
-`twelve_street_grid`, the steady puff train of a unit continuous source at each of the 24
-sources (12 streets, 12 junctions; ages dt, 2 dt, ... out to x_max, mass dt) evaluated at
-the street midpoints, against `[street_kernel | junction_kernel]` from `plume_table` with
-the same inputs. Error: max |K_puff - K| / max K.
-
-**`along_wind="none"`: the kernel itself.** At every step tried (10, 8, 6, 5, 4, 3, 2.5, 2,
-1.25, 1, 0.625, 0.3125, 0.15625, 0.078125 s) the error is 1.9e-16 to 9.4e-16. The test
-(`test_steady_limit_without_along_wind_spread_is_the_kernel`) asserts 1e-12 at 10, 5, 2.5,
-1.25 and 0.625 s, and the same bound in a weakly unstable (h/|L| = 0.165; measured 4.8e-16)
-and a weakly stable (h/L = 0.5) hour (`test_steady_limit_in_a_weakly_unstable_hour_is_the_kernel`,
-`test_steady_limit_in_a_weakly_stable_hour_is_the_kernel`).
-The coupled run against `street_steady_with_plume` (run until `C_ext` changes by less than
-1e-12 relative per step) reaches 7.9e-12 at 10 s and 1.6e-11 at 5 s, the stopping rule's
-level (`test_coupled_steady_limit_without_along_wind_spread_is_the_steady_model`, slow).
-
-What these checks cannot see: the one-step emission lag. A continuous source's newest
-material sits at ages `[dt/2, 3dt/2]` when `C_ext` is evaluated, so the puff train leaves a
-gap `[0, x(dt/2))` downwind of every source. No receptor-sub-source pair of this grid lies
-in that gap at any of these steps, so the lag's first-order term is invisible here; a
-receptor that close to a source (closer than half a step's travel, about 6.5 m at 5 s here) would
-see it.
-
-**`along_wind="sigma_y"`: a floor.** The design expected convergence to the kernel smoothed
-along the wind with the puff's own profile. As built (Sect. 4.3) the error against the
-plain kernel converges at first order in dt to a floor: 0.117 (10 s), 0.0699 (5 s), 0.0577
-(2.5 s), 0.0457 (1.25 s), 0.0468 (0.625 s), toward about 0.047. The floor is the along-wind
-diffusion the steady Gaussian plume neglects (the slender-plume approximation), a property
-of the steady kernel rather than an error of the puffs. The smoothed-kernel reference was
-not built. The test (`test_steady_limit_with_along_wind_spread_has_a_converged_floor`)
-asserts the floor is below 0.10 for dt <= 5 s and changes by less than 10 % between 1.25 s
-and 0.625 s.
-
-## 3. Constraints
-
-The puff mass is what one backward-Euler street step moved, so the street model must be
-built with `background="per_street"`, `scheme="backward_euler"`, one substep, one species,
-ping-pong coupling, and no removal or reaction; everything else is refused by name. Under
-`coupling="iterate"` the closure would read a relaxed end-of-step state from the second
-pass on; a building coupled two-way through `noodl.couple.union` is unaffected, since
-`union` re-steps the whole street model from the step start. `union` itself is unchanged:
-the puffs live in the street model's state as closure-carried keys.
-
-## 4. The model
-
-### 4.2 Sources and the emitted mass
-
-Each step, from the street state at its start, the closure emits the previous step's
-masses: street roof fluxes `q_s (x_s - C_ext,s) dt` (signed), junction vertical fluxes as
-excess over the background (`"upward"`: out through the vents; `"net"`: minus what came
-back down), and each release's `pulse_mass` over the previous step. The emission lags the
-flux by one step, an error of first order in dt (Sect. 2). Above-roof releases are emitted
-one step late too, from the same emission point. Emission uses the current step's
-background, exact for a background constant in time.
-
-`PulseSource` adds a canopy release to `"<layer>.sources"`; it does not apply
-`Street.emission_scale`, because the transport layer that `build_model` builds already
-scales the sources, and scaling here would apply it twice.
-
-### 4.3 What a puff is
-
-A puff record carries a mass, an age, a displacement from its source, its source and its
-table. A street's puff is evaluated as its `floor(L/10) + 1` sub-sources
-(`plume.source_points`), all displaced together, so the steady limit is `street_kernel`,
-itself a sum over those sub-sources; one record per street keeps the state small.
-
-**As built, not as first designed.** The design gave the slug the length `ell = U(a) dt`,
-centred on the puff, read every profile at the puff's own distance, and promised
-convergence to the smoothed kernel under `"sigma_y"`. Two measured problems changed that:
-
-- `ell = U(a) dt` does not tile the axis exactly where the table's speed changes between
-  neighbouring puffs. The slug of a puff of age `a` now spans `[x(a - dt/2), x(a + dt/2)]`
-  (ages clamped at 0), which tiles for any dt.
-- Reading `sigma_y` and `p_z` at the puff's distance for every receptor the slug covers is
-  off by O(ell) at the slug's ends (sigma_y grows by ~0.37 m per m there), and the error
-  aliases with the sub-sources' along-wind spacing (2.69 m at this wind): at 2, 6 and 8 s
-  the slug length is close to a multiple of the spacing and the error spikes to 0.046,
-  0.17 and 0.21 of max K, against 0.009-0.036 at 2.5, 3, 4, 5 and 10 s (inside an envelope
-  of about 0.026 dt). The error was first order but not monotone in dt.
-
-So **a receptor reads the table at its own distance** `x(a) + s` from the source (`s` its
-along-wind offset from the puff):
-
-- `"none"`: the slug is a segment of the steady plume, not a uniform top-hat. Its density
-  along the wind is `m / (tau u(x(a) + s))`, `tau` the slug's age span; it integrates to
-  `m` over the slug because the integral of `dx / u` across it is `tau`. The steady limit
-  is then the kernel to rounding (Sect. 2).
-- `"sigma_y"`: the read is clamped to the slug's ends and multiplied by the slug convolved
-  with a Gaussian of `sigma_x = sigma_y(x(a))`, density `m / ell`. The Gaussian smooths
-  the remaining aliasing; the steady limit is the floor of Sect. 2, not the smoothed
-  kernel.
-
-The default is `"sigma_y"` (a passing cloud spreads along the wind); the consistency claim
-is stated for `"none"`.
-
-### 4.4 Trajectory and spreads: the steady table in time
-
-The puffs read the steady kernel's own 10 m distance table: `plume_table`'s `u`, `sigma_y`
-and roof-level `p_z` bit for bit, plus the scan's `sigma_z` and `z_c` resampled onto the
-same grid. A puff's age maps to its distance by the exact travel time of the table's
-piecewise-linear `u(x)` (in cell k, `dx/dt = u_k + g_k (x - x_k)`, so `x(t)` is exponential
-in `t`, linear where `g_k = 0`), and `advance` moves a puff by `x(a + dt) - x(a)`, exact
-for any dt.
-
-The first build read the scan's 10 s time nodes instead, as the design planned. Its steady
-limit had a floor that did not fall with dt (kernel level, max |dK| / max K):
-
-| dt (s) | 10 | 5 | 2.5 | 1 | 0.5 |
-|---|---|---|---|---|---|
-| error | 0.023 | 0.049 | 0.056 | 0.053 | 0.053 |
-
-Two causes, both in the tables: the scan moves the plume at its node speed, which jumps by
-up to 7 % each time the centre height passes a whole metre, while the kernel divides by the
-speed interpolated on the distance grid (a 7.0 % speed mismatch, which accounts for the
-whole far-field floor); and `P_z` computed from
-`sigma_z(0) = 0` diverged in the first 10 s, where the kernel holds `P_z0 = P_z1`. Reading
-the kernel's own grid removes both.
-
-When the meteorology changes, the tables are rebuilt and live puffs read the new table at
-their age; when the wind direction turns, the source field (sub-source widths and caps, a
-projection of each street on the wind) is rebuilt too, and the puffs' further path turns.
-
-**Stability classes.** The tables share `plume_table`'s classification, SIRANE's (ADMS's)
-classes in `h/L`: the neutral class `-0.3 <= h/L <= 1` (`plume.CONVECTIVE_H_OVER_L`,
-`plume.STABLE_H_OVER_L`) is tabulated with neutral turbulence (`a = 2.5 u*/h`, no
-Brunt-Vaisala frequency), `L` entering only the wind profile; `h/L > 1` takes the stable
-law. On SIRANE probe runs along the wind the stable law was off in that band by 1-11 % at
-the median (sigma_y 21, 8 and 1.5 % off at h/L = 0.25, 0.5 and 0.9); the neutral
-tabulation is about 2.5e-4. Convective hours, `h/|L| > 0.3`, are refused by name: SIRANE
-switches there to another vertical mechanism, not yet reproduced. That is an open
-limitation: 43451 of the Paris case's 96936 street-hours over its week (45 %) are
-convective.
-
-### 4.5 `C_ext` and the step
-
-The closure's order is emit, advance, housekeep, evaluate. The flux of step k is emitted at
-the start of step k+1 at age 0 and advanced by dt before `C_ext` is evaluated, so its slug
-then covers `[x(dt/2), x(3 dt/2)]`: the ages of the material that left during step k,
-measured at the middle of step k+1, the interval over which that `C_ext` is used.
-
-The tables and the field are cached and rebuilt when a meteorology driver changes in value
-or is a different tensor; a value-only cache would reuse the graph of an earlier run and
-give a wrong gradient under finite differences or repeated losses. The cache is also
-dropped at the start of every run and keyed on the grad mode.
-
-**Memory under autograd.** The whole puff step (emit, advance, housekeep, evaluate) is
-checkpointed, and inside it `_evaluate` checkpoints its pair chunks. Autograd-saved bytes,
-summed by `saved_tensors_hooks` over 40 steps at capacity 1024, B = 1
-(`test_saved_bytes_grow_linearly_with_the_live_puffs`):
-
-| checkpoint | per step | after 40 steps |
-|---|---|---|
-| on (default) | 22 KB, constant | 0.86 MB |
-| off | 1.6 MB (step 0) to 29 MB (step 35), growing with the live puffs | 605 MB |
-
-These are the bytes the hooks see. Not counted: each step's input `PuffState` held by
-reference (about 12 (B, K) arrays, ~0.1 MB per step at K = 1024) and the field and tables
-the checkpointed step captures. Checkpointing only the evaluation left ~200 (B, K) arrays a
-step (1.6 MB at K = 1024, 6.4 MB at K = 4096), which is why the whole step is checkpointed;
-the saved memory then scales with the capacity K, not with the live count.
-
-The cost: forward plus backward 1.8-1.9x the uncheckpointed time (`twelve_street_grid`, 40
-steps, 627 live puffs at the end, 4 threads):
-
-| B | checkpoint | forward, no grad | forward, grad | backward | forward + backward |
-|---|---|---|---|---|---|
-| 1 | on | 36.9 ms/step | 72.7 | 113.5 | 186.2 |
-| 3 | on | 62.1 | 116.8 | 162.0 | 278.8 |
-| 1 | off | 34.4 | 59.6 | 41.7 | 101.3 |
-| 3 | off | 64.9 | 89.9 | 55.1 | 145.0 |
-
-Part of the backward's cost is the nesting: in a differentiated step the backward
-recomputes the step, whose chunk checkpoints then recompute each pair block once more in
-their own backward, so the pair-block work runs three times rather than two.
-
-Gradients against central differences (Test 4, `drop_below = 0`): relative differences
-4.2e-10 (canopy pulse rate), 1.5e-9 (pulse start), 8.2e-11 (release rate), 9.7e-8 (release
-start, a small gradient from cancelling terms, at the difference quotient's rounding floor),
-5.5e-10 (release duration), 6.9e-10 (u*), 2.3e-9 (wind direction), 9.8e-10 (release x).
-With the old default `drop_below = 1e-6` a faint-drop decision flipped within the
-finite-difference step of the release start (5e-3 off); the test turns dropping off, and a
-pulse ending exactly on a step boundary puts the overlap's kink on the difference point,
-which the test avoids.
-
-### 4.6 Receptors and standalone mode
-
-`concentration_at` evaluates the puffs at points of any height, with the vertical profile
-of the interpolated `sigma_z` and `z_c` and without the roof-level cap; `PuffField.points`
-with only explicit releases is the flat-ground model. At roof level `C_ext` reads the
-table's `p_z`, linear between grid points, while a free receptor at `H_R` evaluates the
-profile of the interpolated `sigma_z` and `z_c`: on the grid points the two agree, between
-them they differ slightly.
-
-### 4.7 Wind-shear stretching
-
-`PuffOptions(shear=True)` (Sykes and Henn 1995, "Representation of velocity gradient
-effects in a Gaussian puff model", *J. Appl. Meteor.* 34, 2715-2723): a vertical shear
-`S = dU/dz` of the tables' wind profile `plume.wind_speed` (row by row,
-`PuffTables.shear_rate`, the derivative in closed form, below), at
-`z_s = max(z_c, 0.65 sigma_z)`, grows two per-puff moments:
-
-    d(sigma_xz)/dt = S sigma_z^2,   d(sigma_x^2)/dt|shear = 2 S sigma_xz
-
-(`"puff.sxz"`, `"puff.sx2_shear"`, zero at birth; they move with the puffs through emit,
-eviction, housekeeping, batching and checkpointing like the other fields). `advance(...,
-shear=True)` integrates them per step with `S` at the step's middle age `a + dt/2` held
-over the step and `sigma_z^2` the quadratic in age through its values `q0`, `qm`, `q1` at
-`a`, `a + dt/2`, `a + dt`:
-
-    sxz       += S dt (q0 + 4 qm + q1) / 6
-    sx2_shear += 2 S (sxz dt + S dt^2 (q0 + 2 qm) / 6)
-
-exact for a constant `S` and a `sigma_z^2` quadratic in age (tested against
-`sigma_xz = S a^2 t^3 / 3`, `sigma_x,shear^2 = S^2 a^2 t^4 / 6` for `sigma_z = a t` to
-1e-10 at `dt = 0.1 s`). On real tables the rate varies with `z_s` and `sigma_z` is
-piecewise linear on the 10 m grid, whose kinks mask a clean order in `dt`: a puff released
-at 30 m in a stable hour has, at age 120 s, `sxz` within 1.8e-5 and `sx2_shear` within
-1.1e-4 (relative) at `dt = 10 s` of their values at `dt = 0.25 s`, and 5.2e-6 / 1.9e-5 at
-2 s. `S` is the closed-form derivative of the profile, `u* phi_m(z'/L) / (kappa z')` with
-`z' = z - d + z0` and `phi_m` Businger's (`1 + 5 zeta` stable and neutral,
-`(1 - 16 zeta)^(-1/4)` unstable), consistent with `plume._psi_m`; it needs no autograd, so
-it runs under `torch.inference_mode`. Under `puff_dt` a puff is born at a positive age
-(the middle of its interval less a step) with zero moments: it misses their growth over
-that age, cubic (`sxz`) and quartic (`sx2_shear`) in it, small for intervals of tens of
-seconds.
-
-Evaluation. The puff is a correlated `(x, z)` Gaussian of along-wind variance
-`sigma_x^2 = sigma_y(x(a))^2 + sx2_shear` and covariance `sxz`, convolved along the wind
-with the slug. It is written as the vertical profile times the conditional along-wind
-profile: each term of the vertical profile, centred at `z_k` (`z_c`, `2 H_R - z_c`,
-`2 h - z_c`), multiplies the slug convolved with a Gaussian of the conditional variance
-`sigma_x^2 - sxz^2 / sigma_z(x(a))^2` (the shear part floored at zero), shifted along the
-wind by `beta (z - z_k)`, with `beta = sxz / sigma_z(x(a))^2` for the plume and `-beta` for
-both images (a reflection in `z` flips the sign of `sxz`). `beta` and the conditional
-variance are the puff's own, at its distance `x(a)`, as `sigma_x` is. The floor on the
-conditional variance's shear part, `max(sx2_shear - sxz beta, 0)`, can be active: a table
-whose `sigma_z` stops growing (or a meteorology rebuild that shrinks it, since the moments
-are kept while `sigma_z` is read afresh) makes `sxz^2 / sigma_z^2` exceed `sx2_shear`.
-Mass stays exact there (the along-wind profile still integrates to one); the gradient
-through the floored part is zero. The vertical terms
-are read at the receptor's distance, as without shear. For a slug of vanishing length and
-constant spreads this is exactly the bivariate Gaussian with its images (tested to 1e-8).
-
-Mass. Every term's along-wind factor integrates to one whatever its shift and width, so
-the line integral of a sheared puff along the wind at any height is the unsheared one
-(tested to 1e-9 at five heights and at roof level): the shear moves material along the
-wind and neither makes nor loses any, and the budget identity of Sect. 4.8 holds
-unchanged (tested every step over 60 steps with the wind turning).
-
-Roof level. At `z = H_R` the plume and its canopy image have the same shift
-`beta (H_R - z_c)`, the inversion image `beta (2h - H_R - z_c)`; the factor is the
-table's `min(p_z, clamp)` times the weighted mean of the two along-wind factors, the
-inversion image's weight its share of the profile at `H_R` (a logistic of the exponents'
-difference, finite as `sigma_z -> 0`). With `sxz = 0` this is the unsheared factor.
-
-The along-wind cut-off (exact cut and coarse mask) takes `sigma_x` with its shear part.
-`shear=True` needs `along_wind="sigma_y"`: the `"none"` slug is a segment of the steady
-plume with no along-wind Gaussian to stretch or correlate with `z`, and is refused by
-name. With `shear=False` nothing of this runs: the values are bit-identical to the
-unsheared model (the evaluator and one-puff-per-step regression fixtures pass unchanged).
-
-### 4.8 Housekeeping and the budget
-
-Fixed capacity K per batch instance, arrays (B, K) and a live mask, no Python lists of
-puffs. Each step retires the puffs that have left into `mass_out` and those whose peak
-estimate is below `drop_below` times the instance's largest into `mass_dropped`; when new
-puffs do not fit, the faintest live ones are evicted into `mass_dropped`. The peak estimate
-reads the profiles at the puff's own distance, so it is a ranking, not a bound (a receptor
-can see up to about twice it).
-
-A puff has left (`retire`, `PuffOptions`) either past `x_max` from its source
-(`"distance"`, the default, the steady kernel's cut-off) or once its rear edge is downwind
-of every corner of the box around the street and junction sources (`"domain"`). The rear
-edge is the puff's most upwind sub-source less `x(a) - x(a - span/2)` (half its slug) and
-`cutoff_sigma` along-wind spreads (`sigma_y`, plus `sx2_shear` under shear): past it the
-evaluator's own cut-off leaves no receptor in the box. The current wind decides, so a later
-reversal does not revive a retired puff. Under `"domain"` the tables reach the network's
-diagonal plus `x_max`, which leaves room for the margin and for releases outside the box;
-the grid only grows, and its first `x_max` is bit-identical. `"distance"` alone would drop
-a release cloud 700 m from its source in a larger network. A release injected at street
-level (`PulseSource`) leaves the streets as street puffs, so the rule is per model, not
-per source.
-
-`drop_below`: on a pulse release over `twelve_street_grid` (above-roof release 3e-3 kg/s
-over [12, 29] s, 80 steps of 5 s) 1e-3 against 1e-6 changes the most-hit street's
-concentration by 1.26e-4 of its peak, its `C_ext` by 1.06e-4 and its dose by -5.5e-5; the
-default is 1e-3.
-
-The budget identity of the application page holds to 2.9e-15 relative over 60 steps in all
-tested cases (both junction sources, with and without eviction, with the wind turning);
-leaving out the not-yet-emitted mass gives 3.6e-2, so the identity discriminates.
-
-**Emission interval `puff_dt`.** With a number, each source's mass is accumulated over the
-interval and emitted as one puff whose slug spans it, aged from the interval's middle.
-`puff_dt = None` (the default) is the one-puff-per-step model bit for bit, and so is
-`puff_dt` equal to the step. At 30 s over 5 s steps (along_wind "none"):
-
-- kernel level, right after an emission the train is the kernel (7.5e-16); over the next
-  five steps the pending material leaves a growing lag gap: 3.8e-16, 3.8e-16, 7.1e-2,
-  0.81, 0.995 of max K;
-- coupled steady run over each interval's six steps: `C_ext` error 8.4e-3, 8.4e-3, 8.4e-3,
-  2.7e-2, 0.59, 0.74 of max (C_ext - C_bg), repeating; street concentrations 2.1-2.9e-2;
-- the pulse above: puff_dt 30 against None changes the most-hit street's concentration
-  peak by 0.376, its `C_ext` by 0.570 and its dose by 2.5e-2.
-
-It buys no time (Sect. 4.10): the pair work follows the area the cloud covers, and a 30 s
-slug covers six times the (receptor, sub-source) pairs of a 5 s one. It saves capacity
-only, so the default is `None` and a number is an opt-in.
-
-### 4.9 Batching and differentiability
-
-A leading batch over releases and meteorology on every per-puff array and on the tables; a
-batch of three releases (different streets, start times, u*) equals three runs to
-rounding. Masks, drop decisions and evictions are taken on detached values; second-order
-differentiation is refused by name. Under `meteo="per_street"` the tables take the first
-street's entry of each (uniform) meteorology driver, so its gradient reaches that entry
-only.
-
-### 4.10 Cost at Paris scale
-
-The design estimated 50-100 ms per step per instance. Case: the Le Perreux-sur-Marne MUNICH
-case (577 streets, `benchmarks/street_puffs.py` with `NOODL_PARIS_CASE`), hour 2 held
-constant, `sigma_theta` 6 degrees, a pulse of 1 kg over 30 s on the street nearest the
-upwind edge, dt = 5 s, one hour (720 steps), `torch.no_grad()` for forward-only runs.
-
-| build | puff_dt | capacity | run | ms/step | peak live | evicted |
-|---|---|---|---|---|---|---|
-| first evaluator | None | 4096 | forward B=1 | 1507 | 3904 | 374730 |
-| first evaluator | 30 s | 4096 | forward B=1 | 1851 | 1834 | 0 |
-| first evaluator | 30 s | 4096 | forward B=8 | 4411 | 1963 | 0 |
-| first evaluator | 30 s | 4096 | forward + backward B=1, 120 steps | 5239 | 300 | 0 |
-| first evaluator | None | 16384 | forward B=1 | 3900 | 6350 | 0 |
-| current | None | 16384 | forward B=1 | 239 (median of 232-246) | 6350 | 0 |
-| current | None | 8192 | forward B=1 | 228 | 6350 | 0 |
-| current | None | 16384 | forward B=8 | 780 | 6738 | 0 |
-| current | None | 16384 | forward + backward B=1, 120 steps | 342 (312-432) | 1134 | 0 |
-
-At capacity 4096 and one puff per step the store saturates and evicts (that hour is not a
-valid result); 8192 evicts nothing at batch 1 or 8, and is the benchmark's default.
-
-The current evaluator gives the first one's values bit for bit (`torch.equal` on the
-recorded fixture of `test_evaluator_matches_the_recorded_reference` and on the Paris step
-360); its gradients differ by ~1e-16 relative, from the backward's accumulation order. What
-made it 16x faster: the active puffs compacted once instead of a dense (B, K, receptor)
-mask; a coarse mask in each instance's wind frame; receptors sorted along the wind once so
-that each puff's along-wind band is a `searchsorted` run; pair chunks sized by the
-sub-source pairs they expand to; table reads split so each mode reads only the columns it
-needs.
-
-The forward + backward rows ran over the first 120 steps only (peak 1134 live puffs),
-not the hour; the hour's forward + backward was not measured.
-
-Where a step's time goes (B = 1, steps 360-390, 4127 live, capacity 16384, profiled on the
-code just before the last evaluator change, so the parts sum to more than the 239 ms
-median of the final code; `_evaluate` alone on the captured step-360 state then took
-40-90 ms on a loaded machine): the street
-model outside the puffs about 187 ms, almost all the canyon wind's shape-parameter solve
-(`routing.velocities` -> `canyon.roof_wind` -> `bessel_shape_parameter`), recomputed every
-step under constant meteorology; the puff closure 163 ms, of which `_evaluate` 115 ms,
-`advance` 18 ms and `housekeep` 23 ms (both over all K slots, so they grow with the
-capacity) and `emit` 4 ms. Pair counts at step 360 (5167 live, 577 receptors): 341 k coarse
-candidates of 2.98 M (puff, receptor), 71 k coarse pairs, 356 k sub-source pairs, 203 k
-non-zero contributions.
-
-## 5. Reproduce
-
-- Steady limits, budget, gradients, batch, `puff_dt`, evaluator fixture:
-  `pytest tests/apps/street_aq/test_puff.py tests/apps/street_aq/test_puff_coupled.py`
-  (`-m slow` for the coupled steady runs; `-s` prints the `puff_dt` and `drop_below`
-  numbers).
-- Paris cost: `python benchmarks/street_puffs.py --batch 1 8 --steps 720` with
-  `NOODL_PARIS_CASE` pointing at the case directory (`--profile` for the breakdown).
-- Stability classes: `tests/apps/street_aq/test_plume.py` and the probe cases in
-  `tests/verification/test_sirane.py`.
+| `"street.x_boundary"` | kg/m³, `(..., n_streets)` | The background $C_{\text{bg}}$ above each street; the closure writes `C_ext` over it. Needs `background="per_street"`. |
+| `"u_star"`, `"theta_w"`, `"h_abl"` | m/s, rad, m | Friction velocity, wind direction (counter-clockwise from east, blowing toward) and boundary-layer depth. Required. |
+| `"lmo"` | m | The Obukhov length; neutral when absent. |
+| `"sigma_theta"` | rad | Only when `PuffOptions.sigma_theta` is `None`. |
+| `"puff.release_xy"` | m, `(B, R, 2)` or `(R, 2)` | The releases' horizontal positions. |
+| `"puff.release_z"` | m, `(B, R)` or `(R,)` | Their heights. Each release has its own table, whose centre law starts at that height. |
+| `"puff.release_rate"`, `"puff.release_start"`, `"puff.release_duration"` | kg/s, s, s; `(B, R)` or `(R,)` | Each release's top-hat history. Needs `Model.step(t=...)`. |
+
+The tables are rebuilt only when one of their drivers changes (in value, or as a different
+tensor), so under constant meteorology a run builds them once. A wind direction that
+changes between steps turns every puff's further path.
+
+`build_model(..., puffs=...)` needs `background="per_street"`, `scheme="backward_euler"`, one
+species and no chemistry. The closure also refuses, by name, a model coupled other than
+ping-pong, a sub-stepped street layer and a removal on it: a puff's mass is what one
+backward-Euler step without sinks moved.
+
+## How a puff leaves
+
+How a puff leaves is set by `retire`:
+
+- `"distance"` (the default) retires a puff once it is `x_max` (700 m) from its source.
+  That is the steady kernel's downwind cut-off, so a continuous source reproduces
+  `street_kernel`.
+- `"domain"` retires a puff once the whole network lies upwind of its rear edge: its most
+  upwind point, less half its slug and `cutoff_sigma` along-wind spreads. Use it for a
+  release, whose cloud matters wherever it is in the network. On a 1.5 km line of streets
+  a release under `"distance"` vanishes 700 m from where it was emitted; under `"domain"`
+  it reaches the last street at about ten times the concentration. The tables then reach
+  the network's diagonal plus `x_max`, and beyond their end a puff keeps its last spread.
+  In a network smaller than `x_max`, puffs leave sooner than under `"distance"`.
+
+The decision uses the current wind, so a puff retired just before the wind turns back is
+not revived. Under either rule, puffs fainter than `drop_below` times the brightest puff
+are dropped, and so are the faintest when the slots run out.
+
+## Resuming a run
+
+A query (`model.current_flows`, `model.residuals`, ...) evaluates `C_ext` from the puffs
+without advancing them. `PuffClosure.last` holds the latest step's live and evicted puffs
+per instance, and whether the tables were rebuilt.
+
+The closure caches the tables and the field across steps and rebuilds them when the
+meteorology, the release heights or the wind direction change. A driver that requires
+grad matches by identity and value, one that does not by value alone, so new tensors of
+the same value every step cost no rebuild. The cache holds the autograd graph of the run
+that built it, so it is dropped at the start of every run (a state with no pending step)
+and when a run resumes from a state the closure did not produce while the cache holds a
+graph: to continue a run after a backward (truncated backpropagation through time),
+detach every tensor of the state (`"puff.time"` included: the closure recognises a resume
+by that tensor's identity) and step on with the same driver tensors, and the gradient is that of a
+fresh closure resumed from the detached state. `PuffClosure.reset()` drops the cache by
+hand, to continue a run after a backward in any other way (a driver changed in place, a
+state kept with its graph and stepped again).
+
+## The mass budget
+
+With every mass in excess of the background, after every step:
+
+```
+sum_s V_s (x_s - C_bg,s) + sum_live m + mass_out + mass_dropped - mass_drawn_down
+    + (mass the next step will emit) - (mass it will draw down)
+  = sum over steps of (street sources * dt + release mass)
+```
+
+`mass_in_streets` gives the first term, `puff_mass` the second, the `PuffState` counters
+the next three, and `pending_roof_mass` the last step's roof and junction mass not yet
+emitted (with `puff_dt`, also the mass accumulated towards the next emission). The last
+step's release mass, also emitted only by the next step, is not in it: add
+`pulse_mass(t, dt, start, duration, rate)` of the last step. The identity
+holds to 1e-12 relative at every step: with puffs evicted for capacity, with
+the wind turning between steps and under both junction sources. It is exact for a
+background constant in time (each emission uses the current step's background).
+
+## Steady limits
+
+Under constant meteorology and emissions the puffs of a continuous source settle to a steady `C_ext`, and the model is built so that this limit is the steady kernel.
+
+- With `along_wind="none"` the steady puff train of a unit source at every street and junction reproduces `street_kernel` and `junction_kernel` to 1e-12 at every step from 10 s down to 0.625 s in a neutral hour, and to the same bound in a weakly unstable and a weakly stable hour; the coupled run reaches `street_steady_with_plume`'s solution to the run's own stopping tolerance. These checks do not see the one-step emission lag: a receptor closer to a source than half a step's travel would.
+- With `along_wind="sigma_y"` the limit is the kernel smoothed along the wind, the along-wind diffusion the steady Gaussian plume neglects. Against the plain kernel the difference converges at first order in the step to a floor of about 4.7 % of the largest kernel entry.
+
+The measurements are on the [verification page](../../reference/verification/street.md#unsteady-puffs).
+
+## Gradients and cost
+
+A puff's mass is linear in the street state and the fluxes, and a release's rate, start,
+duration, position and height, the meteorology (`u*`, `h_abl`, `L`, `sigma_theta`, through
+the tables) and the wind direction are all differentiable. Gradients of the coupled run agree with central differences in a canopy pulse's rate and start, a release's rate, start,
+duration and x position, `u*` and the wind direction; the tables' gradients in `u*`, `L`
+and the release height are checked to be finite and non-zero, and the steady table's in
+`h_abl` and `sigma_theta` against central differences; the release height, `h_abl` and
+`sigma_theta` are not checked by central differences through a puff run. A start time inside a step is
+differentiable: a release's mass in a step is the overlap of its window with the step,
+piecewise linear. Masks, drop decisions and evictions are taken on detached values, so the
+gradient is that of the puffs kept. The cut-offs are hard, as in the steady kernel, and a
+faint-drop decision that flips under a finite-difference step is a kink too
+(`drop_below=0` removes it). Second derivatives are refused by name. Under autograd each
+step's puffs are checkpointed: the graph keeps each step's puff state, and the backward
+recomputes the step.
+
+
+A batch of releases is a leading batch dimension on every driver and on the puffs; a batch of $N$ releases (different streets, start times, `u*`) equals $N$ separate runs to rounding.
+
+The cost of an evaluation follows the area the cloud covers, not the number of puffs, and the street model's own canyon-wind solve is recomputed every step. Measurements at the scale of a 577-street city, and where the time goes, are in the [design note](../../project/design/street_puffs.md#410-cost-at-paris-scale).
