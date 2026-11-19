@@ -41,7 +41,7 @@ is the one Newton already assembled, and the transposed solve reuses the same op
 `TransposeOperator`. Its slopes are each law's own analytic `dflow` (a node storage's
 `rate_slope`) where the law declares it the exact derivative of its flow (`exact_slope`, the
 default), and the autograd derivative of the flow where it does not
-([Writing a constitutive law](elements.md)). For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
+([Extending noodl](../project/extending/index.md)). For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
 the forward action, so nothing extra is built.
 
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to
@@ -65,83 +65,28 @@ manhole levels), as under `coupling="iterate"`, and every key the pass returns i
 `coupling="iterate"` it has no confirmation pass at the certified state when pass 1 finds
 nothing differentiable.
 
-## The contract
+## What a law must do to be differentiable
 
-For `differentiable=True` to be *safe*, one rule must hold. A violation raises a `ValueError`
-— naming the offending law and the attribute where it can — rather than silently
-returning a wrong or absent gradient.
-
-The differentiable solve threads a fixed set of tensors through `Function.apply`: each law's and
-withdrawal's registered parameters, the driver values, `sources` and the boundary potentials
-(and, on a transient step, the step-start state). Any other tensor that requires grad and reaches
-the residual is invisible to the implicit adjoint. Two checks look for one:
-
-- **Before solving, by attribute.** Every tensor a law or withdrawal holds — plain
-  attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
-  objects — is scanned, and one that requires grad without being threaded is refused by name.
-- **At every Newton iterate of a differentiated solve, from the starting guess to the root, by
-  evaluation.** The forward Newton evaluates the residual with every threaded tensor
-  detached; if the result still requires grad, some other tensor reaches it (a tensor
-  captured by a closure, which no scan can see), and the solve is refused. The root is the point the adjoint linearises at, so a law
-  that reads such a tensor only on a branch the solve reaches after leaving the starting guess
-  is caught there. The check is the forward's own residual evaluations: it costs none extra.
-  Where the solve is not differentiated because nothing differentiable reaches it
-  (`on_failure="return_primal"`, as `Model`'s iterated passes solve), the primal Newton runs
-  the same check at every iterate under grad mode. Under `torch.no_grad()` with a threaded
-  tensor that requires grad (a learnable parameter), it runs at the starting guess and at the
-  root only, with the threaded tensors detached: two residual evaluations more than the
-  primal Newton, in that case alone.
-
-What the evaluation establishes is structural and pointwise: the residual's autograd graph at
-those points reaches no un-threaded tensor. It does not prove that no such tensor could be
-read elsewhere in the state space, and it does not inspect a tensor that requires grad but is
-not used at the root; neither affects the gradient at the returned solution. (The Jacobian is
-the same laws' slopes, a constant of the adjoint.)
-
-**A law's differentiable state must be a registered parameter.**
-
-```python
-leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)   # correct
-```
-
-A bare tensor held with `requires_grad=True` outside `named_parameters()` is a supported
-construction, and its graph is reachable through the law's own component calls — but it is
-invisible to the differentiable solve. Since `differentiable=False` returns detached tensors,
-*neither* path would carry a gradient to it. Only a registered parameter is reachable, so a
-gradient-carrying tensor anywhere else — a plain attribute, a registered buffer, a tensor in a
-list, dict or plain object, the parameter of a module kept in a plain Python list — is refused.
-The attribute scan walks what the law holds (attributes, buffers, and containers and plain
-objects nested up to eight levels, skipping containers of more than 1024 items); a tensor it
-does not reach is caught by the residual evaluation where the residual reads it.
-
-A head term (stack, wind, drag) is not held by the layer: `EdgeHeads` writes the total as the
-driver `"<layer>.edge_head"`, so a gradient reaches whatever the head reads. See
-[Constitutive laws and heads](elements.md#the-rule-a-head-term-must-obey) for why a head is a
-function of the drivers alone.
+A differentiable solve is only safe if every tensor that carries a gradient into the residual is one the solve knows about. Anything else is invisible to the implicit adjoint. noodl checks this, before solving and at every Newton iterate, and refuses with an error that names the offending law rather than returning a wrong or absent gradient. A law's learnable quantities must therefore be registered parameters. A head term is not held by the layer: `EdgeHeads` writes the total as the driver `"<layer>.edge_head"`, so a gradient reaches whatever the head reads, and a head is a function of the drivers alone ([Constitutive laws and heads](elements.md#why-a-head-cannot-read-the-potential)). The rules a new law must follow, and how the checks work, are in [Extending noodl](../project/extending/index.md).
 
 ## What is guaranteed
 
 The sections above describe how noodl physics differentiates and what it takes to keep that safe.
-This section states the contract itself, as a list of bounded claims, each pinned to the test
-that would fail if the claim stopped holding.
+This section states the guarantees as a list of bounded claims.
 
 - **First-order derivatives only.** The implicit adjoint never builds a graph connecting its
   own returned gradients back to its inputs, so a second `torch.autograd.grad(..., create_graph=True)`
   through an already-differentiated implicit solve is refused by name, inside `backward()` at
   the moment that second differentiation is attempted, rather than silently returning an
-  incomplete result with a missing second-order term
-  (pinned by tests/solvers/test_implicit.py::test_second_order_differentiation_raises_instead_of_silently_dropping_a_term).
+  incomplete result with a missing second-order term.
 - **At regular solutions.** The guarantee above is for a converged solve at which the residual's
   Jacobian is invertible; every implicit-adjoint gradient this page cites is checked at such a
-  point, both for a linear system and for a Newton solve of a nonlinear one
-  (pinned by tests/solvers/test_implicit.py::test_gradcheck_implicit_solve_batched_wrt_linear_system_matrix_entries
-  and tests/solvers/test_implicit.py::test_gradcheck_implicit_solve_on_cube_root_wrt_parameter).
+  point, both for a linear system and for a Newton solve of a nonlinear one.
 - **Implicit adjoint for linear and Newton solves.** For a residual $R(z, \theta) = 0$ solved
   at $z^*$, the backward pass solves the *transposed* system for the adjoint variable,
   $R_z^T \lambda = L_z$, and then assembles the parameter gradient from one more pass through
   the residual, $dL/d\theta = L_\theta - R_\theta^T \lambda$ — never by unrolling the forward
-  iteration. `adjoint()` solving the transposed system is checked directly
-  (pinned by tests/solvers/test_implicit.py::test_adjoint_solves_the_transposed_system), and the
+  iteration. `adjoint()` solving the transposed system is checked directly, and the
   same construction is what `_LinearSolve` in `noodl.layers.transport` specialises to a linear
   residual (its own class docstring calls out `solvers/implicit.py`'s warning "almost verbatim,
   because it is the identical trap").
@@ -154,21 +99,11 @@ that would fail if the claim stopped holding.
   truncation of both the state polynomial and the forcing polynomial together with each one's
   own derivative with respect to the operator -- on the forcing (affine) path AND on the
   shifted (homogeneous) path a sealed pure-decay zone takes -- so coefficient sensitivities
-  are accurate at and near a zero operator on both paths, not just the forward value
-  (pinned by tests/layers/test_transport_derivatives.py::test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium,
-  tests/layers/test_expm_schedule.py::test_forced_step_value_and_coefficient_derivative_match_the_closed_form_near_a_zero_operator
-  and
-  tests/layers/test_expm_schedule.py::test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator).
+  are accurate at and near a zero operator on both paths, not just the forward value.
 - **Every transport coefficient is differentiable under every scheme.** Carrier, transmission,
   kinetics, removal and conductance all reach the backward pass under `backward_euler`, `trapezoidal`
   and `exact` alike, checked by `gradcheck` against each coefficient family, both in a single
-  step and at steady state
-  (pinned by tests/layers/test_transport_coefficients.py::test_carrier_gradient,
-  tests/layers/test_transport_coefficients.py::test_transmission_gradient,
-  tests/layers/test_transport_coefficients.py::test_kinetics_gradient,
-  tests/layers/test_transport_coefficients.py::test_removal_gradient and
-  tests/layers/test_transport_coefficients.py::test_conductance_gradient, all parametrised
-  over scheme, plus each one's `_steady` counterpart).
+  step and at steady state.
 - **Coupled fixed points are differentiated implicitly.** `Model`'s own `coupling="iterate"`,
   `Model.fixed_point` (and so `street_steady`, `street_steady_with_plume` and `sewer_steady`)
   and `couple.CoupledModel`'s two-way join run their passes to convergence WITHOUT a graph, run
@@ -178,13 +113,8 @@ that would fail if the claim stopped holding.
   fixed point's: its error is of the order of the primal residual (the interface is a fixed
   point only to within the primal tolerance), not the unrolled $O(\rho^{\text{passes}})$
   truncation counted from the *start* state and tied to nothing the caller controls; it is
-  exact where the interface equations are linear in the interface, which is why the pinned
-  tests return $1/3$ and $2/3$ to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike.
-  Memory is one pass. Second-order differentiation through it is refused by name
-  (pinned by tests/test_couple_conservation.py::test_gradient_at_a_converged_start_is_the_coupled_derivative,
-  tests/test_couple_conservation.py::test_gradient_does_not_depend_on_the_primal_tolerance,
-  tests/test_model.py::test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differences
-  and tests/solvers/test_fixed_point.py::test_second_order_differentiation_is_refused_by_name).
+  exact where the interface equations are linear in the interface: a linear test case returns $1/3$ and $2/3$ to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike.
+  Memory is one pass. Second-order differentiation through it is refused by name.
   The certified pass is *re-run* for the adjoint, and `solvers/select.py` drops the SuperLU fast
   path when a differentiating input requires grad, so the adjoint pass can take a different
   linear-solver route than the primal passes did — the returned state reproduces the certified
@@ -202,20 +132,14 @@ that would fail if the claim stopped holding.
   (see [Coupling](../guide/coupling.md#limitations)).
 - **Nonsmooth element laws have declared piecewise semantics, named per element.** `Damper`
   evaluates both signed power-law branches everywhere and selects with `torch.where`, so its
-  `dflow` is finite at the kink (`dp = 0`) and matches finite differences away from it
-  (pinned by tests/elements/test_damper.py::test_dflow_matches_finite_differences_on_both_sides
-  and tests/elements/test_damper.py::test_gradcheck_flow_wrt_dp_away_from_the_kinks_and_finite_at_zero).
+  `dflow` is finite at the kink (`dp = 0`) and matches finite differences away from it.
   `Duct` declares a laminar/turbulent transition at `Re_t` with its own bounded, shrinking
-  transition step, checked at and either side of that boundary
-  (pinned by tests/elements/test_duct.py::test_gradcheck_flow_wrt_dp_at_zero_inside_and_outside_the_transition).
-  `UpstreamDensityPowerLaw` declares its own transition and is finite through it too — see
-  `tests/elements/test_upstream.py` for that element's own kink tests. No element in noodl physics
+  transition step, checked at and either side of that boundary.
+  `UpstreamDensityPowerLaw` declares its own transition and is finite through it too as well. No element in noodl physics
   claims to be globally smooth where its law is not; where it is not, the transition is
-  declared and tested, not left to autograd to discover.
+  declared, not left to autograd to discover.
 
-No claim above is new: each restates something the module docstrings of
-`noodl.solvers.implicit`, `noodl.layers.transport` and `noodl.couple` already document, gathered
-here as one checklist with the test that pins it.
+No claim above is new: each restates something the module docstrings of `noodl.solvers.implicit`, `noodl.layers.transport` and `noodl.couple` already document.
 
 ## What this is for
 
@@ -271,7 +195,7 @@ the cases rather than leaving you to discover them.
 
 ## Verification
 
-Every application checks its gradients against finite differences, and the numbers are recorded:
+Every application checks its gradients against finite differences; the evidence is on the [verification pages](../reference/verification/index.md). The headline numbers:
 
 | Application | Check | Tolerance | Measured |
 |---|---|---|---|
@@ -280,14 +204,13 @@ Every application checks its gradients against finite differences, and the numbe
 | Allocation | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
 | Coupling | gradient across the join vs central differences | rel $10^{-5}$ | holds |
 
-If you write your own law, do the same: `torch.autograd.gradcheck` in float64 against a
+If you write your own law, do the same ([Extending noodl](../project/extending/index.md)): `torch.autograd.gradcheck` in float64 against a
 finite-difference reference is cheap insurance against a `dflow` that disagrees with its `flow`.
 
 ## Performance notes
 
 - **Use float64.** Finite-difference comparisons and tight Newton tolerances both need it, and
   `gradcheck` is effectively meaningless in float32.
-- **The sparse-direct backend also speeds up the backward pass**, measured 3.25x at ensemble 1
-  and 3.66x at ensemble 100. Install the [`sparse` extra](../get-started/installation.md#optional-extras).
+- **The sparse-direct backend also speeds up the backward pass.** Install the `sparse` extra ([Installation](../get-started/installation.md)).
 - **Batch instead of looping.** A gradient over a 100-instance ensemble is one backward pass, not
   100.

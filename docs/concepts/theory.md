@@ -1,4 +1,4 @@
-# Theoretical background for `noodl`
+# Theory and related work
 
 A general-purpose, differentiable network solver for conservative transport — pressures
 and buoyancy in multizone buildings, heat, contaminant species, sewer flow, urban
@@ -6,15 +6,14 @@ street-canyon exchange, and current in electrical circuits — needs one topolog
 patterns that specialise per physical domain. This page gives the graph-theoretic and
 physical foundations, compares existing multi-physics network solvers, and covers the
 differentiable-programming and co-simulation questions that follow from building this in
-PyTorch. Each application's own mapping onto the framework is on its background page; the
-[application pages](../applications/index.md) give the details and the verification.
+PyTorch. Each application's own mapping onto the framework is on its physics page, reached from the
+[application overview](../applications/index.md).
 
 ## 1. Graph fundamentals: incidence, cycle, cutset, and Tellegen's theorem
 
 Represent the network as a directed graph with $n$ nodes and $b$ branches. The
 **incidence matrix** $A$ ($n \times b$) has $A_{ie} = +1$ if branch $e$ leaves node $i$, $-1$
-if it enters, $0$ otherwise (this is exactly `Network.incidence()` in
-`src/noodl/topology.py`). For a connected graph $A$ has rank $n - 1$; one row is
+if it enters, $0$ otherwise (this is exactly `Network.incidence()`). For a connected graph $A$ has rank $n - 1$; one row is
 redundant because every column sums to zero (each branch leaves one node and enters
 another).
 
@@ -130,7 +129,7 @@ $l$ and by which sources are naturally flow- or potential-type. `noodl`'s Kirchh
 layers are nodal, with flow unknowns added where a constitutive law is implicit
 (below). The cycle space is kept for flows that are not potential-driven — prescribed or
 closure-computed flows, and the closed-form continuity solve on a tree
-(`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related constraint:
+(`cycles.particular_flow`, used by the [sewer physics](../applications/sewer/physics.md)). `cycles.assert_forward_oriented` encodes a related constraint:
 only an entrywise non-negative cycle basis guarantees non-negative $\lambda$ maps to
 non-negative $f$, needed for the constant upwind operator of §2.
 
@@ -392,15 +391,10 @@ reaction terms) over that step — a Lie/Strang splitting between the "instantan
 flow-equilibration timescale and the finite thermal/species timescale, matching the
 quasi-steady-state assumption already built into CONTAM, COMIS and EnergyPlus AFN.
 
-## Caveats
+## Limits of the comparison
 
-- Pseudo-bond-graph $(T, \Phi)$ vs true bond-graph $(T, dS/dt)$: only the latter is
-  literally power-conjugate; an energy-balance check must state which convention it
-  assumes.
-- No published "differentiable EPANET" or "differentiable CONTAM" is known; the closest
-  precedent is differentiable AC/DC power flow.
-- `torch-sla` and similar differentiable sparse linear-algebra packages are recent (2026).
-- ISO 23247 is a manufacturing standard; its fit to buildings is an analogy, not a
-  citation of direct applicability.
-- §5's preference for native, differentiable coupling over FMI is a design choice, not a
-  result drawn from existing published systems.
+- The pseudo-bond-graph convention $(T, \Phi)$ differs from the true bond-graph convention $(T, dS/dt)$: only the latter is literally power-conjugate, so an energy-balance check must state which convention it assumes.
+- No published "differentiable EPANET" or "differentiable CONTAM" is known; the closest precedent is differentiable AC/DC power flow.
+- Differentiable sparse linear-algebra packages such as `torch-sla` are recent (2026).
+- ISO 23247 is a manufacturing standard; its fit to buildings is an analogy, not a citation of direct applicability.
+- The preference in section 5 for native, differentiable coupling over FMI is a design choice, not a result drawn from existing published systems.
