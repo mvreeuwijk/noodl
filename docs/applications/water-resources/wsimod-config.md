@@ -1,4 +1,4 @@
-# WSIMOD `config.yml`
+# Importing a WSIMOD `config.yml`
 
 Reading a WSIMOD model description produces a `WsimodNetwork`: the pollutants, the orchestration,
 the dates, and the nodes and arcs with their parameters and forcing, as plain dataclasses.
@@ -11,6 +11,10 @@ The reader checks keys, classes and formats and computes no physics. Quantities 
 derives in a constructor (a surface's capacity, a pervious surface's simulated depth, a river's
 area, a treatment works' volume constant) are computed when the model is built, from the
 parameters read here.
+
+A built model is run as in [Running a WSIMOD model](wsimod.md).
+
+## How to load
 
 ```python
 from noodl.apps.wsimod.config import read_wsimod_config
@@ -44,7 +48,7 @@ print(net.pollutants.K, net.dates[-1])
 0 2000-01-02 00:00:00
 ```
 
-The `small` model in `tests/data/wsimod/small/` (a catchment, a river and a sink, ten days, no
+The `small` model of [Running a WSIMOD model](wsimod.md) (a catchment, a river and a sink, ten days, no
 pollutants) is a directory in this format that WSIMOD's own `Model.load` reads as well.
 
 ## What is read, ignored and refused
@@ -71,7 +75,7 @@ refused by name.
   then only the node's slot key.
 - The **slot key** (`NodeSpec.slot_key`) is the key under which WSIMOD files the node in
   `Model.nodes_type` and which the orchestration names: `"Foul"` for any node whose name contains
-  `foul` (WSIMOD's own hack, `model.py:658-660`), otherwise `type_`. A `ResidentialDemand` saved
+  `foul` (WSIMOD's own hack), otherwise `type_`. A `ResidentialDemand` saved
   by `Model.save` has `type_: Demand` and `node_type_override: ResidentialDemand`, so its slot is
   `"Demand"`.
 - `geometry` is dropped, as WSIMOD drops it.
@@ -89,16 +93,16 @@ refused by name.
   `initial_soil_storage`, and its other 25 attributes (`crop_cover_max`, `kfr`, ...) only as
   overrides. `crop_factor_stages` and `crop_factor_stage_dates` are lists of one length,
   `sowing_day` and `harvest_day` whole days of the year; the crop calendar and its refusals are
-  in the [WSIMOD application](wsimod.md#the-growing-surface). An
+  in the [What is ported](wsimod-ported.md#the-growing-surface). An
   `IrrigationSurface` takes a `GrowingSurface`'s keys and `irrigation_coefficient` (default 0.1,
-  also an override; see [the irrigation surface](wsimod.md#the-irrigation-surface)).
+  also an override; see [the irrigation surface](wsimod-ported.md#the-irrigation-surface)).
   A `GardenSurface` takes a `GrowingSurface`'s keys and no other; its `ResidentialDemand` asks it
-  for water (see [the garden surface](wsimod.md#the-garden-surface-and-the-demands-garden-link)).
+  for water (see [the garden surface](wsimod-ported.md#the-garden-surface)).
   With two or more on a `Land`, the last one takes the demand and the earlier ones are listed in
   `model.unread` as `<land>.surfaces.<name>.garden_handlers`.
   A `VariableAreaSurface` takes a `GrowingSurface`'s keys and `current_surface_area` (m2, default
   0; a constructor key only, refused as an override; see
-  [the variable-area surface](wsimod.md#the-variable-area-surface)).
+  [the variable-area surface](wsimod-ported.md#the-variable-area-surface)).
 - Every other key must be a constructor keyword of the class's chain (its own `__init__` and
   those its `**kwargs` reach, `noodl.apps.wsimod.classes`). Otherwise it is refused by name,
   where WSIMOD raises `TypeError`. A surface's `capacity` (and an impervious surface's `depth`)
@@ -106,7 +110,7 @@ refused by name.
 - `NodeSpec.parameters` holds the class's defaults, then the configuration's values, then the
   overrides, per node (WSIMOD's shared mutable defaults are not reproduced). A treatment works
   with an empty `process_parameters` or `liquor_multiplier` gets WSIMOD's defaults for the
-  model's additive pollutants (`wtw.py:73-85`): constant 0.01, exponent 1.001, multiplier 0.7 and
+  model's additive pollutants: constant 0.01, exponent 1.001, multiplier 0.7 and
   volume 0.03. A non-empty `process_parameters` must name every additive pollutant with its
   `constant` and `exponent`, and a non-empty `liquor_multiplier` every additive pollutant and
   `volume`; WSIMOD raises `KeyError` otherwise, and so the reader refuses it by name. Entries for
@@ -116,13 +120,13 @@ refused by name.
 - `decays` is `None` (a plain tank) or a dict (a `DecayTank`, `{}` included) on `Storage`,
   `Reservoir`, `RiverReservoir` and `River`: a key per decaying pollutant, each with exactly
   `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
-  forcing on every date. A `Groundwater` loses its configured forcing (`storage.py:202-203`), so
+  forcing on every date. A `Groundwater` loses its configured forcing, so
   its dict needs a `filename` override that gives `temperature` on every date, and so does a
-  `QueueGroundwater`'s (`storage.py:291-292`), which builds a `DecayQueueTank`. A surface takes
+  `QueueGroundwater`'s, which builds a `DecayQueueTank`. A surface takes
   `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
   air `temperature`.
 - Classes WSIMOD has that are not read are refused by name with where they go:
-  `EnfieldFoulSewer`, whose `storm_exchange` is undefined in WSIMOD (`sewer.py:288-291`).
+  `EnfieldFoulSewer`, whose `storm_exchange` is undefined in WSIMOD.
 
 ### Arcs
 
@@ -130,26 +134,26 @@ refused by name.
 arcs (`QueueArc`, `AltQueueArc`, `DecayArc`, `DecayArcAlt`), `number_of_timesteps`. WSIMOD's
 `Arc` accepts any extra keyword silently; the reader refuses it by name.
 
-- `decays` is read on the user decay arcs `DecayArc` (a `QueueArc`, `arcs.py:668-728`) and
-  `DecayArcAlt` (an `AltQueueArc`, `arcs.py:731-805`) only, with the storage family's form (a
+- `decays` is read on the user decay arcs `DecayArc` (a `QueueArc`) and
+  `DecayArcAlt` (an `AltQueueArc`) only, with the storage family's form (a
   key per decaying pollutant, each with exactly `constant` and `exponent`, `exponent > 0`) and
   WSIMOD's default `{}`; `decays: None` is refused (WSIMOD iterates it). On every other arc
-  class `decays` is refused: WSIMOD would store it unread (`arcs.py:52`). An arc override of
+  class `decays` is refused: WSIMOD would store it unread. An arc override of
   `decays` is refused too: an arc's `apply_overrides` takes `capacity` and `preference` only
-  (`arcs.py:87-96`).
-- A decay arc decays at its **in-port's** temperature (`core.py:464-470`), for either
+ .
+- A decay arc decays at its **in-port's** temperature, for either
   direction, so that node needs a `temperature` forcing on every date, in both modes; a missing
   date is refused when the model is built, naming the arc and the node. A plain `Node` takes the
   forcing as `data_input_dict` or a `filename` override (which is then read, not listed in
   `unread`). A `Catchment` in-port reads its `temperature` series, whether or not `temperature`
   is a pollutant.
 - `parent` is refused on every arc: a decay object reads its temperature from a `parent`
-  attribute when it has one (`core.py:465-468`), and a configured value would be read as a
+  attribute when it has one, and a configured value would be read as a
   node.
 
 ### Dates
 
-`dates` are read in WSIMOD's formats and order (`to_datetime`, `model.py:139-162`):
+`dates` are read in WSIMOD's formats and order (`to_datetime`):
 `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DD`, `YYYY-MM` (the first of the month). Anything else is
 refused, naming the string (`01/02/2000` is). `WsimodNetwork.dates` holds the parsed
 `datetime`s and `date_labels` the strings as written. The forcing's `time` column and the keys of
@@ -162,7 +166,7 @@ The `overrides` section (`nodes` and `arcs`, each a mapping or a list of entries
 `name`) is merged into the parameters as WSIMOD's `apply_overrides` consumes it. It does not
 compute derived quantities.
 
-- A node override names its node by **slot key and name** (`model.py:819-825`): `"Foul"` for a
+- A node override names its node by **slot key and name**: `"Foul"` for a
   foul sewer, `"Demand"` for a `ResidentialDemand`. An unknown slot key, node, surface or arc is
   refused by name.
 - Only the keys the class's chain consumes are accepted; any other is refused by name, where
@@ -187,14 +191,14 @@ compute derived quantities.
   `org-nitrogen`; `T_wdays` of 0, a river of zero area and `halfsatINwater <= 0` are refused.
 - A `QueueGroundwater` override of `number_of_timesteps` (a key of its tank, not a
   constructor keyword of the node) is accepted on a node with `decays`: it sets the
-  `DecayQueueTank`'s and its internal arc's (`tanks.py:682-685`), for example to 0 instead of
+  `DecayQueueTank`'s and its internal arc's, for example to 0 instead of
   WSIMOD's default 1. On a node without `decays` it is refused, and so is a configured
   (non-override) `number_of_timesteps` on either.
 - An override of `decays` on the Storage family merges per pollutant, as `dict.update` does
   (an entry replaces the pollutant's whole dict, so it needs both keys); it is refused on a node
-  built with `decays: None` (`storage.py:96-100`). On a surface it merges per surface
+  built with `decays: None`. On a surface it merges per surface
   (WSIMOD's shared default `{}` would reach every surface built without a `decays` key).
-- A node's `filename` override is read as WSIMOD reads it (`nodes.py:93-99`, `model.py:1252-1269`):
+- A node's `filename` override is read as WSIMOD reads it:
   the path as written, opened relative to the process's **working directory**, not the
   configuration's directory (use absolute paths); the file's data replaces the node's forcing.
   It is not the constructor's `filename` key, which is relative to the configuration. A falsy
@@ -202,32 +206,32 @@ compute derived quantities.
   (WSIMOD opens `""` and raises `FileNotFoundError`), and any other non-string value is refused
   by name (WSIMOD raises `RuntimeError`). On a class that reads no forcing (a `Waste`, say) the file is
   still read and the override is listed in `WsimodNetwork.unread`. A `Groundwater`'s override is
-  its only forcing (X11). A node's `data_input_dict` override is refused for good
-  (`Node.apply_overrides` consumes only `filename`, `nodes.py:92-100`, and would store it unread);
+  its only forcing. A node's `data_input_dict` override is refused for good
+  (`Node.apply_overrides` consumes only `filename`, and would store it unread);
   so is a surface's `filename` override (no surface consumes it). Override a node's forcing by
   `filename`, a surface's by `data_input_dict`.
-- A surface's `data_input_dict` override **replaces** its data (`land.py:413-421`), as a mapping in
+- A surface's `data_input_dict` override **replaces** its data, as a mapping in
   the inline `{(variable, date): value}` form or as a path. A path is read as written, relative
-  to the process's **working directory** (X27: use absolute paths). `None`, a number or any other
+  to the process's **working directory** (use absolute paths). `None`, a number or any other
   type is refused by name (`ValueError` in WSIMOD), as is a missing file. The constructor fixed
-  the surface's inflows (`land.py:375-382`) and an override does not rebuild them (L15, Y21):
+  the surface's inflows and an override does not rebuild them:
   an override that adds deposition data to a surface built without `nhx-dry` is read and never
   used, and each variable is listed in `WsimodNetwork.unread`; an override that drops `nhx-dry`
   from a surface built with it (WSIMOD raises `KeyError` at the first run) is refused, and, when `nitrate`
-  is a pollutant (the only case in which a growing surface reads them, `land.py:1276-1280`), so is
+  is a pollutant (the only case in which a growing surface reads them), so is
   one that drops a fertiliser or manure variable of a growing surface; without `nitrate` the drop
   is accepted and the run is unchanged.
 - A `pollutant_load` override on a surface built **without** a load is ignored, as in WSIMOD, whose
-  inflows were fixed at construction (L14): each of its run-pollutant keys is listed in
+  inflows were fixed at construction: each of its run-pollutant keys is listed in
   `WsimodNetwork.unread` as `<land>.surfaces.<surface>.pollutant_load.<key>` (a key that is no
   run pollutant is listed as for a configured load). WSIMOD's override also mutates a shared
   default `{}`, so every later surface built without a load gets it; noodl's loads are per
   surface. On a surface built with a load the override merges per key and is live.
 - A surface's `data_input_dict` (or constructor `filename`) holds its monthly deposition data:
   the six variables `nhx-dry`, `noy-dry`, `srp-dry`, `nhx-wet`, `noy-wet` and `srp-wet`, in kg/m2/d.
-  The data are read when `nhx-dry` is among the constructor's variables (`land.py:375-382`), and
+  The data are read when `nhx-dry` is among the constructor's variables, and
   then all six are needed (a missing companion is refused by name, `KeyError` in WSIMOD). Day `t`
-  reads the row dated the first of its month (`get_data_input_surface`, `land.py:462-471`): a row
+  reads the row dated the first of its month (`get_data_input_surface`): a row
   dated `"2004-01"` or `"2004-01-01"` serves every January day, one dated `"2004-01-15"` is
   never read and the run is refused. Without `nhx-dry` no variable is read and each is listed in
   `WsimodNetwork.unread` as `<land>.surfaces.<surface>.data_input_dict.<variable>`; so is a
@@ -237,13 +241,13 @@ compute derived quantities.
 
 ## Units, order and what runs
 
-The reader converts nothing (W20): volumes are m³, flows and capacities m³/d, additive
+The reader converts nothing: volumes are m³, flows and capacities m³/d, additive
 pollutants kg, non-additive ones by name (`temperature` in °C), precipitation and
 evapotranspiration m/d. The order of `nodes` and of `arcs` is the order in which WSIMOD
 constructs them and noodl runs them, so it decides the order of every push and pull and, where
 WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own is set-hash
 order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
-(`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
+(WSIMOD's own BSD-3 data, in its `Model.save` format), are read by this reader
 and run bit for bit as WSIMOD runs them; every ported process runs on them: each demo's
 `config.yml` runs unmodified, with no second configuration, the surfaces' `pollutant_load`
-included. See the [WSIMOD application](wsimod.md).
+included. See [Running a WSIMOD model](wsimod.md).

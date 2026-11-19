@@ -27,8 +27,11 @@ PAGES = [
     "applications/street/index.md",
     "applications/sewer/index.md",
     "applications/water/index.md",
+    "applications/water-resources/index.md",
     "applications/water-resources/allocation.md",
     "applications/water-resources/wsimod.md",
+    "applications/water-resources/wsimod-gradients.md",
+    "applications/water-resources/wsimod-config.md",
     "applications/electrical/index.md",
     "applications/electrical/matpower.md",
 ]
