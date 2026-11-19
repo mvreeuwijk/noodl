@@ -53,7 +53,7 @@ Emissions and the background are given by street and boundary name; the meteorol
 the street closures' own input and is given as plain tensors. In the dictionaries, the
 concentration is `"street.x"` (street order), the emissions `"street.sources"` (full node
 order) and the background `"street.x_boundary"` (boundary order) -- see
-[Using noodl](../../guide/workflow.md).
+[The workflow](../../guide/workflow.md).
 
 **The drivers `build_model` returns are templates only.** They carry zero `x_boundary`
 and `sources`; you must supply `U_ref`, `theta_w` and `h_abl` yourself. The

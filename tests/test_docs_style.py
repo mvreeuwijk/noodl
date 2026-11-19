@@ -30,7 +30,7 @@ RULES = {
 }
 
 # Rules that also apply inside inline code, which is otherwise blanked before matching.
-CODE_RULES = ("tests path", "test file name")
+CODE_RULES = ("tests path", "test file name", "timing note")
 
 
 INLINE_CODE = re.compile(r"(`+).+?(?:\1)")

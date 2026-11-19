@@ -93,7 +93,7 @@ print(round(float(heads["J1"]), 6), round(float(flows["P1"]), 6))
 are 49.267731, 48.877316, 48.430882, 48.213867, 48.117119 and 48.122936 m, the same as EPANET 2.2
 gives for the equivalent `twoloop_si.inp`. To read an EPANET file instead, use `read_epanet_inp`
 ([Build and solve a network](steady.md#read-a-network-from-a-file)). The model is set up and
-run like every other one; see [Using noodl](../../guide/workflow.md).
+run like every other one; see [The workflow](../../guide/workflow.md).
 
 ## In this section
 

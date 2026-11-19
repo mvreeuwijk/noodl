@@ -99,7 +99,7 @@ and the status and setting that the controls carry across steps are the state ke
 `"water.link_status"` and `"water.link_setting"` (per link). Both are set by tank and pump name
 with `initial_state(model, values=...)`, the levels under the key `"water.tank_level"`, which
 `initial_state` reads and writes into the tank heads (it is no state key). See
-[Using noodl](../../guide/workflow.md).
+[The workflow](../../guide/workflow.md).
 
 ### The steady tracer
 

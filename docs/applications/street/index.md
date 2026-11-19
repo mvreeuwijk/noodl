@@ -55,7 +55,7 @@ solved = model.steady(state, drivers)
 print(street.concentration.named(solved[street.concentration]))   # kg/m3, by street
 ```
 
-Emissions and the background are given by street and boundary name; the meteorology is the street closures' own input and is given as plain tensors. In the dictionaries, the concentration is `"street.x"` (street order), the emissions `"street.sources"` (full node order) and the background `"street.x_boundary"` (boundary order); see [Using noodl](../../guide/workflow.md). The drivers `build_model` returns are templates only: you must supply `U_ref`, `theta_w` and `h_abl` yourself. The other drivers, and the per-street meteorology and background, are on [Build and run a street network](networks.md#supply-the-drivers).
+Emissions and the background are given by street and boundary name; the meteorology is the street closures' own input and is given as plain tensors. In the dictionaries, the concentration is `"street.x"` (street order), the emissions `"street.sources"` (full node order) and the background `"street.x_boundary"` (boundary order); see [The workflow](../../guide/workflow.md). The drivers `build_model` returns are templates only: you must supply `U_ref`, `theta_w` and `h_abl` yourself. The other drivers, and the per-street meteorology and background, are on [Build and run a street network](networks.md#supply-the-drivers).
 
 Every type this application offers, and how to call it, is listed in its [catalogue](../../reference/catalogue/street_aq.md) and in the [API reference](../../reference/api/index.md).
 

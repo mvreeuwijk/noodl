@@ -43,7 +43,7 @@ gradient checks, and are experimental in that sense.
 ![A request clipped by arc capacity and receiver headroom, and several edges sharing one node's headroom](../../assets/app-allocation.svg)
 
 The layer is listed in the [core catalogue](../../reference/catalogue/core.md). It is set up and
-run like every other model; see [Using noodl](../../guide/workflow.md).
+run like every other model; see [The workflow](../../guide/workflow.md).
 
 ## A worked example
 

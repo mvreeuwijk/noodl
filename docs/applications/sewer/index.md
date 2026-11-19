@@ -90,7 +90,7 @@ print(sorted(wq.concentration.named(after[wq.concentration])))
 
 The sewer's `initial_state` takes the drivers as well (`drivers=`), because the storage it starts from
 depends on the inflows. The model is set up and run like every other model; see
-[Using noodl](../../guide/workflow.md). Every type this application offers is listed in its
+[The workflow](../../guide/workflow.md). Every type this application offers is listed in its
 [catalogue](../../reference/catalogue/sewer.md), and the whole API in the
 [API reference](../../reference/api/index.md).
 

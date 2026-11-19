@@ -15,14 +15,14 @@ composed and coupled through shared network structures, while differentiable sol
 simulation, parameter estimation, and optimisation.
 
 **[Documentation](https://mvreeuwijk.github.io/noodl/)** ·
-[Installation](https://mvreeuwijk.github.io/noodl/installation/) ·
-[Quick start](https://mvreeuwijk.github.io/noodl/quickstart/) ·
-[Using noodl](https://mvreeuwijk.github.io/noodl/usage/) ·
+[Installation](https://mvreeuwijk.github.io/noodl/get-started/installation/) ·
+[Quick start](https://mvreeuwijk.github.io/noodl/get-started/first-model/) ·
+[User guide](https://mvreeuwijk.github.io/noodl/guide/) ·
 [Concepts](https://mvreeuwijk.github.io/noodl/concepts/) ·
 [Applications](https://mvreeuwijk.github.io/noodl/applications/) ·
-[Catalogue](https://mvreeuwijk.github.io/noodl/catalogue/core/) ·
-[API reference](https://mvreeuwijk.github.io/noodl/api/) ·
-[Theory](https://mvreeuwijk.github.io/noodl/theory/)
+[Catalogue](https://mvreeuwijk.github.io/noodl/reference/catalogue/) ·
+[API reference](https://mvreeuwijk.github.io/noodl/reference/api/) ·
+[Examples](https://mvreeuwijk.github.io/noodl/examples/)
 
 ## Installation
 
@@ -42,7 +42,7 @@ cd noodl
 pip install -e ".[dev]"
 ```
 
-See [Installation](https://mvreeuwijk.github.io/noodl/installation/) for what each
+See [Installation](https://mvreeuwijk.github.io/noodl/get-started/installation/) for what each
 extra buys you.
 
 ## Quick start

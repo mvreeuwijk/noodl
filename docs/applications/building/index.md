@@ -69,7 +69,7 @@ print(th.temperature.named(state[th.temperature]))   # {"A": T_A, "B": T_B} in K
 print(state[air.flow][0])                             # doorway low-opening flow, kg/s
 ```
 
-`state` and `drivers` are plain dictionaries of tensors. The references only name their keys (`th.temperature` is `"thermal.x"`, `th.sources` is `"thermal.sources"`, `air.flow` is `"air.q"`) and build each tensor in that key's node order: full node order for sources, the layer's boundary order for `boundary_temperature`, its active interior order for `temperature`. Hand-built tensors in those orders still work, and `model.check` catches one in the wrong shape. [Using noodl](../../guide/workflow.md) covers the details.
+`state` and `drivers` are plain dictionaries of tensors. The references only name their keys (`th.temperature` is `"thermal.x"`, `th.sources` is `"thermal.sources"`, `air.flow` is `"air.q"`) and build each tensor in that key's node order: full node order for sources, the layer's boundary order for `boundary_temperature`, its active interior order for `temperature`. Hand-built tensors in those orders still work, and `model.check` catches one in the wrong shape. [The workflow](../../guide/workflow.md) covers the details.
 
 The node and edge attributes this example sets (`volume`, `T0`, `z_ref`, `z_path`, `Cd`, `area`), and the wind attributes a `Wind` term reads (`azimuth`, `Cp`, `Ch`, `profile`), are listed with their units under [Network attributes](../../reference/catalogue/building_physics.md#network-attributes).
 
