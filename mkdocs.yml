@@ -124,6 +124,7 @@ nav:
           - Gradients, batches, long runs: applications/water-resources/wsimod-gradients.md
           - What is ported: applications/water-resources/wsimod-ported.md
           - Differences from WSIMOD: applications/water-resources/differences.md
+          - Limitations: applications/water-resources/limitations.md
           - Importing WSIMOD config.yml: applications/water-resources/wsimod-config.md
       - Electrical circuits:
           - applications/electrical/index.md
