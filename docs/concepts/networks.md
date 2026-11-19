@@ -50,20 +50,21 @@ net.edge_index("airpath")   # positions of that kind's edges in full edge order
 
 ## The operators
 
-These are the graph-theoretic core. All are cached, all take a `kind`, and all move with
-`.to(device, dtype)`.
+The network derives and caches the graph-theoretic operators a layer needs, each restricted to an
+edge kind if you ask, and each moving with `.to(device, dtype)`:
 
-| Method | Returns |
-|---|---|
-| `incidence(kind=None)` | $A$, the $n \times b$ signed node-edge incidence matrix. |
-| `gradient(kind=None)` | $A^\top$, mapping nodal potentials to potential differences along edges. |
-| `difference(kind=None)` | The same difference operator in the form layers consume. |
-| `cycle_basis(kind=None)` | A basis for the cycle space: $n_{\text{cycles}} = b - n + n_{\text{islands}}$. |
-| `spanning_forest(kind=None)` | Tree and chord edge indices — a tree has an empty cycle space, which is what makes the sewer's flow solve closed-form. |
-| `endpoints(kind=None)` | `(source_idx, target_idx)` per edge, for matvec-free assembly. |
-| `accumulate(w, kind=None)` | Scatter-adds an edge quantity to its endpoints with sign — nodal balance, without ever forming $A$. |
-| `source_selector` / `target_selector` | Selection matrices for the two endpoints. |
-| `upwind(q, kind=None)` / `downwind(q, kind=None)` | Sign-aware indexing: which endpoint is upstream given the flow direction. This is what makes advection work on a graph whose edge orientations are arbitrary. |
+- the signed node-edge incidence $A$ ($n \times b$) and its transpose, the gradient $A^\top$, which
+  maps nodal potentials to potential differences along edges;
+- a basis for the cycle space, with $n_{\text{cycles}} = b - n + n_{\text{islands}}$;
+- a spanning forest, as tree and chord edge indices. A tree has an empty cycle space, which is
+  what makes the sewer's flow solve closed-form;
+- `endpoints`, the source and target index of every edge, and `accumulate`, which scatter-adds an
+  edge quantity to its endpoints with sign: nodal balance without ever forming $A$;
+- `upwind` and `downwind`, sign-aware indexing that says which endpoint is upstream given the
+  flow direction. This is what makes advection work on a graph whose edge orientations are
+  arbitrary.
+
+The signatures are in the [API reference](../reference/api/index.md).
 
 The `accumulate` / `endpoints` pair matters more than it looks. Layers assemble their operators
 through them rather than through a dense $A$, which is why a large network never materialises an
@@ -141,12 +142,10 @@ tolerance.
 `noodl.cycles` works in the cycle space directly, which is what you need when flows are measured
 rather than solved:
 
-| Function | Purpose |
-|---|---|
-| `branch_flows(net, amplitudes, kind)` | Turns cycle amplitudes into branch flows. Any such flow conserves at every node by construction. |
-| `particular_flow(...)` | A particular conservative flow matching prescribed nodal sources. On a tree this is the whole answer, which is how the sewer application solves its hydraulics without a Newton solve at all. |
-| `project_measured(...)` | Projects measured flows onto the conservative subspace — the least-squares correction that makes an inconsistent set of measurements satisfy continuity. |
-| `assert_forward_oriented(net, kind)` | Checks every edge of a kind points the way the physics assumes. |
+- `branch_flows` turns cycle amplitudes into branch flows. Any such flow conserves at every node by construction.
+- `particular_flow` gives a particular conservative flow matching prescribed nodal sources. On a tree this is the whole answer, which is how the sewer application solves its hydraulics without a Newton solve at all.
+- `project_measured` projects measured flows onto the conservative subspace: the least-squares correction that makes an inconsistent set of measurements satisfy continuity.
+- `assert_forward_oriented` checks that every edge of a kind points the way the physics assumes.
 
-The coupling application's third inverse example uses `project_measured` to recover all four
+The third inverse example of the coupling guide uses `project_measured` to recover all four
 branch flows of a network from one measured path, exactly (rtol $10^{-10}$).

@@ -1,3 +1,807 @@
-# Transport options
+# Transport and model options
 
-Reference for the options that control transport layers.
+Reference for the options of the layers and of `Model`: the Kirchhoff layer, the transport layer, reactions, the allocation layer, and the `Model` keys, coupling options and closure declarations. For how the pieces fit together see [Layers and models](../concepts/layers.md); for the four ways a flow is determined see [The four flow-determination modes](../concepts/four-modes.md).
+
+## `KirchhoffLayer`
+
+Solves for nodal potentials such that flow is conserved at every interior node.
+
+```python
+from noodl.layers.kirchhoff import KirchhoffLayer
+
+layer = KirchhoffLayer(
+    net,
+    name="air",
+    laws=[leak],                # one ConstitutiveLaw per edge kind
+    boundary=["ambient"],       # nodes whose potential is prescribed
+    linear_solver="auto",       # 'auto' | 'cg' | 'gmres' | 'direct' | 'sparse_direct'
+    quantity="pressure",        # metadata a Model reports
+    unit="Pa",
+    phasor=False,               # True: complex sinusoidal steady state (see below)
+)
+
+phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True)
+```
+
+`quantity` and `unit` are metadata only — nothing numerical reads them. They exist so that a
+model composing several Kirchhoff layers over one network can tell a pressure layer from a
+temperature one without matching on names. They are still checked for consistency: every key
+of a layer is a `Field` carrying its `unit` (a transport layer's `unit`, `source_unit`,
+`capacity_unit`, `flow_unit` and `conductance_unit` give the units of its state, sources,
+capacity, flows and conductances), and
+`Model.check()` warns (`unit-mismatch`) when a closure declares a different unit for a key it
+reads (`input_specs`) or writes (`output_units`), and notes (`unit-undeclared`) a field with
+no unit. Units are compared as strings after trivial respelling (`m3` and `m^3`, `1` and `-`);
+nothing is converted. See [The closure contract](../project/extending/index.md).
+
+Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
+extracts one kind's block from the concatenated flow vector; `residual(...)` and `jacobian(...)`
+expose the Newton pieces directly; `kind_slice(kind)` and `law_for(kind)` locate a kind.
+
+`diagnostics`, when you pass a dict, is filled with `newton_iterations`, `linear_iterations`,
+`method`, `backend`, `converged` and `residual_norm`. `method` is what you asked for; `backend`
+is what actually ran. They are deliberately separate — see [Solvers](../concepts/solvers.md#solve-the-auto-table).
+
+### Node storage
+
+A node stores an amount; the layer integrates it. A `NodeStorage` (`noodl.storage`, exported as
+`noodl.NodeStorage`) says how much is stored at each of its nodes as a function of that node's
+own potential, `S(phi)`: the charge of a capacitor to ground, the water in a tank, the air in a
+zone. Over a step of length `dt` the layer turns the change of that amount into a withdrawal,
+positive into storage, with the step rate of its scheme (`noodl.elements.step_rate`):
+
+$$
+w = \frac{S(\varphi) - S(\varphi_{start})}{\Delta t} \quad \text{(backward Euler)}, \qquad
+w = \frac{2\,(S(\varphi) - S(\varphi_{start}))}{\Delta t} - w_{start} \quad \text{(trapezoidal)}.
+$$
+
+```python
+from noodl import LinearStorage
+
+store = LinearStorage(nodes=[1, 2, 3], capacity=[0.4, 1.1, 0.7])   # S = C phi
+layer = KirchhoffLayer(net, "heat", [conductance], boundary=["ambient"],
+                       storage=[store], scheme="backward_euler")
+phi, q = layer.solve(phi_b, drivers, sources, dt=60.0, history=(phi_prev, q_prev))
+w = layer.storage_flows(phi, drivers, dt=60.0, history=(phi_prev, q_prev))
+```
+
+Storage adds no flow unknowns; a layer of potential laws with storage stays on the nodal
+path. Like a withdrawal it adds only a diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
+network of conductances with storage keeps its symmetric positive definite system and its
+sparse or CG solve. A node whose only connection is its storage is grounded during a step and
+reported floating at a steady solve. Several storages may share a node (their withdrawals add
+up); one `(node, storage)` pair is an *entry*, and `storage_flows` returns one flow per entry,
+storages in list order, then their nodes.
+
+- Without `dt` storage is absent: the steady point (mode `"dc"`) stores nothing.
+- With `dt` the layer needs `history=(phi, q)` at the step start (only `phi` is read; `q`
+  may be `None`) and, under the trapezoidal scheme, `storage_flow`, the flow into every entry
+  at the step start.
+- `residual`, `jacobian` and `adjoint` take the same step keywords (`dt`, `scheme`,
+  `history`, `storage_flow`): with `dt` they include the storage of that step, without it
+  they are the steady forms, where storage is absent.
+- `mode="initial"` with a storage that holds an `initial()` potential holds its node there.
+  The held rows make that one solve's system nonsymmetric, so it is solved on the sparse
+  operator of a layer with flow unknowns (a layout with no unknown flows, built on the first
+  such call); every other solve of the layer keeps the symmetric system, and that solve refuses
+  `linear_solver="cg"` and `line_search="convex"`.
+- `layer.dynamic` is True for a layer with storage, and `layer.linear` asks every storage too.
+- On the differentiable path gradients reach the storages' registered parameters, `history`
+  and `storage_flow`, so a chain of steps back-propagates through time.
+
+**Storage at boundary nodes, stepped by forward Euler.** With `scheme="forward_euler"` the
+storage sits at boundary nodes instead (an EPANET tank), and is never an unknown. The solve
+holds each storage node at its potential at the step start (`layer.holds_storage` is True),
+which it reads from `history=(phi, None)`, `phi` every node's potential then: every call
+that evaluates the layer at a boundary (`solve`, `residual`, `jacobian`, `adjoint`,
+`linear_init`) takes it, steady or not, and refuses by name to run without it.
+`"<layer>.phi_boundary"` gives the other boundary nodes only, `layer.prescribed` in boundary
+order. A `Model` passes the step-start `"<layer>.phi"` as `history` on every path (`step`,
+`steady`, `residuals`, `current_flows`, `check`), as it passes every other layer's step start.
+During a step a closure reading `"<layer>.phi"` sees such a node at its step-start potential
+too (`hold_potentials`), even in the later passes of `coupling="iterate"`. After the solve
+the step moves each storage node by $\Delta t\,w / C$ (`advance_storage(phi, storage_flow,
+dt)`), with $w$ the flow the solve delivered to the node and $C$ the storage's capacity.
+That is explicit Euler, EPANET's own tank method; the solve itself takes no step and does
+not depend on `dt`. A storage whose capacity changes with the potential gives the inverse of
+its amount, `potential_of`, and moves to `potential_of(amount(phi) + dt * w)` instead, so its
+amount changes by exactly $\Delta t\,w$ (EPANET's tank on a volume curve,
+`noodl.apps.water.TankVolumeCurve`).
+
+```py
+store = LinearStorage(nodes=[tank], capacity=[area])
+layer = KirchhoffLayer(net, "water", laws, boundary=["R1", "T1"],
+                       storage=[store], scheme="forward_euler")
+phi, q = layer.solve(phi_boundary, drivers, sources,    # phi_boundary: R1 only
+                     history=(phi_start, None))         # T1 held at phi_start[tank]
+w = layer.storage_flows(phi, drivers, dt=None, q=q)     # the flow into T1
+phi_next = layer.advance_storage(phi, w, dt=600.0)      # T1 moved by dt * w / area
+```
+
+- `storage_flows` there needs `q` and returns the flow into every storage node, on a steady
+  solve as on a step; a `Model` writes it to `"<layer>.storage_flow"` after every solve and
+  moves the storage when the pass has a `dt`. `"<layer>.phi"` is then required by every
+  solve, steady or not.
+- A linear storage (`LinearStorage`, a constant capacity) or one that gives `potential_of` is
+  accepted at a boundary node, one entry per node; a nonlinear one without it is refused by
+  name.
+- A layer whose storage sits at interior nodes, with dynamic laws, or with no storage at
+  all refuses `"forward_euler"`; a layer with boundary storage refuses the other schemes, and a storage at
+  a boundary node of a layer with another scheme is refused.
+- Gradients reach the capacities through `advance_storage`; the solve does not depend on them.
+
+Which method to write on a subclass:
+
+- **`amount`** alone, when the stored amount depends on the node's own potential only. The
+  default `change` is `amount(phi) - amount(phi_start)`, both at the *current* drivers (the
+  lagged-coefficient form SWMM and EPANET use), and the default `capacity` is its autograd
+  derivative.
+- **`change`**, when the amount at the step start is not `amount(phi_start)` at the current
+  drivers: an amount that depends on a driver that changes over the step (a zone's air mass
+  depends on its temperature), or a difference that must be formed without round-off
+  (`LinearStorage` forms `C (phi - phi_start)`).
+- **`rate`** and **`rate_slope`**, for an application whose withdrawal has rules beyond storage
+  (they default to `step_rate(change)` and `step_rate_factor * capacity`). `rate_slope` is
+  used by both the non-differentiable and the differentiable solve, whose adjoint it builds,
+  so an override that is not the true derivative (a Newton aid) declares
+  `exact_slope = False`, and the differentiable solve then takes the derivative of `rate` by
+  autograd for that storage (as for `NodeWithdrawal.dflow`).
+
+A withdrawal that is not storage (a demand, a leak) is a `NodeWithdrawal`
+([Constitutive laws](../concepts/elements.md)).
+
+## Implicit, coupled and dynamic laws
+
+A `KirchhoffLayer` whose constitutive laws all give their flow from their own edge's potential
+difference has the interior potentials as its only unknowns, as above (the fast path). A law
+that cannot, an implicit law (an `ImplicitLaw`) or a multi-port law
+(`ports > 1`), adds the flows of its edges as unknowns (`layer.implicit_edges`, empty on a layer
+without flow unknowns); a layer built with `phasor=True` is always solved this way. The
+declarations are described under
+[Implicit, coupled and dynamic constitutive laws](../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws).
+The [electrical application](../applications/electrical/index.md) is built on it; the same machinery
+serves any domain with ideal sources, flow-controlled laws or storage on its edges.
+
+**Laws that read the context stay on the fast path.** A law with a `ctx` parameter in `flow`
+that still gives its flow from the potential difference (a time-dependent current source; a
+storing law written in flow form, `q = C (dp - ctx.dp_prev) / ctx.dt` with `dynamic = True`)
+adds no flow unknown. Its flow is evaluated in the solve's context, restricted to its edges, and
+its slope is its `jacobian` there (its analytic one where it overrides it, else automatic
+differentiation of `flow` with the context), since `dflow` takes no context. The Jacobian stays
+the symmetric network matrix, so such a layer accepts `linear_solver="cg"` and
+`line_search="convex"`, and its grounding is certified at the start of every solve: a node
+reached only through a current source is refused there as floating, by name.
+
+**The system.** The unknowns are the interior potentials and the flows of the implicit-law edges
+(`layer.implicit_edges`, in layer edge order). The residual rows are the conservation balance at
+the interior nodes, $A_I q - s_I$ (plus withdrawals), where $q$ is the law's flow on a
+potential-controlled edge and the unknown on an implicit one, followed by every implicit law's
+own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from each law's local
+blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
+couples the edges of its group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
+
+**The methods on a layer with flow unknowns.** `flows`, `dflows`, `residual`, `jacobian`,
+`adjoint` and `linear_init` are defined on every layer. On a layer without flow unknowns every
+flow is a function of its own edge's potential difference, so the potentials and drivers give
+everything. An implicit law's flow is not: a fan with a prescribed rise has a residual that does
+not contain $q$, and conservation at the nodes fixes its flow. So on a layer with flow unknowns
+the methods that need the flows take `q`, as `solve` returned it (every edge), and refuse a
+missing one with a `ValueError` that names the implicit kinds.
+
+- `flows(phi, drivers, q)` returns the implicit edges' columns as given and evaluates the
+  potential-controlled edges' columns from `phi` (steady context), differentiably. At `solve`'s
+  own `(phi, q)` the result is `q`. A phasor layer has no such accessor (`TypeError`).
+- `dflows(phi, drivers, q)` is every edge's slope `d q / d dp`. On an edge of an implicit law
+  `r(dp, q) = 0` it is the slope the law implies, `-(d r / d dp) / (d r / d q)` at `q`'s
+  flow, and `nan` where `d r / d q` is zero (an ideal source: its flow does not follow from its
+  potential difference). Every edge of a law with several ports is `nan`. A phasor layer has no
+  such accessor (`TypeError`: its slopes are complex).
+- `residual(..., q=q)` is the residual of the unknowns `[phi_I, q_F]`, the interior potentials
+  then the flows of `implicit_edges`: the balance rows, then the implicit laws' own residuals; it is
+  zero at `solve`'s result. A phasor layer's rows are complex.
+- `jacobian(..., q=q)` is the dense matrix of the operator `solve`'s Newton iteration builds, of
+  size `n_I + n_F` (twice that on a phasor layer, in the real view: each complex unknown a
+  (Re, Im) pair).
+- `adjoint(..., grad, q=q)` solves `J^T lambda = grad` with that matrix; `grad` and the result
+  have the width of the unknowns (the real view on a phasor layer).
+
+On a layer without flow unknowns `residual` keeps its `n_I` balance rows, and `q` is ignored
+by `residual`, `jacobian` and `adjoint`. The balance of a given state is `balance(phi, q,
+sources)`.
+
+**One scheme vocabulary for every layer.**
+`SCHEMES = ("exact", "backward_euler", "trapezoidal", "forward_euler")`
+(`noodl.elements.base`) names the time-integration schemes of both layer kinds, with the keyword
+`scheme` everywhere. A `KirchhoffLayer` takes `scheme="trapezoidal"` (the default) or
+`"backward_euler"` at construction, and `solve(scheme=None)` means "the layer's own"; it refuses
+`"exact"`, which belongs to a `TransportLayer`, by name. `"forward_euler"` is for a
+`KirchhoffLayer` whose storage sits at boundary nodes only
+([Node storage](#node-storage)); a `TransportLayer` refuses it. A name outside `SCHEMES` is refused with an error
+that lists them.
+
+**Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
+
+- every kind's edge count is a multiple of its law's `ports`;
+- every connected part of the layer's edges contains a boundary node (a ground): a part with
+  none (a transformer secondary left floating) has undetermined potentials;
+- a dynamic kind carries no head (its step-start potential differences are taken without one);
+- `linear_solver="cg"` is refused (the system is not symmetric positive definite);
+- on a phasor layer, every law is `phasor_capable` and there are no withdrawals and no
+  storage (a capacitance is an edge law there).
+
+Such a layer takes [node storage](#node-storage) as well. On a step its withdrawal and its
+analytic `rate_slope` enter each node's flow balance and the diagonal of the Jacobian, as on
+the fast path (and the same `history`, `scheme` and `storage_flow`); in the steady operating
+point (`mode="dc"`) storage is absent. At the consistent initial point (`mode="initial"`) each
+node with a storage entry whose `initial()` is not `None` is *held* at that potential: its flow
+balance is replaced by `phi = initial` (entries at one node with different initial values are
+refused by name). The flow into storage there is whatever balances the node:
+`storage_flows(phi, drivers, dt=None, mode="initial", q=q, sources=sources)` returns the
+node's flow imbalance (its sources, less the net outflow of `q` and the withdrawals'
+withdrawal), split among the node's entries in proportion to their `capacity`; the Model
+writes it to `"<layer>.storage_flow"`, the trapezoidal scheme's step-start flow. A
+`LinearStorage(node, C, initial=v0)` to ground is then the same circuit as a
+`Capacitance(C, v0=v0)` edge to ground, and its storage flow the capacitor current.
+
+A system that is structurally sound but singular (a loop of ideal potential sources, a cut set
+of flow sources, a part reached only through flow-prescribed edges) raises a `RuntimeError` at
+the solve naming the layer and its implicit kinds. At the initial point (`mode="initial"`) every
+storage law is held at its initial value and so acts as a source itself (a capacitance as a
+potential source, an inductance as a flow source); the error then says so and suggests starting
+from the operating point (`mode="dc"`). Under `on_failure="return"` that singularity shows only
+as `converged=False` in `diagnostics`.
+
+`linear_init(phi_boundary, drivers, sources, q=False)` is defined on every layer. On a layer
+with flow unknowns it is the linear guess of the potentials and the flow unknowns together: each
+law with a flow is replaced by its tangent at zero (its own `linear_init`; a law with several
+ports, and every law on a phasor layer, is taken at its flow and Jacobian at the starting
+potentials instead: the same for a linear law), each implicit law by its residual and Jacobian at
+zero interior potentials and its start flow (`start_flow`, zero unless the law gives one; see
+[Implicit, coupled and dynamic constitutive laws](../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws)),
+the withdrawals and storages by their value and slope there, and the system is solved once. On a layer with flow unknowns the result is detached: no
+gradient flows to `phi_boundary`, `sources`, the drivers or the law parameters, unlike on a
+layer without flow unknowns. On a phasor layer it is complex. `q=True` returns `(phi_interior, q_implicit)`, the second the flows of
+`implicit_edges` (empty on a layer without flow unknowns). A system the guess finds singular is
+reported like a singular solve. A solve still starts from zeros, or from the warm start.
+
+### What a solve takes: dc, initial, a step, a phasor
+
+| Keyword | Meaning |
+|---|---|
+| `mode` | `None` (default): `"transient"` when `dt` is given, `"dc"` otherwise. `"dc"`: the steady operating point (no `dt`). `"initial"`: the consistent initial point (each storage law at its initial value; no `dt`). A phasor layer is always `"phasor"`. |
+| `dt` | One implicit step of this length (s). |
+| `t` | The evaluation time, the END of the step on a transient (a time-dependent source is evaluated there); `None` when untracked. |
+| `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law or storage; `q` is read only by a dynamic law and may be `None` otherwise. |
+| `scheme` | `"trapezoidal"` or `"backward_euler"`; `None` (default) is the layer's own, `KirchhoffLayer(scheme=...)`, trapezoidal unless built otherwise. |
+| `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
+
+Every layer checks these keywords the same way, by name, whichever path solves it, and builds
+one step description per solve (`_Step`: the law context and what the storage does).
+
+- **dc** (`mode="dc"`, or no `dt`): the steady operating point. Storage is absent, so no
+  `history` or `storage_flow` is taken.
+- **initial** (`mode="initial"`, no `dt`): the consistent initial point. A storage that holds
+  an `initial()` potential holds its node there, on every layer (a layer without flow
+  unknowns solves that one call on the sparse operator, see [Node storage](#node-storage)).
+- **a step** (`dt > 0`): one implicit step ending at `t`, with the `scheme`. It needs
+  `history`, and `storage_flow` under the trapezoidal scheme on a layer with storage. A layer
+  with storage, a dynamic law or a law that reads the context takes a step; a layer with none
+  of these has static laws, takes no step, and refuses `dt` and `history` (it accepts and
+  ignores `t`, a valid `scheme`, `q0` and the modes `"dc"` and `"initial"`). In practice
+  only a fast-path layer takes no step: an ideal or implicit law reads the context, so a
+  layer with one steps. A layer whose laws read the context but none dynamic steps without
+  history, at its operating point at the step end. A layer whose storage is all that steps
+  takes `history=(phi, None)`: its laws read no step-start flow. `storage_flow` is refused
+  on a layer without storage, and any step keyword without `dt`.
+- **a phasor** (always, on a `phasor=True` layer): ignores `scheme` and refuses `dt`,
+  `history` and any mode but `"phasor"`.
+
+A scheme outside the two above is refused by name. On the differentiable path (the default)
+gradients reach `history` too, so a chain of steps back-propagates through time.
+
+**Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
+(`"sparse_direct"`, per instance) whenever SciPy is importable, at any batch size, and batched
+dense LU (`"direct"`) only when it is not. A dense batched factorisation costs memory and work growing with the square and cube of the system size per instance, which is why the sparse factorisation is the default. A tiny circuit
+at a very large batch may be faster with an explicit `method="direct"`. `"auto"` never picks
+GMRES (the system is indefinite and badly scaled, with potentials and flows in one vector) and
+refuses CG. An explicit `"gmres"`, `"direct"` or `"sparse_direct"` is honoured. `diagnostics["method"]` is the
+method requested and `diagnostics["backend"]` the one that ran.
+
+### Phasor layers
+
+`KirchhoffLayer(..., phasor=True)` solves the sinusoidal steady state: `phi`, `q`, the
+boundary potentials and the warm starts are complex (complex128). The frequency in Hz comes from
+the driver `layer.frequency_key` (`"<name>.frequency"`, one value per instance) and reaches the
+laws as `ctx.omega = 2 pi f`. Each complex unknown is solved as its (real, imaginary) pair, so a
+law that is not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is solved
+exactly, and the real solver machinery serves unchanged. A load is an edge to ground (node
+sources are refused). `power_residual` is then the complex power balance, real and imaginary
+parts both zero at a solution: Tellegen's theorem for phasors.
+
+The initial guess is zero. A law that is singular or flat at `dp = 0`, such as a constant-power
+load, needs a warm start: pass `phi0` (for example every interior potential at the nominal
+source voltage).
+
+### On a `Model`
+
+`Model` gives such a layer its history, time and warm start; see
+[Layers with flow unknowns, dynamic laws or laws that read the context](#layers-with-flow-unknowns-dynamic-laws-or-laws-that-read-the-context) below.
+
+
+## `TransportLayer`
+
+Advects one or more species (or heat) along the flows of its kinds, with storage at nodes:
+
+$$
+\frac{dx}{dt} = M x + N x_b + \frac{s}{\text{capacity}}
+$$
+
+```python
+from noodl.layers.transport import TransportLayer
+
+layer = TransportLayer(
+    net, "thermal",
+    capacity=heat_capacities,       # per ACTIVE INTERIOR node
+    flow_kind=("airpath", "door"),  # one or several advecting kinds
+    boundary=["ambient"],
+    n_species=1,
+    conduction_kind="wall",         # optional diffusive edges: one kind or a tuple of kinds
+    conductance=ua,
+    scheme="exact",                 # 'exact' | 'backward_euler' | 'trapezoidal'
+    quantity="temperature", unit="K",
+)
+```
+
+Four things catch people:
+
+- **The active interior.** Nodes that no edge of this layer's kinds touches are *inactive* and
+  have no row at all — not a zero row, which would be singular. `capacity` must be indexed by the
+  active interior, which `active_interior(net, kinds, boundary)` computes. A wall-mass node with
+  conduction edges and no airpath edge *is* an unknown of a thermal layer and is *not* one of a
+  species layer over the same network.
+- **`sources` is in full node order**, not interior order — zeros on boundary and inactive nodes.
+  This differs from `capacity` on purpose: sources are an application-level quantity, capacity a
+  layer-level one.
+- **`conduction_kind` may be several kinds too**: `("wall", "film", "radiation")` carries wall
+  conduction, a surface (film) coefficient and a radiative coefficient as separate edges.
+  `conductance` is then one tensor over the edges of all those kinds, the first kind's edges in
+  network order, then the second kind's, and so on; `layer.conduction_edges` lists the kinds with
+  their end nodes in exactly that order, so a closure can write one value per edge, and
+  `layer.conductance` reads the construction-time values back. Every
+  conduction kind counts as a touch for the active interior.
+- **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
+  That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
+  advected by both `"airpath"` and `"door"` edges needs no new operator. It may also be none,
+  `flow_kind=()`: a conduction-only layer (a heat network of conductances and capacities, as the
+  electrical application's heat ports use), whose `q` is empty; in a `Model` it has no flow
+  driver and no flow owner.
+
+The three schemes: `"exact"` uses an augmented matrix exponential and controls its own error by
+sub-stepping; `"backward_euler"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
+`"exact"` for heat, `"backward_euler"` for species — the application defaults reflect this.
+
+`step(..., scheme=...)` takes one step with another scheme than the layer's own, checked as the
+constructor checks it (a storage-free node with throughflow still needs `"backward_euler"`); in a
+`Model`, `model.step(..., layer_options={"thermal": {"scheme": "backward_euler"}})` does the same for
+one step. A layer coupled to a circuit steps this way with the circuit's own rule: backward
+Euler on the step after a restart, trapezoidal otherwise. `step(..., sources_prev=...)`
+(trapezoidal only) gives the sources at the START of the step; the trapezoidal rule then
+integrates them as it integrates the state, `dt/2 (sources_prev + sources)`, instead of holding
+`sources` over the step. A `Model` passes it when a closure carries the layer's sources as state
+(`state_keys` holding `"<layer>.sources"`, as the electrical application's `JouleHeating` does):
+the step-start state's `"<layer>.sources"` are then the heat at the step start.
+
+The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
+the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
+the budget, the step is refused, raising an error that names the layer and advises the implicit
+or trapezoidal schemes. A stiff operator (large `||dt M||_1`, e.g. fast removal with a nonzero
+forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme="backward_euler"` is
+the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
+transmission, kinetics, removal, and conductance—are differentiable under every scheme.
+
+**Boundary values linear in time.** By default, the boundary values stay constant over a step.
+In the exact scheme, `step(..., x_boundary_end=...)` instead makes them vary linearly over the
+step, from `x_boundary` at its start to `x_boundary_end` at its end (a first-order hold). The
+step is then exact for a boundary value that ramps linearly while the flows are held fixed. This
+matters for a zone that flushes much faster than the step. With a boundary value held at the
+step mean of a ramp, such a zone relaxes to that mean and ends about half a step behind the
+boundary. With the linear boundary, it ends behind by its own flushing time, as it should. The
+Modelica importer's `scheme="midpoint"` runner uses this. The backward Euler and trapezoidal schemes
+do not accept the argument and raise `ValueError` if it is given. So does `step_with_transfer`, which returns the boundary transfer: the transfer is defined for a boundary held constant over the step.
+
+`x_boundary_rates=(start, end)`, given together with `x_boundary_end`, adds the boundary's rates
+of change at both ends of the step. The boundary then follows the cubic Hermite through both
+ends' values and rates instead of the straight line. A fast-flushing zone ends behind its
+boundary by its flushing time times the boundary's rate at the step's end. On a curved boundary
+the straight line gets that rate wrong: it uses the chord's slope, which is off by about half a
+step times the curvature. The Hermite uses the end's own rate.
+
+**Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
+volume, or a headspace volume as the water level changes. The step conserves the stored amount
+`V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`
+(trapezoidal). In the trapezoidal form the old-time rate `F(x_old)` is evaluated with the OLD
+capacity, which matters for removal and kinetics (they act on the amount `V x`), not for advection
+or conduction (capacity-free amount rates). The argument `capacity_prev` (the storage at the step's start, when it differs from
+the `capacity` argument at the step's end) implements this; a fixed-storage layer omits both and
+recovers the classical form. The driver `"<layer>.capacity"` holds the storage at the step's end.
+When a closure writes that driver, the step-start state must carry the key `"<layer>.capacity"`,
+the storage at the state's own time, which `Model.initial_capacities(state, drivers)` builds by
+querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
+`capacity_prev` differs from `capacity`.
+
+**Dilution.** `dilution=` (per species, `None` by default) adds `dilution * net(q) / capacity`
+to the removal, `net(q)` the signed net inflow of the flow edges into each node. Where the flows
+do not balance because the stored volume changes, `dilution = carrier` is the advective form
+`V dx/dt = sum_in carrier q (x_in - x)` and `dilution = 0` the conservative flux form; the
+capacity is then a rate coefficient at the end of the step. `dilution_mode="withdrawal"` instead
+reads only `max(net(q), 0)`: a FIXED volume whose flow imbalance is a nodal sink or source of
+the carrier. A surplus of inflow is a withdrawal that leaves at the node's own value; a deficit
+is an injection of carrier with no content of its own, which the outflow carries away, and
+whatever content it brings is the caller's `sources`, never a negative removal. The water
+application's quality layer uses this mode. The sink goes through `torch.where`, so at
+`net(q) = 0` its derivative is the withdrawal side's. The default `"signed"` mode is unchanged.
+
+**Storage-free nodes.** `storage_free=[...]` names interior nodes that hold no amount, such as a
+zero-volume air-handler plenum. Their balance is algebraic in every step: what flows in flows out
+within the step, so their value is the flow-weighted mix of what enters. A storage-free node with
+nothing passing through it (no flow and no conduction) keeps its value, as ContamX holds the
+plenum of a switched-off air handler. A source at such a node (a heating coil in a plenum) is
+carried on by the flow through it within the step. At a node nothing passes through the source
+has nowhere to go, and the step drops it (no airflow through a plenum: its coil delivers
+nothing); `step`'s `diagnostics` reports the number of nonzero source entries dropped under
+`"held_sources_dropped"` (in `Model.step`, at `diagnostics["layers"][name]`). Their capacity, at construction or per step, may be 0
+(a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
+on a stored amount, so they do not act on these nodes. Only `scheme="backward_euler"` and `steady` can
+hold a storage-free node that flow passes through: the exponential and trapezoidal steps have no
+algebraic form, so a layer with either scheme refuses such a node at construction (a node joined
+only by conduction is folded instead, see below). A `steady` solve has no value for such a node
+with nothing passing through it, and refuses it, naming the node. Whether such a node mixes or holds is a 0/1 choice on the flows and
+carries no gradient: a held node's value has zero gradient with respect to the flows, although
+any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
+
+**Surface and star nodes: folding a storage-free node into its neighbours.** A storage-free node
+joined to the rest of the network only by conduction (the inside surface of a wall, between the
+zone air and the first wall layer; a zone's radiant "star" node, joined to each of its surfaces)
+stores no heat, so whatever conducts in conducts out. Its temperature is the conductance-weighted
+mean of its neighbours' temperatures, plus its own source (absorbed sunlight, the radiant part of
+a gain) divided by its total conductance. Putting that back into its neighbours' balances removes
+the node: its neighbours are joined directly by *equivalent* conductances, and its source is
+shared out among them. This is the "combined surface coefficient" of building physics (a surface
+film of conductance $h A$ in series with the wall half behind it, $k A$, is one conductance
+$1/(1/(hA) + 1/(kA))$ between the air and the wall) and the star-delta transform of circuit
+theory (a star node joined to $n$ surfaces becomes conductances between every pair of them).
+Several such nodes joined to each other, the surfaces of a zone with their star node, are folded
+together as one group (in linear-algebra terms, the Schur complement or Kron reduction of their
+block of the conduction matrix).
+
+The layer does this by itself: a storage-free node with no flow edge, and no removal or kinetics
+term at construction, is folded. The folded network has positive conductances again, so every
+scheme, `exact` included, steps it, and positivity and the maximum principle hold as before (no
+new temperature extremes from the folding). After the step the folded nodes' temperatures are
+recovered from their neighbours' new values, the boundary values at the end of the step and the
+sources, and returned in the state like any other node's; the boundary transfer counts the heat
+that leaves through them. The folding is computed once from the construction-time conductance
+(again after an in-place edit of it, and on every call while it requires grad), and on each call
+that passes a per-call conductance (the driver below), so a radiative
+coefficient re-evaluated each pass is folded with its current value, and gradients reach the
+conductances and the sources through it. A folded node all of whose conductances are zero in a
+call is held at its value, its source dropped, as above; a group of folded nodes joined that call
+only to each other (every conductance to a stored node or boundary zero) has no temperature and is
+refused, naming the nodes. Checking for such a group searches the group's edges on the host, so it
+costs a little on every call in which some conductance touching a group of two or more folded
+nodes is zero (a radiative coefficient that vanishes at night); with every such conductance
+positive it costs nothing. Each group is factored as a small dense matrix, batched over the groups
+of one size, never as a matrix over the whole network; a group is as large as the set of folded
+nodes joined to each other, usually the surfaces of one zone. A layer whose every interior node is
+folded (a heat network without any heat capacity) has nothing to step: its step and its steady
+state are the folded nodes' balance at the end of the step; under `on_failure="return"` they
+return a `SolveResult` that has converged in zero iterations. `layer.steady(..., hold=x0)` holds
+the stored nodes at `x0` and solves only the folded ones: the consistent initial point
+`Model.steady(..., mode="initial")` uses. A storage-free node that air flows
+through (a plenum), or that has a removal or reaction at construction, is not folded and still
+needs `scheme="backward_euler"`; a per-call removal (the `"<layer>.removal"` driver) that is nonzero at a
+folded node is refused, naming the node. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
+and the dense `operator` still describe the whole network, a folded node as its algebraic balance.
+
+**A conductance that changes with the state.** A radiative coefficient depends on the surface
+temperatures, a film coefficient on the air speed. A closure writes such a value into the driver
+`"<layer>.conductance"`, shape `(..., b_c)` in the order of `layer.conduction_edges`, and it
+*replaces* the construction-time `conductance` for that call, under all three schemes and
+`steady`. Gradients flow from the solution back to the closure that computed it. Entries must be
+zero or positive (a negative one is refused, naming the edge); zero is allowed because a
+coefficient can vanish. A stored node whose conducting edges are all zero this call, and with no
+flow through it, is isolated for that call: a transient step leaves it at its value plus its own
+source, and a steady solve refuses it as an undefined steady state (or, for a storage-free
+node, as one nothing passes through). With `Model(coupling="iterate")` the closure reads the
+previous pass's temperatures and the passes converge to the steady state of the nonlinear
+balance, for instance radiation to a boundary at the fourth power of the temperature. The library
+carries no radiation law: the closure owns it.
+
+**Undefined steady states.** A stored node that nothing leaves (no outflow, no conduction, no
+removal) keeps everything that enters it, and so does a closed group of stored nodes whose
+contents only circulate among themselves, never reaching a boundary outflow, a removal, a filter
+loss or a reaction. Their steady state is undefined without a source and unbounded with one, and
+the operator is singular. `steady` checks for this on every batch instance before it solves and
+raises `UndefinedSteadyState` (a `ValueError`), naming the nodes; its `layer` and `nodes`
+attributes say which. Step such a model through time instead, or give the nodes an exchange.
+
+**Linear solver.** The `"backward_euler"` and `"trapezoidal"` schemes each need one linear solve per
+step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
+`"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve
+(unlike `KirchhoffLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
+picks `"sparse_direct"` (SciPy's sparse LU, one exact factor-and-solve, no outer iteration) at or
+under a batch cap of 32 instances, and plain `"gmres"` above it — chosen on an interleaved
+forward/backward benchmark across the whole family (`gmres`, `gmres_jacobi`, `gmres_ilu`,
+`sparse_direct`), not on iteration counts alone.
+`"auto"` never picks
+`gmres_jacobi`/`gmres_ilu`: the benchmark found `gmres_ilu`'s per-instance ILU factorisation cost
+(paid twice per differentiable step — once in the forward solve, once in the backward adjoint,
+since preconditioning is not reused across the two) the clear loser at every batch size measured,
+and the gmres-vs-`gmres_jacobi` ordering too close to the run-to-run spread to trust as a
+tie-break. Two fall-backs, both silent (never a raise, since `"auto"` is a promise to choose a
+backend that works): SciPy absent (`"auto"` would have factorised, but the optional `noodl-physics[sparse]`
+extra is not installed) falls back to `gmres` and warns once per process; a grad-requiring solve
+on the `on_failure="return"` early-return path (which runs outside the differentiable path's own
+`no_grad`, unlike `step`'s ordinary forward/backward) falls back to `gmres` silently, since an
+explicit `sparse_direct` there would otherwise raise for a reason the caller did not ask for.
+`diagnostics["linear"]["backend"]` reports which backend actually ran on every solve.
+
+## `Reaction`
+
+Applied to a transport layer's state after its step (by default), operator-split. A reaction
+is any object with `apply(x, dt, drivers)` returning the new state:
+
+```python
+from noodl.layers.reaction import Reaction
+
+class Source(Reaction):
+    def apply(self, x, dt, drivers=None):
+        return x + dt * drivers["generation"]
+
+model = Model(net, layers, reactions=[("species", Source())])
+```
+
+The core ships only this protocol. The applications bring their own reactions: the street
+application `Photostationary` (Leighton NO/NO₂/O₃, `noodl.apps.street_aq`), the sewer
+application `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the driver
+`"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate overrides it.
+
+**First-order decay is not a reaction.** A species that decays as $\mathrm{d}x/\mathrm{d}t = -k x$
+is the transport layer's `removal` (a rate per node, 1/s), which is solved together with the
+transport in the same step rather than split from it.
+
+`Model(reaction_order="before_transport")` applies the reactions to the step-start state
+before the transport step instead, so the returned state is the one after transport. The
+sequence of operations is the same; only the point where the state is sampled moves. The sewer
+application uses it because SWMM reports its water quality after mixing.
+
+**`Model.steady` never applies reactions.** This is deliberate — a steady state under a reaction
+is a different fixed-point problem, not the transport steady state. The street and sewer
+applications each provide their own `street_steady` / `sewer_steady` helper that iterates
+transport and chemistry together to a joint fixed point. If you have a reaction and you call
+`Model.steady`, you get the transport-only answer.
+
+## `AllocatedFlowLayer`
+
+The fourth mode. Each edge carries a *requested* flow; the layer clips it against arc capacity
+and the receiver's remaining storage headroom, sharing proportionally when several edges compete
+for one node's headroom.
+
+```python
+from noodl.layers.allocation import AllocatedFlowLayer
+
+layer = AllocatedFlowLayer(
+    net, "cap", kind="link",
+    s_max=storage_ceilings,   # per node, full node order; inf for unbounded
+    c_arc=arc_capacities,     # per edge
+    preference=weights,       # optional sharing weights, strictly positive
+    mode="hard",              # 'hard' | 'smooth' | 'projection'
+    n_passes=5,
+)
+
+s_new, f = layer.step(s, drivers, dt, diagnostics=diag)
+```
+
+In the simplest case the realised flow is just $f = \min(r,\; c_{\text{arc}},\; h)$. The three
+modes differ in gradient behaviour, which is the whole reason there is more than one — see
+[Flow allocation](../applications/water-resources/allocation.md) for the full treatment.
+
+An allocation layer is inherently discrete-time. A `Model` owning one refuses a steady pass and
+refuses `residuals()` outright, because a clip-and-allocate rule has no steady meaning to report.
+
+
+## `Model`
+
+```python
+from noodl.model import Model
+
+model = Model(
+    net,
+    layers={"air": air_layer, "thermal": thermal_layer},
+    closures=[density],
+    reactions=[("species", decay)],
+    coupling="pingpong",            # or "iterate"
+    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"; transport or Kirchhoff layers
+    iterate_max=20,
+    substeps={"species": 4},
+)
+
+state = model.step(state, drivers, dt=60.0)
+state = model.steady(state, drivers)
+```
+
+`iterate_tol` may name a transport layer (converged on its state `.x`) or a Kirchhoff layer
+(converged on the largest change of its potential `.phi` over its interior and boundary nodes, in
+the potential's units, per instance). A Kirchhoff layer is named when a closure computes that
+layer's element coefficients, or its boundary potentials, from its own previous solution, as the
+sewer dynamic wave does with its conduit coefficients and outfall heads: for example
+`iterate_tol={"water": 1e-6}` (the sewer's head layer) repeats the pass until no head moves by
+more than 1 micrometre.
+Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Kirchhoff layers not
+named in `iterate_tol` are not iterated.
+
+`iterate_flow_tol={"water": 1e-9}` (optional, flow units) also judges such a layer's flows: a pass
+converges only when its returned `.q` is within that of the `.q` it was fed. It matters when the
+potential solve stops on its warm start (its residual already within `atol`), which hands the fed
+potential back unchanged while the flows the closures read are still moving.
+
+`iterate_acceleration="anderson"` (opt-in; default `None`) replaces the relaxation of those
+Kirchhoff layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
+`iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
+minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
+convergence test then also asks that residual of `.phi` to be within `iterate_tol`. A
+conduction-only transport layer (`flow_kind=()`, a heat network) named in `iterate_tol` is mixed
+and judged on its fixed-point residual like a Kirchhoff layer's `.phi`; advective transport
+layers stay relaxed. Mixing changes only the sequence of fed states, never the fixed point, and the
+fixed-point adjoint is unchanged. Two safeguards: an ill-conditioned history drops its oldest
+passes, and a mixed step that would move any entry against its own residual is replaced by the
+relaxed step, because the relaxed iteration only reaches fixed points that attract it and a secant
+step can head for one that repels it (a closure may have both; the sewer's flat, near-dry conduits
+do). The sewer dynamic wave builds with it and needs two to four times fewer passes.
+
+### Key conventions
+
+State and driver keys are namespaced by layer name:
+
+| Key | Meaning |
+|---|---|
+| `"<layer>.phi"` | Nodal potentials, full node order |
+| `"<layer>.q"` | Branch flows, the layer's kind order |
+| `"<layer>.storage_flow"` | A Kirchhoff layer with [node storage](#node-storage): the flow into every storage entry at the end of the step (`layer.storage_flows`), zeros after a steady solve; the trapezoidal scheme's step-start flow, zero where it is missing. Under `scheme="forward_euler"` (storage at boundary nodes) the flow the solve delivered to every storage node, on a steady solve too |
+| `"<layer>.x"` | Transport state, interior order, `(n_i,)` or `(n_i, K)` |
+| `"<layer>.s"` | An allocation layer's per-node storage |
+| `"<layer>.phi_boundary"` | Prescribed boundary potentials (driver) |
+| `"<layer>.x_boundary"` | Prescribed boundary transport state (driver) |
+| `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
+| `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
+| `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
+| `"<layer>.conductance"` | Per-step conduction conductance of each conduction edge, `(b_c,)` in the order of `layer.conduction_edges`, replacing the layer's construction-time `conductance` (driver, optional; zero or positive; not carried in the state, so a closure that sets it must write it every step) |
+| `"<layer>.transmission"` | Per-step pass fraction of each flow edge, `(b_flow,)` or `(b_flow, K)` in the layer's flow order, replacing the layer's construction-time `transmission` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
+| `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
+| `"<layer>.frequency"` | A phasor layer's frequency in Hz, one per instance (driver, required) |
+
+### The order within a pass
+
+Closures → potential solves → allocation steps → transport steps → reactions (reactions before
+the transport steps under `reaction_order="before_transport"`).
+
+The allocation step sits between the potential solves and the transport steps so that a
+transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote
+it.
+
+### Layers with flow unknowns, dynamic laws or laws that read the context
+
+A Kirchhoff layer with implicit or multi-port laws is solved with the flows of its implicit-law
+edges as unknowns (`layer.implicit_edges`); one whose laws are dynamic or read the context
+(without either) is solved on the fast path. `Model` hands such a layer what its laws need:
+
+- the warm start of those flows from `"<layer>.q"` in the state, when it is there;
+- the time the laws are evaluated at: the **end** of a step (`t + dt` for `step(..., t=t)`),
+  the `t` of `steady(..., t=t)`, or `None` when no time is given (every Kirchhoff layer is
+  given it, whichever path solves it);
+- on a step of a layer with dynamic laws (`layer.dynamic`: a capacitance, an inductance), the
+  step-start `"<layer>.phi"` and `"<layer>.q"` as its history, and `dt`. Both keys are then
+  required in the state (`state_from` and `check` say so); give the first step a consistent
+  initial point, e.g. `layer.solve(..., mode="initial")`. The history is always the
+  step-start state, so `coupling="iterate"` re-steps every pass from the same start.
+
+`scheme=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`; the
+keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`, `storage_flow`) are refused
+there by name.
+
+A Kirchhoff layer with [node storage](#node-storage) gets the same step context (`t`, and on a
+step `dt` and the step-start `"<layer>.phi"` as `history`; `"<layer>.q"` is not read, so it
+is not required), and also the step-start `"<layer>.storage_flow"`, which the trapezoidal
+scheme reads (a missing one is zero: the storage at rest at the step start). After every solve the Model writes the
+new `"<layer>.storage_flow"`, zeros on a steady pass, so a run started from `steady` carries
+it from the first step. A state that is not at rest but carries zero `storage_flow` (built by
+hand, missing, or with the `refs` default of 0) starts the trapezoidal scheme assuming no storage flow
+at the step start, which can ring; take the first step with `scheme="backward_euler"`, as
+`water_step` does by default.
+`steady` solves such a layer at its operating point (a capacitance open, an inductance
+shorted). A layer with laws that read the context but no dynamic one (a time-dependent source and
+resistors, no storage) takes no history: on a step it is solved at its operating point at the
+step end, `t + dt`, with `ctx.mode == "dc"` and `ctx.dt` `None`, which is exact for a layer that
+stores nothing. `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the
+state's own flows, for a layer with flow unknowns or a law that reads the context (whose flows
+need a time and a step start `residuals` does not have). A phasor layer (`phasor=True`) has complex `"<layer>.phi"` and
+`"<layer>.q"` and reads the driver `layer.frequency_key`; the iterated coupling judges its
+convergence on the modulus of the change and differentiates its fixed point in the real view.
+Anderson mixing (`iterate_acceleration="anderson"`) is refused on a phasor layer.
+`line_search="convex"` (by keyword or through `newton_defaults`) is refused on a layer with flow
+unknowns: its residual is not the gradient of a convex function.
+
+### Closures
+
+A closure is `(state, drivers) -> driver updates`. It is the escape hatch for anything that is a
+function of solved state: air density from temperature, canyon velocities from wind, tank levels
+from the previous step.
+
+```python
+def density(state, drivers):
+    T = state["thermal.x"]
+    return {"rho": P_REF / (R_AIR * T)}
+```
+
+Closures may **not** write layer state keys. A closure may carry *its own* state across steps by
+declaring `state_keys`, which `Model` copies from its return into the returned state — a sewer
+manhole level, or a water tank level and its controlled links' status. Two closures claiming one
+key is refused at construction, naming both, rather than resolved by whichever ran last.
+
+### Closures and the clock
+
+A closure that only computes coefficients or forcing terms keeps the two-argument form `closure(state, drivers)`.
+A closure that integrates some state over the step (such as a storage sweep that advances manhole levels)
+declares `integrates = True` and receives a third argument, `ctx = StepContext(dt, t)`, where `dt` is
+the integration interval and `t` the step's start time if tracked. Inside `step(...)` the context carries the
+interval; inside `steady(...)` it refuses the closure by name because there is no interval to integrate over.
+Queries (`residuals`, `current_flows`, and the sewer report) call closures with `ctx = None`, where an
+integrating closure evaluates its outputs at the given state without advancing it. A closure declaring `state_keys`
+must also declare `integrates` (True or False) so the model knows whether its carried state changes step to step;
+omitting it is refused by name.
+
+### What a closure may declare
+
+Everything a closure says about itself is an optional attribute, listed in
+`noodl.contracts.CLOSURE_ATTRIBUTES` and read once, at construction, into a `ClosureSpec`
+(`integrates`, `state_keys`, `inputs`, `outputs`, `input_specs`, `key_labels`, `edge_kinds`,
+`requires_coupling`, `reads_flows_of`, `species_columns`). A malformed declaration is refused
+at construction by name:
+
+- `inputs`, `outputs`, `state_keys` and `edge_kinds` must be tuples of names; a bare string
+  (`outputs = "rho"`) is a `TypeError`;
+- `integrates` must be `True` or `False`;
+- a declared output may not be a layer's state key (`"<layer>.phi"`, `.q`, `.x`, `.s`), apart
+  from `"<layer>.q"` of a transport layer no Kirchhoff layer owns;
+- `species_columns = {layer: {species: column}}`, for a closure or reaction that addresses
+  species by column index, must agree with the layer's `species_names` and `n_species`.
+
+`model.refs.ownership()` lists, for every key, who writes it and who reads it (layers,
+closures by their declarations, the caller); `model.check` reports closures that overwrite
+each other's declared outputs (`overwritten-output`), declare nothing (`undeclared-closure`),
+return keys they did not declare when probed (`declared-vs-probed`), or declare a unit that
+differs from the field's (`unit-mismatch`, with `unit-undeclared` for a field with no unit).
+
+### Introspection
+
+```python
+model.residuals(state, drivers)   # per-layer nodal balance residual
+model.ports(state)                 # what a coupled or external model may prescribe and read
+```
+
+`Ports` reports boundary nodes, prescribable keys, boundary flows, and each transport layer's
+flow driver key. `Model.flow_layer_of[name] is None` tells you whether a transport layer's flows
+are yours to prescribe. This is the surface the [coupling application](../guide/coupling.md)
+builds on.
+
+### Differentiability
+
+Ping-pong is one pass of differentiable operations. Iterate runs its passes to convergence
+without a graph, then re-runs the certified pass once more on the graph and attaches the
+implicit adjoint of the interface equations — memory is one pass, not all of them, and the
+gradient error is of the order of the primal residual rather than tied to the pass count. The
+convergence *decision* is still made on detached copies, so it never appears in the graph. See
+[Differentiability](../concepts/differentiability.md#what-is-guaranteed) and
+[Coupling](../guide/coupling.md) for the full contract.
+`**solve_kwargs` on `step`/`steady` reach the **potential solves only** (`differentiable`,
+`on_failure`, `method`, Newton options); transport steps always raise on failure.
