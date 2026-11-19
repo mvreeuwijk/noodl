@@ -86,7 +86,7 @@ def test_interior_flow_balance_and_gradcheck_through_the_new_law():
     )
 
     layer = model.kirchhoff["air"]
-    element = layer._laws[0]
+    element, _ = layer.law_for("airpath")
     phi_b = torch.zeros(1, dtype=F64)
 
     def f(k_):

@@ -1,6 +1,6 @@
 # Layers
 
-The conservation layers a model steps. Concepts: [Layers](../../concepts/layers.md); transport options: [Transport options](../transport-options.md).
+The conservation layers a model steps. Concepts: [Layers](../../concepts/layers.md); options: [Kirchhoff](../kirchhoff-options.md), [transport](../transport-options.md), [Model](../model-options.md).
 
 ## Flow by potential
 

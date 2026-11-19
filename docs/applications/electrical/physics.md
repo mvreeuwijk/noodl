@@ -9,7 +9,7 @@ how to use them see [Build and analyse a circuit](circuits.md), [AC analysis](ac
 The whole circuit is **one** `KirchhoffLayer` whose potential is the node voltage: Kirchhoff's
 current law holds at every node, and the currents of voltage sources, inductors,
 transformers and controlled sources are unknowns alongside the node voltages (see
-[Implicit, coupled and dynamic laws](../../reference/transport-options.md#implicit-coupled-and-dynamic-laws)).
+[Implicit, coupled and dynamic laws](../../reference/kirchhoff-options.md#implicit-coupled-and-dynamic-laws)).
 This is the modified nodal analysis (MNA) form. A circuit is analysed at its DC operating
 point (capacitors open, inductors shorted), as a transient on a fixed time grid, or in the
 sinusoidal steady state by phasors. A circuit with no capacitor or inductor has no storage,

@@ -125,74 +125,9 @@ print([round(v, 9) for v in phi.tolist()], [round(v, 9) for v in q.tolist()])
 
 ## Implicit, coupled and dynamic constitutive laws
 
-Write `flow`; if you cannot, write `residual`. A law that gives its flow, `q = g(dp)`, one flow
-per edge as a function of that edge's own potential difference, writes `flow(dp, drivers)`. Every
-built-in airflow, water and sewer law does, and a layer whose laws all do is solved by nodal
-analysis. A law that cannot (a flow-controlled law, an ideal source, an inductance) subclasses
-`ImplicitLaw` and writes `residual(dp, q, drivers, ctx)` instead, the relation between the
-potential difference and the flow, zero when they agree; the layer then adds its flow as an
-unknown. Every law has `residual`: for a law with a flow it is `q - flow(dp)`, which the solve
-never calls. To read the law context (time, frequency, step-start values), name the third
-parameter of `flow` `ctx`. A `KirchhoffLayer` with an implicit law or a multi-port law adds those
-edges' flows as unknowns
-([Implicit, coupled and dynamic laws](../reference/transport-options.md#implicit-coupled-and-dynamic-laws));
-a dynamic or `ctx`-reading law that gives its flow adds none. The class-level declarations a law makes about itself (`ports`, `dynamic`, `phasor_capable`, `reads_heads`) are listed in [Extending noodl](../project/extending/index.md).
+Write `flow`; if you cannot, write `residual`. A law with a flow, `q = g(dp)`, is the nodal half of circuit theory: its flow is eliminated in favour of the potentials, and a layer whose laws all have one is solved by nodal analysis. A law that cannot (a flow-controlled law `dp = h(q)`, an ideal source, an inductance) subclasses `ImplicitLaw` and writes `residual`, and the layer then adds its flow as an unknown. The contract, with the class-level declarations a law makes about itself, is in [A new constitutive law](../project/extending/law.md#implicit-coupled-and-dynamic-laws), and the layer side in [Implicit, coupled and dynamic laws](../reference/kirchhoff-options.md#implicit-coupled-and-dynamic-laws).
 
-**The two forms.** A law with a flow is the nodal half of circuit theory: its flow is eliminated
-in favour of the potentials. An `ImplicitLaw` covers what cannot be written that way: a
-flow-controlled law `dp = h(q)`, an ideal potential source `dp = V` (no flow is a function of
-`dp`), an ideal constraint inside a multi-port law, and a law whose flow and potential are
-related through stored state. A subclass implements `residual`, which returns one value per
-edge, with the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's
-solution.
-
-A loss given as potential difference against flow, `dp = r q |q|`, in series with a linear
-conductance, between two prescribed potentials:
-
-```python
-import torch
-
-from noodl.elements import Conductance, ImplicitLaw
-from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.topology import Network
-
-F64 = torch.float64
-
-
-class QuadraticLoss(ImplicitLaw):
-    """A loss given as potential difference against flow: dp = r q |q|."""
-
-    def __init__(self, r, *, kind="loss", learnable=False):
-        super().__init__(kind)
-        self.r = self._param(r, learnable)
-
-    def residual(self, dp, q, drivers, ctx):
-        return dp - self.r * q * q.abs()
-
-
-net = Network(dtype=F64)
-for node in ("in", "mid", "out"):
-    net.add_node(node)
-net.add_edge("in", "mid", kind="loss")
-net.add_edge("mid", "out", kind="pipe")
-layer = KirchhoffLayer(
-    net, "w",
-    [QuadraticLoss(torch.tensor(2.0, dtype=F64)),
-     Conductance(torch.tensor(1.0, dtype=F64), kind="pipe")],
-    boundary=["in", "out"],
-)
-phi, q = layer.solve(torch.tensor([10.0, 0.0], dtype=F64))
-print(layer.implicit_edges.tolist())
-print(f"phi_mid = {float(phi[1]):.6f}, q = {[round(v, 9) for v in q.tolist()]}")
-```
-
-```text
-[0]
-phi_mid = 2.000000, q = [2.0, 2.0]
-```
-
-The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
-edges whose flow is an unknown, in layer edge order.
+A worked implicit law, a quadratic loss in series with a conductance, is on [A new constitutive law](../project/extending/law.md#implicit-coupled-and-dynamic-laws).
 
 ## Heads
 
@@ -234,29 +169,10 @@ and records the relative-velocity form as out of scope rather than quietly appro
 "structurally not differentiable by this framework's design, not an oversight."
 
 If you genuinely need a term that depends on solved state, it belongs in a **closure**, which
-runs between layer solves and writes driver values. See [Transport and model options](../reference/transport-options.md#closures).
+runs between layer solves and writes driver values. See [Model options](../reference/model-options.md#closures).
 Because the head reaches the layer as a driver, a gradient reaches whatever produced it, and
 `EdgeHeads` holds no tensor the differentiable solve would miss.
 
 ## Withdrawals and node storage
 
-Two objects act at a node rather than on an edge, each as a function of that node's own
-potential, and each adds only a diagonal entry to the Jacobian:
-
-- **`NodeStorage`** (`noodl.NodeStorage`, `noodl.LinearStorage`): an amount stored at the node,
-  which the layer turns into a withdrawal over each step with its scheme's step rate. A
-  capacitor to ground, a tank, a zone's air mass. Every layer takes it, with or without
-  flow unknowns (not a phasor layer); at the consistent initial point a storage with an
-  `initial()` potential holds its node there. Under
-  `scheme="forward_euler"` a linear storage sits at a boundary node instead (an EPANET tank),
-  held through the solve and moved by explicit Euler after it. See
-  [Node storage](../reference/transport-options.md#node-storage).
-- **`NodeWithdrawal`** (`noodl.NodeWithdrawal`): a withdrawal that is **not** storage, `w(phi)` at the
-  current instant: EPANET's pressure-driven demand, a leak. A storage written as a withdrawal
-  with its own step-start drivers duplicates what the layer already does; give it to
-  `KirchhoffLayer(storage=...)` instead.
-
-A dynamic edge law (`Capacitance`, `Inductance`) and a node storage both turn a change into a
-rate with `noodl.elements.step_rate`: `change / dt` under backward Euler, `2 change / dt -
-previous` under the trapezoidal scheme, with `step_rate_factor` (`1/dt` or `2/dt`) its
-derivative.
+A node holds either storage (`NodeStorage`, `LinearStorage`: an amount the layer turns into a withdrawal over each step, such as a capacitor to ground, a tank or a zone's air mass) or a withdrawal that is not storage (`NodeWithdrawal`: EPANET's pressure-driven demand, a leak). Each is a function of that node's own potential and adds only a diagonal entry to the Jacobian. The options are in [Node storage](../reference/kirchhoff-options.md#node-storage).

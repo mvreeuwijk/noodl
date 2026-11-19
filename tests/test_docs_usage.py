@@ -3,7 +3,7 @@ order, in one namespace per page, and each prints exactly the `text` block that 
 
 Illustrative code that is not meant to run on its own (a signature, a loop outline) is
 marked `py` instead of `python` and is not executed. Each page runs in a temporary
-directory holding the fixture files its examples name (`tree_steady.inp`,
+directory holding the fixture files and folders its examples name (`tree_steady.inp`,
 `twoloop_si.inp`, `quickstart_topology.json`, `DC.Loads.Examples.Resistor.json`, ...), so
 an example may read or write files by bare name, as a user would.
 """
@@ -35,10 +35,12 @@ PAGES = [
     "applications/building/schedules-and-controls.md",
     "applications/building/contaminants-and-occupants.md",
     "applications/building/elements.md",
+    "applications/building/contam.md",
     "applications/street/index.md",
     "applications/street/networks.md",
     "applications/street/closures.md",
     "applications/street/puffs.md",
+    "applications/street/cases.md",
     "applications/sewer/index.md",
     "applications/sewer/kinematic-wave.md",
     "applications/sewer/dynamic-wave.md",
@@ -70,9 +72,12 @@ PAGES = [
     "examples/sewer-sulfide.md",
     "examples/street-building.md",
 ]
-FIXTURES = ["sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",
-            "modelica/ChimneyShaftWithVolume.json",
-            "modelica_electrical/DC.Loads.Examples.Resistor.json"]
+FIXTURES = [
+    "sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",
+    "street/munich_paris_excerpt", "street/sirane_south_kensington",
+    "modelica/ChimneyShaftWithVolume.json",
+    "modelica_electrical/DC.Loads.Examples.Resistor.json",
+]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)
 
 
@@ -80,7 +85,10 @@ BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)
 def test_the_page_runs_and_prints_what_it_shows(page, tmp_path, monkeypatch):
     for pattern in FIXTURES:
         for f in (ROOT / "tests" / "data").glob(pattern):
-            shutil.copy(f, tmp_path / f.name)
+            if f.is_dir():
+                shutil.copytree(f, tmp_path / f.name)
+            else:
+                shutil.copy(f, tmp_path / f.name)
     monkeypatch.chdir(tmp_path)
     path = ROOT / "docs" / page
     blocks = BLOCK.findall(path.read_text(encoding="utf-8"))
@@ -96,3 +104,15 @@ def test_the_page_runs_and_prints_what_it_shows(page, tmp_path, monkeypatch):
         elif pending is not None:
             assert pending.strip() == body.strip(), f"{page}: printed output differs"
             pending = None
+
+
+def test_every_page_with_a_python_block_is_run():
+    """A `python` block on a page missing from `PAGES` would never be checked."""
+    missing = []
+    for path in sorted((ROOT / "docs").rglob("*.md")):
+        rel = path.relative_to(ROOT / "docs").as_posix()
+        if rel.startswith(("plans/", "superpowers/")) or rel in PAGES:
+            continue
+        if "```python" + chr(10) in path.read_text(encoding="utf-8"):
+            missing.append(rel)
+    assert not missing, f"pages with python blocks that are not in PAGES: {missing}"

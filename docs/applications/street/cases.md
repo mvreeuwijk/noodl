@@ -9,7 +9,7 @@ a SIRANE master file (`Donnees_*.dat`), with the deck it names; anything else ra
 ```python
 from noodl.apps.street_aq import read_case
 
-case = read_case("tests/data/street/munich_paris_excerpt")
+case = read_case("munich_paris_excerpt")
 case.street_ids           # ['1', '3', '8', '11'], the emissions/background street axis
 case.species               # ['NO2']
 case.meteo["u_star"].shape  # (3, 4): 3 hours, 4 streets
@@ -21,7 +21,7 @@ background and species files) relative to its own directory:
 ```python
 from noodl.apps.street_aq import read_case
 
-case = read_case("tests/data/street/sirane_south_kensington/Donnees_SouthKensington.dat")
+case = read_case("sirane_south_kensington/Donnees_SouthKensington.dat")
 case.source                # 'sirane'
 len(case.street_ids)        # 46
 case.species                # ['NO2', 'NO', 'O3']
@@ -90,9 +90,9 @@ naming both expectations.
 ```python
 from noodl.apps.street_aq import read_case, read_results
 
-case = read_case("tests/data/street/sirane_south_kensington/Donnees_SouthKensington.dat")
+case = read_case("sirane_south_kensington/Donnees_SouthKensington.dat")
 results = read_results(
-    "tests/data/street/sirane_south_kensington/RESULT_SOUTHKENSINGTON", case=case,
+    "sirane_south_kensington/RESULT_SOUTHKENSINGTON", case=case,
 )
 results.source              # 'sirane'
 sorted(results.meteo)        # ['h_abl', 'lmo', 'sigma_theta', 'temperature', 'u_star', ...]
@@ -248,7 +248,7 @@ from pathlib import Path
 
 from noodl.apps.street_aq import read_case, write_case
 
-case = read_case("tests/data/street/sirane_south_kensington/Donnees_SouthKensington.dat")
+case = read_case("sirane_south_kensington/Donnees_SouthKensington.dat")
 
 with tempfile.TemporaryDirectory() as tmp:
     out_dir = Path(tmp) / "deck"
@@ -279,7 +279,7 @@ from pathlib import Path
 
 from noodl.apps.street_aq import read_case, write_sweep
 
-case = read_case("tests/data/street/sirane_south_kensington/Donnees_SouthKensington.dat")
+case = read_case("sirane_south_kensington/Donnees_SouthKensington.dat")
 
 with tempfile.TemporaryDirectory() as tmp:
     out_dir = Path(tmp) / "sweep"
@@ -301,7 +301,7 @@ results folder with `read_results`.
 ```python
 from noodl.apps.street_aq import build_model, drivers_at, read_case
 
-case = read_case("tests/data/street/munich_paris_excerpt")
+case = read_case("munich_paris_excerpt")
 
 model, state, _ = build_model(
     case.network, species=case.species, meteo="per_street", background="per_street",
@@ -332,7 +332,7 @@ import torch
 
 from noodl.apps.street_aq import build_model, drivers_at, read_case, read_results
 
-FIXTURE = "tests/data/street/sirane_south_kensington"
+FIXTURE = "sirane_south_kensington"
 case = read_case(f"{FIXTURE}/Donnees_SouthKensington.dat")
 results = read_results(f"{FIXTURE}/RESULT_SOUTHKENSINGTON", case=case)
 

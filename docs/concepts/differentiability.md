@@ -14,7 +14,7 @@ For a converged solve, gradients flow back to:
 - and, across a [coupled model](../guide/coupling.md), through the join into the *other*
   model's parameters.
 
-```python
+```py
 phi, q = layer.solve(phi_boundary, drivers, sources=sources)   # differentiable=True default
 loss = (phi[room] - measured) ** 2
 loss.backward()

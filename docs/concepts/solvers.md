@@ -53,7 +53,7 @@ network, a bare "newton: did not converge" is not enough to find the culprit.
 
 ## `solve`: the `auto` table
 
-```python
+```py
 from noodl.solvers.select import solve
 
 result = solve(op, b, method="auto", rtol=1e-10, on_failure="raise")
@@ -108,7 +108,7 @@ its status and residual, and returns `self` when all converged, so it chains.
 
 ## Newton
 
-```python
+```py
 from noodl.solvers.newton import newton
 
 result = newton(residual, operator, x0, atol=None, rtol=None, max_iter=50,
@@ -157,7 +157,7 @@ starting again from a better one. A `KirchhoffLayer` built with `fallback=` (or 
 given one) climbs a short ladder when, and only when, Newton did not converge, and stops at the
 first rung that does:
 
-```python
+```py
 air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
                      fallback=("linear_guess", "storage_ramp"))
 ```

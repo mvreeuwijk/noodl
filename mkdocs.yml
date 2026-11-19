@@ -104,7 +104,7 @@ nav:
           - Headspace air and sulfide: applications/sewer/headspace-sulfide.md
           - Physics: applications/sewer/physics.md
           - Dynamic-wave physics: applications/sewer/physics-dynamic-wave.md
-          - SWMM files: applications/sewer/swmm.md
+          - Importing SWMM files: applications/sewer/swmm.md
           - Limitations: applications/sewer/limitations.md
       - Water distribution:
           - applications/water/index.md
@@ -124,7 +124,7 @@ nav:
           - Gradients, batches, long runs: applications/water-resources/wsimod-gradients.md
           - What is ported: applications/water-resources/wsimod-ported.md
           - Differences from WSIMOD: applications/water-resources/differences.md
-          - Importing config.yml: applications/water-resources/wsimod-config.md
+          - Importing WSIMOD config.yml: applications/water-resources/wsimod-config.md
       - Electrical circuits:
           - applications/electrical/index.md
           - Circuits: applications/electrical/circuits.md
@@ -132,8 +132,8 @@ nav:
           - Electro-thermal: applications/electrical/electro-thermal.md
           - Power flow: applications/electrical/power-flow.md
           - Physics: applications/electrical/physics.md
-          - Modelica circuits: applications/electrical/modelica.md
-          - MATPOWER files: applications/electrical/matpower.md
+          - Importing Modelica circuits: applications/electrical/modelica.md
+          - Importing MATPOWER files: applications/electrical/matpower.md
           - Limitations: applications/electrical/limitations.md
   - Examples:
       - examples/index.md
@@ -179,7 +179,9 @@ nav:
           - WSIMOD: reference/catalogue/wsimod.md
           - Electrical circuits: reference/catalogue/electrical.md
       - State and driver keys: reference/keys.md
-      - Transport and model options: reference/transport-options.md
+      - Kirchhoff layer options: reference/kirchhoff-options.md
+      - Transport layer options: reference/transport-options.md
+      - Model options: reference/model-options.md
       - File formats: reference/formats.md
       - Verification:
           - reference/verification/index.md
@@ -209,6 +211,10 @@ nav:
           - Water and street air quality: project/design/water_street.md
           - Street puffs: project/design/street_puffs.md
           - WSIMOD port: project/design/wsimod-port.md
+
+exclude_docs: |
+  plans/
+  superpowers/
 
 plugins:
   - search
@@ -243,6 +249,9 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.superfences
   - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 extra_javascript:
   - javascripts/mathjax.js
