@@ -30,6 +30,11 @@ PAGES = [
     "applications/water-resources/allocation.md",
     "applications/water-resources/wsimod.md",
     "applications/electrical/index.md",
+    "applications/electrical/circuits.md",
+    "applications/electrical/ac.md",
+    "applications/electrical/electro-thermal.md",
+    "applications/electrical/power-flow.md",
+    "applications/electrical/modelica.md",
     "applications/electrical/matpower.md",
 ]
 FIXTURES = ["sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",

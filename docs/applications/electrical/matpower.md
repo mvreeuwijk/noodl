@@ -1,7 +1,7 @@
 # MATPOWER `.m`
 
 Reading a MATPOWER case file produces a `PowerNetwork` for the
-[power flow](index.md#power-flow) of the electrical application.
+[power flow](power-flow.md) of the electrical application.
 `noodl.apps.electrical.power.read_matpower(path)` reads the case format of MATPOWER version 2
 (`mpc.version = '2'`), the format of MATPOWER's standard cases, within the limits listed
 [below](#what-is-read-ignored-and-refused) (no DC lines, no indexed assignments, no
@@ -9,8 +9,8 @@ Reading a MATPOWER case file produces a `PowerNetwork` for the
 parses its text and never runs MATLAB or Octave. The network keeps the file's units (MW, MVAr,
 degrees, p.u. impedances on `baseMVA`); the power-flow builders convert to per unit.
 
-A four-bus case written for this page (the network of the
-[power-flow example](index.md#power-flow)), saved and read back:
+A four-bus case (the network of the
+[power-flow example](power-flow.md#solve-an-ac-and-a-dc-power-flow)), saved and read back:
 
 ```python
 from pathlib import Path
@@ -140,12 +140,12 @@ MATPOWER's rules (`makeYbus`, `bustypes`, `makeSbus`, `makeBdc`, `dcpf`):
 
 Buses not connected to the slack through in-service branches, and branches of zero impedance,
 are refused at build time (see
-[Refusals and limitations](index.md#refusals-and-limitations)).
+[What the builders refuse](power-flow.md#what-the-builders-refuse)).
 
 ## MATPOWER's standard cases
 
 MATPOWER's code is BSD-licensed, but its licence states that the case files distributed with
-it are not covered by that licence, so noodl physics does not redistribute them.
+it are not covered by that licence, so noodl does not redistribute them.
 `matpower_case(name, *, cache_dir=None)` returns the path of one of MATPOWER 8.1's `case9`,
 `case14`, `case30` and `case118`, downloading it on first use from MATPOWER's GitHub
 repository at the commit of the 8.1 release (`MATPOWER_COMMIT`), and checks its SHA-256
@@ -164,7 +164,5 @@ Without a network connection `matpower_case` raises `MatpowerCaseUnavailableErro
 downloaded or cached file with another digest raises `MatpowerCaseDigestError` (a
 `ValueError`) and a download that fails the check is not cached. Any other name is refused.
 `matpower_case("case9_features")` is the variant of `case9` the
-[verification](../../reference/verification/electrical.md#power-flow-against-pandapower) uses, derived from the
-fetched `case9` and checked the same way. `tests/data/power_flow/` holds only the stored
-reference results (`*.json`, part of noodl physics), each recording the SHA-256 of its case,
-and `tests/data/power_flow/NOTICE.md` the cases' sources.
+[verification](../../reference/verification/electrical.md#power-flow-against-pandapower)
+uses, derived from the fetched `case9` and checked the same way.
