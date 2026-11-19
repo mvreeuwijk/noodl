@@ -1,11 +1,8 @@
-# Mutation, devices and serialization
+# Devices, dtype, copying and saving
 
-This page states what you may change after a model is built, how a model is moved to another
-device or dtype, and what survives copying and saving. It describes what the code does today.
-Anything listed as *not supported* or *not moved* is not guarded unless the text says it is
-refused.
-
-The statements below are pinned by `tests/test_ownership.py`.
+This page says what you may change after a model is built, how to move a model to another device
+or dtype, and what survives copying and saving. Anything listed as *not supported* or *not moved*
+is not guarded unless the text says it is refused.
 
 ## What owns what
 
@@ -59,10 +56,9 @@ changes the next step. Learnable parameters are registered on the law, so
   construction. `Model.__init__` validates names, keys and drivers once; an appended closure
   runs without the checks against the layers (its declarations are read on first use, which
   checks its call signature against `integrates`, but its `outputs`, `state_keys` and
-  `species_columns` are not checked against the layers). This page, not the closure contract
-  in [Extending](../project/extending/index.md#the-closure-contract), is what governs a
-  closure's lifecycle; units live with the keys (`noodl.refs.Field`, a closure's
-  `input_specs`).
+  `species_columns` are not checked against the layers). The closure contract is in
+  [Extending](../project/extending/index.md); this page governs a closure's lifecycle, and units
+  live with the keys (`noodl.refs.Field`, a closure's `input_specs`).
 - Changing a layer's private tensors (`cols`, the law slices) or its list of laws.
 
 **Frozen dataclasses are shallow.** The application records (`Resistor`, `Circuit`,
@@ -116,9 +112,8 @@ tolerances follow the residual's dtype, but an application that pins its own (`w
 1e-11, the building and electrical solves' tight defaults) needs looser ones in float32
 (`atol=rtol=1e-5` or so).
 
-`tests/test_ownership.py` pins float32 moves of a building model, a water model and an
-electrical model (DC and phasor) against their float64 results, and a CUDA move when a GPU is
-present.
+A float32 move of a building, a water or an electrical model (DC and phasor) agrees with its
+float64 results to float32 accuracy, and a model moves to CUDA when a GPU is present.
 
 **Not moved:**
 
@@ -143,8 +138,7 @@ present.
 - **A copy keeps integrating closures integrating.** The model reads each closure's
   declarations once into a `ClosureSpec` that holds the closure object, so `deepcopy` and
   `pickle` carry the closure and its declarations together and the copy's `step` advances the
-  closure's state exactly as the original does
-  (`tests/test_ownership.py::test_a_copied_model_still_advances_an_integrating_closure`).
+  closure's state exactly as the original does.
 - **`state_dict()` exists only on laws and withdrawals** (they are modules). It holds
   parameters and buffers, nothing else: not the law kind, the layer, the network or any
   attribute. A `Model` has no `state_dict`; there is no one-call way to save and restore a
@@ -162,4 +156,6 @@ present.
 
 ## Related
 
-[Networks](../concepts/networks.md), [Layers and models](../concepts/layers.md), [Differentiability](../concepts/differentiability.md).
+[Networks](../concepts/networks.md), [Layers and models](../concepts/layers.md),
+[Differentiability](../concepts/differentiability.md), and, for dtype problems,
+[Troubleshooting](troubleshooting.md#float32-or-float64).

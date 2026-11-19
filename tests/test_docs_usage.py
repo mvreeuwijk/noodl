@@ -21,6 +21,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = [
     "guide/workflow.md",
+    "guide/results.md",
+    "guide/batches.md",
+    "guide/gradients.md",
     "guide/components.md",
     "concepts/elements.md",
     "applications/building/index.md",

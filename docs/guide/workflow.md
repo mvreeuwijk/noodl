@@ -1,9 +1,9 @@
-# Using noodl
+# The workflow
 
-Every model in noodl physics is used the same way, whether it is a building, a street
-network, a sewer, a water network, an allocation network or an electrical circuit. This page is that common
-pattern. The [catalogue](../reference/catalogue/core.md) lists everything each application offers, and
-each [application page](../applications/index.md) explains its physics.
+Every model in noodl is used the same way, whether it is a building, a street network, a sewer,
+a water network, a WSIMOD catchment or an electrical circuit. This page is that common pattern:
+configure, initialise by name, check, run. Each application page explains its own physics, and
+the [catalogue](../reference/catalogue/index.md) lists what each one offers.
 
 ## The four steps
 
@@ -15,7 +15,7 @@ each [application page](../applications/index.md) explains its physics.
    given per node (or per pipe, street, arc) by name; anything not named keeps the
    application's default.
 3. **Check.** `model.check(state, drivers).raise_for_errors(strict=True)` stops on anything
-   missing, misspelt, of the wrong shape or in the wrong place *before* the run.
+   missing, misspelt, of the wrong shape or in the wrong place before the run.
 4. **Run.** `model.step(state, drivers, dt)` advances one step; `model.steady(state,
    drivers)` solves the quasi-steady state. Results come back in the same dictionaries and
    are read by name.
@@ -28,25 +28,9 @@ for t in times:
     state = model.step(state, drivers, dt)        # or model.steady(state, drivers)
 ```
 
-## The same calls in every application
-
-| Application | Configure | Layers (`model.refs.<name>`) and their keys | Also give |
-|---|---|---|---|
-| [Building physics](../applications/building/index.md) | `model, state, drivers = build_model(net, ..., return_inputs=True)` (or just `model = build_model(net, ...)`) | `air`: `pressure`, `flow`; `thermal`: `temperature`; `species`: `mass_fraction` | nothing else (`P_ref` optional) |
-| CONTAM `.prj` | `model, state, drivers = project_to_model(read_prj(path))` | `air`: `pressure`, `flow`; `species`: `mass_fraction` | wind and densities are in the returned drivers |
-| [Street air quality](../applications/street/index.md) | `model, state, drivers = build_model(streets, ...)` | `street`: `concentration`, `flow` | the meteorology: `U_ref`, `theta_w`, `h_abl` (and `lmo`) |
-| [Sewers (SWMM)](../applications/sewer/index.md) | `model, state, drivers = build_model(sewer_net, ...)`; a `routing="dynamic_wave"` network is run with `simulate_dynamic_wave(model, state, drivers, steps=...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration`; dynamic wave: `water`: `head`, `flow` | inflows and temperatures are in the returned drivers |
-| [Water (EPANET)](../applications/water/index.md) | `model, state, drivers = build_model(water_net, ...)` | `water`: `head`, `flow`; `quality`: `concentration` | tank levels and pump status are state, by tank and pump name |
-| [Allocation (WSIMOD)](../applications/water-resources/allocation.md) | `model, state, drivers = build_model(topology)` | `wsimod`: `storage`, `requests`, `flow` | nothing else |
-| [Electrical circuits](../applications/electrical/index.md) | `model, state, drivers = build_model(circuit, ...)` | `electrical`: `voltage`, `flow` (current) | a transient starts from `initial_state(model, drivers)`; per-device values from `device_values` |
-
-Every application exports `build_model`, `initial_state` and `initial_drivers`, and
-`initial_state(model)`/`initial_drivers(model)` without `values` return its defaults.
-(The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers=drivers,
-values=...)`, because its storage depends on them.)
-The electrical application is the exception, with no `initial_drivers`: a circuit has no state
-to set by name, so its `initial_state(model, drivers)` solves the consistent initial point from
-the devices' own initial values, and `build_model` returns every driver it needs.
+State and drivers are plain dictionaries `{key: tensor}`. Every key is
+`"<layer>.<suffix>"`, and `model.refs.<layer>.<name>` gives it by name; the
+[keys reference](../reference/keys.md) lists the suffixes and the order of each tensor.
 
 ## A complete example
 
@@ -104,236 +88,47 @@ head, so apply the model's closures before it.
 
 Build the network completely before constructing layers or models over it. A layer keeps the
 edge indices and node count of construction time, so adding a node or edge afterwards makes it
-raise `RuntimeError` (the network's `topology_version` no longer matches) instead of silently
-solving the old graph; construct the layers and model again.
+raise `RuntimeError` instead of silently solving the old graph; construct the layers and model
+again.
 
-## What every model is made of
+## The same calls in every application
 
-- **A network.** Nodes (rooms, streets, manholes, junctions, stores) and directed edges,
-  each edge with a `kind` (`"airpath"`, `"pipe"`, ...). The kind decides which layer and
-  which law an edge belongs to.
-- **Layers.** Each conserves one quantity on the network. A *potential* layer solves for a
-  potential (pressure, head) and the flows it drives; a *transport* layer carries a
-  quantity (temperature, mass fraction, concentration) on those flows; an *allocation*
-  layer moves requested amounts between stores within capacity limits.
-- **Constitutive laws and heads.** The law on each kind of edge (an orifice, a pipe, a pump) and
-  the terms added to its potential difference (stack effect, wind, fans).
-- **Closures.** Functions of the state that compute inputs each step: the air density from
-  the temperature, the street flows from the wind, the sewer flows from the inflows. Their
-  own inputs (a wind speed, an inflow) are ordinary drivers.
-- **A model.** The layers and closures on one network, stepped together.
-- **Two dictionaries.** `state` (what the model carries from step to step) and `drivers`
-  (what you prescribe), each `{key: tensor}`. Every key is `"<layer>.<suffix>"`.
-
-Large networks are easier to assemble from components: pieces of network with ports
-(a room, a door, a stairwell) that you place, connect and nest in plain Python, and that
-`flatten()` turns into the one network above, with a map from every node and edge back to
-its component. The model is built and run exactly as before; see
-[Components](components.md).
-
-`model.refs` names those keys for you. Each layer's reference has one attribute per key,
-named for the physics it carries:
-
-| Attribute | Key | Role | Order of the tensor |
+| Application | Configure | Layers (`model.refs.<name>`) and their keys | Also give |
 |---|---|---|---|
-| `.pressure`, `.head` (Kirchhoff layers) | `"<layer>.phi"` | state | full node order |
-| `.flow` | `"<layer>.q"` | state (driver for a transport layer whose flows nothing solves) | edge order of the layer's kinds |
-| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order, without the storage nodes a forward-Euler layer holds (`layer.prescribed`) |
-| `.temperature`, `.mass_fraction`, `.concentration` | `"<layer>.x"` | state | the layer's active interior order |
-| `.boundary_temperature`, ... | `"<layer>.x_boundary"` | driver | the layer's boundary order |
-| `.sources` | `"<layer>.sources"` | driver | full node order |
-| `.capacity` | `"<layer>.capacity"` | driver | the layer's active interior order |
-| `.removal` | `"<layer>.removal"` | driver | the layer's active interior order, `(n_i, K)` |
-| `.transmission` | `"<layer>.transmission"` | driver | edge order of the layer's flow kinds, `(b_flow, K)` |
-| `.storage` (allocation layers) | `"<layer>.s"` | state | full node order |
-| `.requests` (allocation layers) | `"<layer>.requests"` | driver | edge order of the layer's kind |
+| [Building physics](../applications/building/index.md) | `model, state, drivers = build_model(net, ..., return_inputs=True)` (or just `model = build_model(net, ...)`) | `air`: `pressure`, `flow`; `thermal`: `temperature`; `species`: `mass_fraction` | nothing else (`P_ref` optional) |
+| CONTAM `.prj` | `model, state, drivers = project_to_model(read_prj(path))` | `air`: `pressure`, `flow`; `species`: `mass_fraction` | wind and densities are in the returned drivers |
+| [Street air quality](../applications/street/index.md) | `model, state, drivers = build_model(streets, ...)` | `street`: `concentration`, `flow` | the meteorology: `U_ref`, `theta_w`, `h_abl` (and `lmo`) |
+| [Sewers (SWMM)](../applications/sewer/index.md) | `model, state, drivers = build_model(sewer_net, ...)`; a `routing="dynamic_wave"` network is run with `simulate_dynamic_wave(model, state, drivers, steps=...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration`; dynamic wave: `water`: `head`, `flow` | inflows and temperatures are in the returned drivers |
+| [Water (EPANET)](../applications/water/index.md) | `model, state, drivers = build_model(water_net, ...)` | `water`: `head`, `flow`; `quality`: `concentration` | tank levels and pump status are state, by tank and pump name |
+| [Allocation](../applications/water-resources/allocation.md) | `model, state, drivers = build_model(topology)` | `wsimod`: `storage`, `requests`, `flow` | nothing else |
+| [WSIMOD](../applications/water-resources/wsimod.md) | `model, state, drivers = build_model(read_wsimod_config(directory))` | `wsimod`: `storage`, `flow`; per-class drivers such as `wsimod.River.width` | forcing series are in the returned drivers; step with `t=` and `dt=86400.0` |
+| [Electrical circuits](../applications/electrical/index.md) | `model, state, drivers = build_model(circuit, ...)` | `electrical`: `voltage`, `flow` (current) | a transient starts from `initial_state(model, drivers)`; per-device values from `device_values` |
 
-Every key reports its unit: the layer's own for state and boundary values, and the
-application's `flow_unit`, `source_unit`, `capacity_unit` and `conductance_unit` for flows,
-sources, capacity and conductances, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
-`"<layer>.removal"` is a per-step first-order removal rate (1/s, active interior order,
-`(n_i, K)`), replacing the layer's construction-time `removal`; it is written by a closure
-that owns sinks. It matters for species layers, where it removes a species from the air (a
-deposition); the layer's `dilution`, if it has one, adds its own rate to it. The driver is
-not carried in the state: a closure that sets it must write it every step.
-`"<layer>.transmission"` is likewise a per-step pass fraction of each flow edge (1 − a
-filter's efficiency), replacing the layer's construction-time `transmission`; a closure whose
-filters depend on the step's flows writes it (the building application's
-`FilterTransmission`, for UVGI filters). It reads the flows of the pass before, so such a model
-iterates each step (`coupling="iterate"`). A closure that needs this declares
-`requires_coupling = "iterate"` and `reads_flows_of = "<Kirchhoff layer>"`, and `Model`
-refuses it unless that layer is in `iterate_tol` and `iterate_flow_tol`.
+Every application exports `build_model`, `initial_state` and `initial_drivers`, and
+`initial_state(model)` and `initial_drivers(model)` without `values` return its defaults. Two
+exceptions. The sewer's `initial_state` also takes the drivers, `initial_state(model,
+drivers=drivers, values=...)`, because its storage depends on them. The electrical application
+has no `initial_drivers`: a circuit has no state to set by name, so its
+`initial_state(model, drivers)` solves the consistent initial point from the devices' own initial
+values, and `build_model` returns every driver it needs.
 
-The names come from each layer's `quantity`, so every application has them without code
-of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each
-attribute is the plain key string (`th.temperature == "thermal.x"`), so it indexes the
-dictionaries directly, and it also knows its layout:
-
-```python
-print(th.sources.ordering, th.sources.labels)
-print(th.temperature.ordering, th.temperature.labels, th.temperature.unit)
-```
-
-```text
-full node order ('ambient', 'A', 'B')
-active interior order ('A', 'B') K
-```
-
-`model.refs.describe()` lists every key of every layer with what it holds, its order, its
-shape and its unit.
-
-## Running and reading results
-
-`model.step(state, drivers, dt)` returns the new state; call it in a loop, changing the
-drivers between steps as the inputs change. `model.steady(state, drivers)` returns the
-quasi-steady state instead (an allocation layer, which is a time-stepping rule, has none).
-
-`model.fixed_point(pass_fn, state, watch=[...], tol=...)` repeats any function of a state (a
-`steady` or a `step` plus a reaction, a boundary read off the previous pass) until the watched
-keys stop changing, and returns the last pass's state. It is what `street_steady`,
-`street_steady_with_plume` and `sewer_steady` run on, and its gradient is that of the fixed
-point (implicit adjoint), not of the unrolled passes, including through any unwatched key that
-feeds back from one pass to the next; `relaxation`, a per-instance `measure` and `diagnostics`
-are described in its docstring.
-Each potential solve starts from the state's last potentials (and a layer with flow unknowns
-from its last flows too); `warm_start=False` starts it
-from the layer's linear initial guess instead, while closures still read those potentials
-(a retry when a warm start does not converge). Non-convergence raises
-`noodl.solvers.ConvergenceError`, under either coupling (with `coupling="iterate"`, when the
-last pass's potential solve did not converge), so a retry can catch it alone and let every
-other error through.
-
-When the layers feed back on each other — airflow carries heat, and temperature drives the
-airflow — build the model with `coupling="iterate"` and an `iterate_tol`, which repeats
-each step until they agree. The default, `coupling="pingpong"`, takes one pass per step;
-[Layers and models](../concepts/layers.md) explains the difference.
-
-Read any result by name with `named`:
-
-```python
-flows = model.refs.air.flow.named(state[model.refs.air.flow])
-print(sorted(flows)[:2])
-```
-
-```text
-[('A', 'B', 0), ('A', 'B', 1)]
-```
-
-Edges are labelled by their `name` attribute when they have one (EPANET links, SWMM
-conduits, WSIMOD arcs, street names), otherwise by `(source, target)`, or `(source,
-target, key)` where two edges join the same nodes.
-
-## Marching over a time grid
-
-`model.march(state, drivers, times)` is the loop over `model.step` for a time grid: step `k`
-goes from `times[k]` to `times[k+1]`, and the result is a dictionary holding `"time"` and
-every layer state the start state carries (`.phi`, `.q`, `.x`, `.storage_flow`, `.capacity`),
-every state key a closure carries (a pump's status, a manhole level), and the storage flow of
-every Kirchhoff layer with storage, stacked on a new first axis, with the start state as row 0.
-When the start state has no storage flow, row 0 holds the layer's own with no step. It is
-differentiable through time as `step` is.
-
-```py
-history = model.march(
-    state, drivers, times,
-    restarts={0},                                # steps taken by backward Euler
-    drivers_at=lambda t0, t1: drivers_of(t1),    # drivers of the step t0 -> t1
-    record=[0, 10, 20],                          # keep only these indices into times
-)
-```
-
-`restarts` names the steps taken by backward Euler: every Kirchhoff layer that steps
-something inside its solve (storage at interior nodes, dynamic laws) and every transport layer
-whose own scheme is `"trapezoidal"` is stepped by backward Euler, which damps the ringing the
-trapezoidal rule shows after a first step or a source discontinuity. A Kirchhoff layer whose
-storage sits at boundary nodes keeps its forward Euler, and layers with the `"exact"` scheme
-are untouched. On the other
-steps each layer takes its own scheme. `drivers_at` gives the drivers of each interval when
-they change in time, `diagnostics["schemes"]` the scheme of each step. The electrical
-`transient` and the Modelica electrical reader's `simulate_circuit` are this loop; the building
-application's `simulate` stays its own march (step-mean inputs, controls held over passes,
-breakpoint sub-steps, the zone-pressure loop).
-
-## Batches and gradients
-
-A value may be a tensor instead of a number. Its shape is the batch shape, and every
-value broadcasts against the others, so one call builds a whole ensemble; values that
-require a gradient keep it.
-
-```python
-power = torch.tensor([500.0, 1000.0, 1500.0], requires_grad=True)
-batch = initial_drivers(model, values={
-    th.boundary_temperature: {"ambient": 283.15},
-    th.sources: {"A": power},
-    co2.boundary_mass_fraction: {"ambient": 6e-4},
-})
-out = model.step(initial_state(model), batch, dt=600.0)
-out[th.temperature][:, 0].sum().backward()     # d(T_A)/d(power), all three instances
-print(tuple(batch[th.sources].shape), power.grad.shape)
-```
-
-```text
-(3, 3) torch.Size([3])
-```
-
-## Orders, and why naming matters
-
-A tensor of the right size in the wrong order is accepted without complaint by the
-solvers, and four orders are in use (the table above). A wall-mass node, for example, is
-in the thermal layer's interior but not in a species layer's, so `"thermal.x"` and
-`"species.x"` index rooms differently on the same network. Building by name removes the
-question:
-
-- `field.build({label: value})` assembles the tensor in that field's order. A label the
-  network does not have raises `KeyError` with suggestions; a label the field may not set
-  (a source on a boundary or inactive node) raises `ValueError`. Labels not named take the
-  field's default (zero for sources, flows and requests) or, over a `base`, keep the base
-  value; boundary values and state have no default and must be complete.
-- A multi-species layer takes `{node: {species: value}}` with its species' names.
-- The result is built with `torch.stack`, so gradients, dtype and device are kept.
-- `field.named(tensor)` reads a tensor back as `{label: value}`.
-
-## Checking before a run
+## Check before you run
 
 `model.check(state, drivers)` returns a report; nothing is raised until you call
-`.raise_for_errors()` (or `.raise_for_errors(strict=True)` to fail on warnings too). It
-reports:
+`.raise_for_errors()`, or `.raise_for_errors(strict=True)` to fail on warnings too. It reports:
 
 - **Errors**: a required input or state missing, a value that is not a tensor, a trailing
   shape that does not match the key's order, batch shapes that do not broadcast, a nonzero
-  source on a boundary or inactive node (which a Kirchhoff layer would otherwise drop
+  source on a boundary or inactive node (which a potential layer would otherwise drop
   silently), a state key put in the drivers, a closure output of the wrong shape.
-- **Warnings**: a key with a layer's prefix but no such input (`"thermal.source"` — *did
+- **Warnings**: a key with a layer's prefix but no such input (`"thermal.source"`: *did
   you mean `"thermal.sources"`?*), a near-miss of a layer name (`"therml.sources"`), an
   edge kind no layer uses that is a near-miss of one a layer does use (`"airpth"`), a
   temperature below 150 K (a Celsius value where kelvin is expected).
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 
-The inputs the closures, reactions, laws and head terms read themselves are declared too,
-in `model.refs.inputs`: the street model's wind speed, direction and boundary-layer depth
-(one value per instance, or one per street with `meteo="per_street"`), the sewer's inflow
-per manhole and its temperatures, CONTAM's node densities and wind, the chemistry's
-photolysis rate. Each knows its unit and layout, so the check reports a missing required
-one, or one of the wrong shape, before the run, and `model.refs.describe()` lists them:
-
-```python
-print(model.refs.inputs["P_ref"].describe())
-```
-
-```text
-'P_ref' (driver, optional): reference pressure of the ideal-gas density (default 101325 Pa)
-  one value per instance
-  quantity: ? [Pa]
-```
-
-A key the model knows nothing about — a custom closure's own input — is **not** rejected.
-`model.check(state, drivers, dt=600.0, probe=True)` runs one step on copies, recording
-which keys the closures, layers, laws and head terms read, and reports any key nothing
-read. Without a probe the check evaluates the closures once (no solve, no time step) to
-learn what they write, so an input a closure provides is not reported missing. A custom
-closure can declare its own inputs with an `input_specs` attribute,
-`{key: {"description", "unit", "over", "required"}}` (see `noodl.refs.input_field`).
+For example, a misspelt driver key:
 
 ```python
 drivers_typo = dict(drivers)
@@ -346,55 +141,39 @@ for issue in model.check(state, drivers_typo).issues:
 [warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.removal', 'thermal.sources', 'thermal.transmission', 'thermal.x_boundary']); did you mean 'thermal.sources'?
 ```
 
-## Finding what is available
-
-The [catalogue](../reference/catalogue/core.md) lists, for the core library and for every application,
-each type it offers — builders, network components, constitutive laws, heads, closures,
-reactions, sources, file readers and writers, functions and model options — with what it
-does and how to call it. It is generated from the code, so it is always complete.
-
-## One identity per layer
-
-Every key is `"<layer>.<suffix>"`, and a `Model` registers each layer under its own `.name`.
-It refuses a layer registered under any other name: the model and the layer's helpers (the
-density closure reads `"<thermal layer>.x"`, an allocation layer reads
-`"<layer>.requests"`) would otherwise build its keys under two different names. Layers can
-be passed as a list, keyed by their names:
+The inputs that closures, reactions, laws and head terms read themselves are declared too, in
+`model.refs.inputs`: the street model's wind speed, direction and boundary-layer depth, the
+sewer's inflow per manhole, CONTAM's node densities and wind, the chemistry's photolysis rate.
+Each knows its unit and layout, so the check reports a missing required one, or one of the wrong
+shape, before the run. `model.refs.describe()` lists every key and input.
 
 ```python
-from noodl.model import Model
-
-same = Model(net, [model.layers["air"], model.layers["thermal"]], closures=model.closures)
-print(list(same.layers))
+print(model.refs.inputs["P_ref"].describe())
 ```
 
 ```text
-['air', 'thermal']
+'P_ref' (driver, optional): reference pressure of the ideal-gas density (default 101325 Pa)
+  one value per instance
+  quantity: ? [Pa]
 ```
+
+A key the model knows nothing about, such as a custom closure's own input, is not rejected.
+`model.check(state, drivers, dt=600.0, probe=True)` runs one step on copies, records which keys
+the closures, layers, laws and head terms read, and reports any key nothing read. A custom
+closure can declare its own inputs with an `input_specs` attribute,
+`{key: {"description", "unit", "over", "required"}}` (see `noodl.refs.input_field`). What each
+message means is in [Troubleshooting](troubleshooting.md#check-messages).
 
 ## Writing the dictionaries by hand
 
-The dictionaries are ordinary Python, and code that builds them directly keeps working:
+The dictionaries are ordinary Python, so a script may build them directly. Keys may be strings
+or `model.refs` attributes, and `model.drivers_from(values, base=...)` and
+`model.state_from(values, base=...)` do what `initial_drivers` and `initial_state` do for a model
+assembled by hand from layers.
 
-```python
-sources = torch.zeros(net.n, dtype=torch.float64)
-sources[net.node_index("A")] = 1000.0          # full node order, by position
-old = {
-    "air.phi_boundary": torch.zeros(1, dtype=torch.float64),
-    "thermal.x_boundary": torch.tensor([283.15], dtype=torch.float64),
-    "thermal.sources": sources,
-}
-```
+## Where next
 
-The same tensors, to the last bit, by name:
-
-```python
-new = initial_drivers(model, values={"thermal.sources": {"A": 1000.0},
-                                     "thermal.x_boundary": {"ambient": 283.15}})
-assert all(torch.equal(new[k], old[k]) for k in old)
-```
-
-Keys may be written as strings or as `model.refs` attributes. `model.drivers_from(values,
-base=...)` and `model.state_from(values, base=...)` do the same for any model, including
-one assembled by hand from layers; `state_from` also accepts a layer's name for its state
-key (`{"thermal": {...}}`) and names any state a step needs that is still missing.
+- [Time stepping and schedules](time-stepping.md): marching over a time grid, changing drivers.
+- [Reading results by name](results.md).
+- [Batches and ensembles](batches.md) and [Gradients and optimisation](gradients.md).
+- [Assembling from components](components.md) for large networks.
