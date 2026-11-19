@@ -1,6 +1,6 @@
-# Quick start
+# Your first model
 
-This page builds a working model in about fifteen lines, then shows the two things that make
+This tutorial builds a working model in about fifteen lines, then shows the two things that make
 noodl physics different from a conventional network solver: it batches, and it differentiates.
 
 ## A two-node network
@@ -29,13 +29,13 @@ phi_boundary = torch.zeros(1, dtype=torch.float64)
 sources = torch.tensor([0.0, 0.05], dtype=torch.float64)
 phi, q = layer.solve(phi_boundary, sources=sources, differentiable=False)
 
-print("pressures (Pa):", dict(zip(net.nodes, phi.tolist())))
-print("flows:         ", q.tolist())
+print("pressures (Pa):", {n: round(v, 3) for n, v in zip(net.nodes, phi.tolist())})
+print("flows:", [round(x, 6) for x in q.tolist()])
 ```
 
 ```text
-pressures (Pa): {'ambient': 0.0, 'room': 11.894289986499988}
-flows:          [0.04999999999555594]
+pressures (Pa): {'ambient': 0.0, 'room': 11.894}
+flows: [0.05]
 ```
 
 Four things happened there, and they are the whole framework in miniature:
@@ -63,12 +63,12 @@ phi_boundary = torch.zeros(5, 1, dtype=torch.float64)
 
 phi, q = layer.solve(phi_boundary, sources=sources, differentiable=False)
 print(phi.shape, q.shape)
-print("room pressures:", phi[:, 1].tolist())
+print("room pressures:", [round(v, 3) for v in phi[:, 1].tolist()])
 ```
 
 ```text
 torch.Size([5, 2]) torch.Size([5, 1])
-room pressures: [0.99999991, 2.90484593, 5.42041753, 8.43812956, 11.89428999]
+room pressures: [1.0, 2.905, 5.42, 8.438, 11.894]
 ```
 
 The same mechanism carries a thousand building variants, a Monte Carlo sample over uncertain
@@ -92,11 +92,12 @@ phi, q = layer.solve(
 )
 phi[1].backward()
 
-print("d(room pressure)/dC =", next(layer._laws[0].parameters()).grad)
+# gradient of the room pressure with respect to each learnable parameter of the law
+print({name: round(p.grad.item(), 1) for name, p in leak.named_parameters()})
 ```
 
 ```text
-d(room pressure)/dC = tensor(-1829.8909)
+{'C': -1829.9, 'n': -45.3}
 ```
 
 That derivative did not come from finite differences or from unrolling the Newton iteration.
@@ -107,45 +108,17 @@ your elements.
 
 ## Several physics on one network
 
-A real model has more than one layer. `Model` steps them together on one network:
-
-```python
-from noodl.model import Model
-
-model = Model(
-    net,
-    layers={"air": air_layer, "thermal": thermal_layer},
-    closures=[density_closure],
-    coupling="iterate",
-    iterate_tol={"thermal": 0.01},
-)
-
-state = model.step(state, drivers, dt=60.0)
-```
-
-Here the airflow depends on temperature (through air density and the resulting stack effect)
-and the temperature depends on the airflow (which advects the heat). `coupling="iterate"`
-repeats the pass within one step until the named states stop changing;
-`coupling="pingpong"`, the default, takes a single pass. [Layers and models](../concepts/layers.md)
-covers both, and the trap in the default.
-
-`state` and `drivers` are dictionaries of tensors in several node orders. Rather than build
-them by position, give values by node name and check them before running:
-
-```python
-th = model.refs.thermal
-drivers = model.drivers_from({th.sources: {"room": 500.0},
-                              th.boundary_temperature: {"ambient": 283.15}})
-model.check(state, drivers).raise_for_errors(strict=True)
-```
-
-[Using noodl](../guide/workflow.md) is the complete recipe, the same for every application.
+A real model has more than one layer, for example airflow and heat on one network. `Model`
+steps them together, and a model is normally built by an application's `build_model` rather
+than layer by layer. The [user guide](../guide/workflow.md) is the recipe, the same for every
+application, and [Assembling from components](../guide/components.md) shows how to build one by hand.
 
 ## Where to go from here
 
 - **[Concepts](../concepts/index.md)** — the framework proper: what a network, law, layer and
   solver each are, and how they fit.
-- **[Applications](../applications/index.md)** — seven worked systems with real file readers and
-  parity with the reference implementation in each field. If your problem is a building, a
-  street, a sewer, a water network or an electrical circuit, start there rather than from `Network`.
+- **[Run a model from a file](run-from-file.md)** — the next tutorial: read an EPANET network and run it.
+- **[Applications](../applications/index.md)** — worked systems with file readers and
+  comparisons with the reference tool in each field. If your problem is a building, a street,
+  a sewer, a water network or an electrical circuit, start there rather than from `Network`.
 - **[Theory](../concepts/theory.md)** — why any of this is well posed.
