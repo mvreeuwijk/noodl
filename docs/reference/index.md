@@ -8,7 +8,7 @@ Lookup material: complete, neutral and organised like the code. For how to do a 
 - [Catalogue](catalogue/index.md): every public name with a one-line description, by application,
   each linking to its API entry.
 - [Keys and options](keys.md): the keys and options a model accepts.
-- [Transport options](transport-options.md): the options of the transport layer.
+- [Kirchhoff layer options](kirchhoff-options.md), [Transport layer options](transport-options.md) and [Model options](model-options.md): the options of the layers and of `Model`.
 - [File formats](formats.md): which files each application reads and writes.
 - [Verification](verification/index.md): how each application is compared with the tool it mirrors,
   with the evidence for every comparison.

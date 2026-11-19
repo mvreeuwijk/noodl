@@ -2,7 +2,8 @@
 
 Every page under `docs/` except `plans/`, `superpowers/`, `project/` (maintainer notes) and
 `reference/verification/` (evidence pages, which may name test files) is scanned in its prose:
-fenced code blocks, inline code and `$...$` / `$$...$$` maths are removed first.
+fenced code blocks, inline code (except for the `tests/` path and test-file rules) and
+`$...$` / `$$...$$` maths are removed first.
 """
 
 from __future__ import annotations
@@ -21,8 +22,15 @@ RULES = {
     "issue or PR number": re.compile(r"\b(?:issues?|PRs?|pull requests?) #\d+", re.IGNORECASE),
     "tests path": re.compile(r"\btests/"),
     "revision note": re.compile(r"under revision", re.IGNORECASE),
-    "machine note": re.compile(r"development machine", re.IGNORECASE),
+    "machine note": re.compile(r"(?:development|shared) machine", re.IGNORECASE),
+    "timing note": re.compile(r"\b\d+ ?s (?:with|at|using) `?-n\b|\bwith `?-n \d", re.IGNORECASE),
+    "test attribution": re.compile(r"\bpinned by\b", re.IGNORECASE),
+    "milestone code": re.compile(r"\bM[1-8]\b"),
+    "test file name": re.compile(r"\btest_\w*\.py\b|\btest_\w+\.py"),
 }
+
+# Rules that also apply inside inline code, which is otherwise blanked before matching.
+CODE_RULES = ("tests path", "test file name")
 
 
 INLINE_CODE = re.compile(r"(`+).+?(?:\1)")
@@ -37,8 +45,9 @@ def _pages()-> list[Path]:
     return pages
 
 
-def _prose(text: str) -> list[tuple[int, str]]:
-    """The (line number, line) pairs of prose, with code and maths blanked out."""
+def _prose(text: str) -> list[tuple[int, str, str]]:
+    """The (line number, prose, line with inline code kept) triples, with fenced code and maths
+    blanked out. Link targets are removed from the prose but kept in the raw line."""
     out = []
     fence = None
     in_math = False
@@ -57,19 +66,20 @@ def _prose(text: str) -> list[tuple[int, str]]:
             continue
         if in_math:
             continue
+        raw = re.sub(r"\$[^$]*\$", "", line)
         line = INLINE_CODE.sub("", line)
         line = re.sub(r"\$[^$]*\$", "", line)
         line = re.sub(r"\]\([^)]*\)", "]", line)  # link targets are paths, not prose
-        out.append((number, line))
+        out.append((number, line, raw))
     return out
 
 
 @pytest.mark.parametrize("path", _pages(), ids=lambda p: p.relative_to(DOCS).as_posix())
 def test_page_has_no_internal_vocabulary(path: Path) -> None:
     found = []
-    for number, line in _prose(path.read_text(encoding="utf-8")):
+    for number, line, raw in _prose(path.read_text(encoding="utf-8")):
         for name, pattern in RULES.items():
-            match = pattern.search(line)
+            match = pattern.search(raw if name in CODE_RULES else line)
             if match:
                 where = f"{path.relative_to(DOCS).as_posix()}:{number}"
                 found.append(f"{where}: {name}: {match.group(0)!r}")

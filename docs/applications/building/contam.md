@@ -52,7 +52,7 @@ drivers.update(weather.drivers_at(t, thermal="thermal"))
 
 `read_ctm(path) -> AmbientConcentrations` reads the `SpeciesFile ContamW 2.0` ambient (outdoor) concentration file:
 
-```text
+```txt
 SpeciesFile ContamW 2.0
 free-text description
 1/1<TAB>1/2<TAB>1                 start date, end date, number of species

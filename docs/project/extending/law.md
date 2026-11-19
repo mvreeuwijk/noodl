@@ -151,7 +151,7 @@ def test_interior_flow_balance_and_gradcheck_through_the_new_law():
     )
 
     layer = model.kirchhoff["air"]
-    law = layer._laws[0]
+    law, _ = layer.law_for("airpath")
     phi_b = torch.zeros(1, dtype=F64)
 
     def f(k_):
@@ -221,13 +221,7 @@ the rest.
 | `phasor_capable` | `False` | The law accepts complex `dp` and `q` (a linear law with real or complex coefficients, or a law written for phasors). Only such laws are allowed in a phasor layer. |
 | `reads_heads` | `False` | The law's residual reads the absolute potentials at its edges' start and end nodes (`ctx.phi_from`, `ctx.phi_to`), not only the difference `dp`: a valve that holds the head downstream of it. Its `jacobian` then also returns `d r / d phi_from` and `d r / d phi_to`. Only a one-port `ImplicitLaw` may declare it; a layer refuses any other law that does (`TypeError`). |
 
-**The two forms.** A law with a flow is the nodal half of circuit theory: its flow is eliminated
-in favour of the potentials. An `ImplicitLaw` covers what cannot be written that way: a
-flow-controlled law `dp = h(q)`, an ideal potential source `dp = V` (no flow is a function of
-`dp`), an ideal constraint inside a multi-port law, and a law whose flow and potential are
-related through stored state. A subclass implements `residual`, which returns one value per
-edge, with the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's
-solution.
+**The two forms.** A law with a flow is the nodal half of circuit theory; an `ImplicitLaw` covers what cannot be written that way (see [Constitutive laws and heads](../../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws)). A subclass implements `residual`, which returns one value per edge, with the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's solution.
 
 A loss given as potential difference against flow, `dp = r q |q|`, in series with a linear
 conductance, between two prescribed potentials:
@@ -341,37 +335,11 @@ A head term adds to the potential difference before the law evaluates it,
 $q = g(A^{\top}\phi + \text{head})$. `noodl.heads` provides `DriverHead`, `Stack`, `DuctStack`,
 `Wind` and `WindProfile`; see [Layers](../../concepts/layers.md) for how a layer adds them up.
 
-**A head term is a function of the drivers alone.** It may read anything from the `drivers`
-mapping, and nothing else: not `phi`, not another layer's state. This is structural. Keeping a
-head independent of $\phi$ is what keeps the Newton Jacobian exactly
-$A_I \operatorname{diag}(g') A_I^\top$, with no extra coupling term. A head that read $\phi$
-would silently invalidate the Jacobian every solver in the package assembles.
-
-The sewer application's `Drag` is the worked consequence. Physically, the drag the moving water
-surface exerts on the headspace air depends on the *relative* velocity $(U_s - U_{\text{air}})$,
-and $U_{\text{air}}$ is exactly the quantity the air layer is solving for. Modelling it that way
-would break the rule, so `Drag` uses the absolute surface velocity instead, and says so in its
-docstring. If you need a term that depends on solved state, it belongs in a **closure**, which
-runs between layer solves and writes driver values; see
-[The closure contract](application.md#the-closure-contract). Because the head reaches the layer
-as a driver, a gradient reaches whatever produced it.
+**A head term is a function of the drivers alone.** It may read anything from the `drivers` mapping, and nothing else: not `phi`, not another layer's state. The reason, and what to use instead (a closure), are in [Why a head cannot read the potential](../../concepts/elements.md#why-a-head-cannot-read-the-potential).
 
 ## Withdrawals and node storage
 
-Two objects act at a node rather than on an edge, each as a function of that node's own
-potential, and each adds only a diagonal entry to the Jacobian:
-
-- **`NodeStorage`** (`noodl.NodeStorage`, `noodl.LinearStorage`): an amount stored at the node,
-  which the layer turns into a withdrawal over each step with its scheme's step rate. A
-  capacitor to ground, a tank, a zone's air mass. Every layer takes it, with or without
-  flow unknowns (not a phasor layer); at the consistent initial point a storage with an
-  `initial()` potential holds its node there. Under `scheme="forward_euler"` a linear storage
-  sits at a boundary node instead (an EPANET tank), held through the solve and moved by
-  explicit Euler after it.
-- **`NodeWithdrawal`** (`noodl.NodeWithdrawal`): a withdrawal that is **not** storage, `w(phi)` at
-  the current instant: EPANET's pressure-driven demand, a leak. A storage written as a
-  withdrawal with its own step-start drivers duplicates what the layer already does; give it to
-  `KirchhoffLayer(storage=...)` instead.
+Storage (`NodeStorage`, `LinearStorage`) and withdrawals that are not storage (`NodeWithdrawal`) act at a node, each as a function of that node's own potential. Their options are in [Node storage](../../reference/kirchhoff-options.md#node-storage); give a storage to `KirchhoffLayer(storage=...)` rather than writing it as a withdrawal with its own step-start drivers.
 
 A dynamic edge law (`Capacitance`, `Inductance`) and a node storage both turn a change into a
 rate with `noodl.elements.step_rate`: `change / dt` under backward Euler, `2 change / dt -

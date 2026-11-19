@@ -3,7 +3,8 @@
 Run manually after changing an example: `.venv/Scripts/python scripts/make_example_figures.py`
 (needs matplotlib, which is not a runtime dependency). Pass names to draw only those figures.
 
-Each figure repeats the computation of its page and plots it, using the public API only. The
+Each figure repeats the computation of its page and plots it, using the public API only;
+`tests/test_example_figures.py` checks that its numbers match what the page prints. The
 output is `docs/assets/examples/<name>.svg` and `<name>-dark.svg`. The pages show the pair
 with Material's `#only-light` and `#only-dark` image suffixes. The colours are those of the
 hand-written figures (`scripts/make_dark_figures.py`), light value and dark twin.

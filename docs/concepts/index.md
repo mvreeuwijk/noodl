@@ -54,4 +54,4 @@ Three choices are deliberately left in your hands, and each has bitten someone:
 | [Differentiability](differentiability.md) | What gradients flow through, and the adjoint. |
 | [Theory and related work](theory.md) | The graph theory behind the framework, and how it relates to existing network solvers. |
 
-Subnetworks, devices and serialisation are covered in the [user guide](../guide/index.md), and the options of every layer in [Transport and model options](../reference/transport-options.md).
+Subnetworks, devices and serialisation are covered in the [user guide](../guide/index.md), and the options of every layer in the [layer and model option pages](../reference/index.md).

@@ -6,7 +6,7 @@ and interior selectors — and caches them, so building a layer costs the deriva
 
 ## Building one
 
-```python
+```py
 import torch
 from noodl.topology import Network
 
@@ -21,7 +21,7 @@ geometry to its elements: `orifice_law_from_edges` reads `Cd` and `area` off eve
 a kind, and `thermal_layer` reads `volume` off every node. Attributes are retrieved in bulk and
 as tensors, never one at a time:
 
-```python
+```py
 volumes = net.node_attr("volume", default=0.0)     # (n,) tensor, full node order
 areas = net.edge_attr("area", kind="airpath")      # (b_kind,) tensor, kind order
 ```
@@ -33,7 +33,7 @@ areas = net.edge_attr("area", kind="airpath")      # (b_kind,) tensor, kind orde
 Every edge has a `kind`, and every operator takes an optional `kind` argument that restricts it
 to those edges. This is the mechanism that lets one network hold several physical systems:
 
-```python
+```py
 net.add_edge("room", "ambient", kind="airpath")   # air can flow
 net.add_edge("room", "wall", kind="wall")          # heat conducts, air does not
 ```
@@ -43,7 +43,7 @@ advecting on `"airpath"` and conducting on `"wall"` sees both, in separate block
 application uses this to put water, headspace air and two quality layers on one graph; the
 street application uses it to separate `route`, `vent` and `exchange` edges.
 
-```python
+```py
 net.edge_kinds()            # ['airpath', 'wall']
 net.edge_index("airpath")   # positions of that kind's edges in full edge order
 ```
@@ -76,7 +76,7 @@ A node is *boundary* if its potential (or state) is prescribed rather than solve
 else is interior. You name the boundary when you build a layer, and the network turns that into
 index tensors:
 
-```python
+```py
 interior = net.interior_index(["ambient"])   # solved nodes
 boundary = net.boundary_index(["ambient"])   # prescribed nodes
 ```
@@ -99,7 +99,7 @@ has two islands has two air systems that never exchange air.
 Most physical networks want a single node representing "outside". `with_ambient` adds one and
 returns the network for chaining:
 
-```python
+```py
 net = Network(dtype=torch.float64).with_ambient("ambient")
 ```
 
@@ -116,7 +116,7 @@ Potential differences live in the cut space, conservative flows live in the cycl
 two are orthogonal complements. The branch power sum is therefore zero regardless of what the
 elements are — it is a property of the graph, not of the physics.
 
-```python
+```py
 residual = net.power_residual(p, q)   # zero to machine precision for a conservative q
 ```
 
@@ -129,7 +129,7 @@ solution. [The theory page](theory.md) develops this properly.
 
 ## Devices and dtype
 
-```python
+```py
 net = net.to(device="cuda", dtype=torch.float64)
 ```
 

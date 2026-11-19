@@ -1,6 +1,6 @@
 # Layers and models
 
-A **layer** is one physical process on one network. A **`Model`** holds several layers on one network and steps them together. This page explains what each kind of layer does and how a model orders them within a step. Every option is in [Transport and model options](../reference/transport-options.md); the four ways a flow can be determined are on [their own page](four-modes.md).
+A **layer** is one physical process on one network. A **`Model`** holds several layers on one network and steps them together. This page explains what each kind of layer does and how a model orders them within a step. Every option is in [the option reference pages](../reference/index.md); the four ways a flow can be determined are on [their own page](four-modes.md).
 
 ## The layer types
 
@@ -25,7 +25,7 @@ unit; absent means zero) and adds it to every edge's `phi[src] - phi[tgt]` once.
 terms (`Stack`, `DuctStack`, `Wind`, `DriverHead`, ...); it adds them up in the columns of
 each term's kind and writes the total:
 
-```python
+```py
 from noodl.heads import EdgeHeads, Stack
 
 heads = EdgeHeads(air, [Stack.from_network(net, "airpath")])   # writes "air.edge_head"
@@ -45,15 +45,13 @@ its own `to(device=None, dtype=None)` method for `Model.to` to move them (the te
 
 ## The `Model`
 
-`Model` collects named layers on one network, together with closures and reactions, and offers `step` (one time step), `steady` (the steady state) and `residuals`. State and driver keys are namespaced by layer name (`"air.phi"`, `"thermal.x"`, `"air.q"`); the table of keys is in the [options reference](../reference/transport-options.md#key-conventions).
+`Model` collects named layers on one network, together with closures and reactions, and offers `step` (one time step), `steady` (the steady state) and `residuals`. State and driver keys are namespaced by layer name (`"air.phi"`, `"thermal.x"`, `"air.q"`); the table of keys is in the [options reference](../reference/model-options.md#key-conventions).
 
 ### The order within a pass
 
 Closures, then potential solves, then allocation steps, then transport steps, then reactions (reactions before the transport steps under `reaction_order="before_transport"`, which the sewer uses because SWMM reports its water quality after mixing).
 
-The allocation step sits between the potential solves and the transport steps so that a transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote it.
-
-A Kirchhoff layer whose laws are implicit, dynamic or read the context is handed what it needs: the warm start of its flows, the time at the end of the step and the step-start state as history. How each case is handled is in the [options reference](../reference/transport-options.md#layers-with-flow-unknowns-dynamic-laws-or-laws-that-read-the-context).
+A Kirchhoff layer whose laws are implicit, dynamic or read the context is handed what it needs: the warm start of its flows, the time at the end of the step and the step-start state as history. How each case is handled is in the [options reference](../reference/model-options.md#layers-with-flow-unknowns-dynamic-laws-or-laws-that-read-the-context).
 
 A reaction is not applied by `Model.steady`: a steady state under a reaction is a different fixed-point problem, not the transport steady state. The street and sewer applications each provide a helper that iterates transport and chemistry together to a joint fixed point.
 
@@ -63,32 +61,13 @@ A closure is `(state, drivers) -> driver updates`. It is the escape hatch for an
 function of solved state: air density from temperature, canyon velocities from wind, tank levels
 from the previous step.
 
-```python
+```py
 def density(state, drivers):
     T = state["thermal.x"]
     return {"rho": P_REF / (R_AIR * T)}
 ```
 
-Closures may **not** write layer state keys. A closure may carry *its own* state across steps by
-declaring `state_keys`, which `Model` copies from its return into the returned state — a sewer
-manhole level, or a water tank level and its controlled links' status. Two closures claiming one
-key is refused at construction, naming both, rather than resolved by whichever ran last.
-
-
-**Closures and the clock.**
-
-A closure that only computes coefficients or forcing terms keeps the two-argument form `closure(state, drivers)`.
-A closure that integrates some state over the step (such as a storage sweep that advances manhole levels)
-declares `integrates = True` and receives a third argument, `ctx = StepContext(dt, t)`, where `dt` is
-the integration interval and `t` the step's start time if tracked. Inside `step(...)` the context carries the
-interval; inside `steady(...)` it refuses the closure by name because there is no interval to integrate over.
-Queries (`residuals`, `current_flows`, and the sewer report) call closures with `ctx = None`, where an
-integrating closure evaluates its outputs at the given state without advancing it. A closure declaring `state_keys`
-must also declare `integrates` (True or False) so the model knows whether its carried state changes step to step;
-omitting it is refused by name.
-
-
-A closure may also declare which keys it reads and writes, which lets `model.check` find closures that overwrite each other. The declarations are listed in the [options reference](../reference/transport-options.md#what-a-closure-may-declare).
+Closures may not write layer state keys. A closure may carry its own state across steps, and one that integrates over the step receives the step's interval; both are declared on the closure, and the declarations, with the clock rules, are in [Model options](../reference/model-options.md#closures). The declared reads and writes also let `model.check` find closures that overwrite each other ([what a closure may declare](../reference/model-options.md#what-a-closure-may-declare)).
 
 ### The two couplings
 
@@ -107,28 +86,17 @@ compound into `passes × dt`.
 
 `coupling="pingpong"` is the default and a strongly two-way coupled model needs `"iterate"`; see [Troubleshooting](../guide/troubleshooting.md) for the trap in that default.
 
-`iterate_tol` is absolute, in each layer's own units, so a species layer whose mass fractions are about $10^{-3}$ and a thermal layer in kelvin cannot share a tolerance. It has a floor set by the potential solve's own residual, convergence is decided per batch instance, and a Kirchhoff layer may be named as well as a transport layer. The details are in the [options reference](../reference/transport-options.md#model).
+`iterate_tol` is absolute, in each layer's own units, so a species layer whose mass fractions are about $10^{-3}$ and a thermal layer in kelvin cannot share a tolerance. It has a floor set by the potential solve's own residual, convergence is decided per batch instance, and a Kirchhoff layer may be named as well as a transport layer. The details are in the [options reference](../reference/model-options.md#model).
 
 ### Introspection
 
-```python
+```py
 model.residuals(state, drivers)   # per-layer nodal balance residual
 model.ports(state)                 # what a coupled or external model may prescribe and read
 ```
 
-`Ports` reports boundary nodes, prescribable keys, boundary flows, and each transport layer's
-flow driver key. `Model.flow_layer_of[name] is None` tells you whether a transport layer's flows
-are yours to prescribe. This is the surface the [coupling application](../guide/coupling.md)
-builds on.
+`Model.ports` reports what a coupled or external model may prescribe and read; see [Coupling](../guide/coupling.md) and [Introspection](../reference/model-options.md#introspection).
 
 ### Differentiability
 
-Ping-pong is one pass of differentiable operations. Iterate runs its passes to convergence
-without a graph, then re-runs the certified pass once more on the graph and attaches the
-implicit adjoint of the interface equations — memory is one pass, not all of them, and the
-gradient error is of the order of the primal residual rather than tied to the pass count. The
-convergence *decision* is still made on detached copies, so it never appears in the graph. See
-[Differentiability](differentiability.md#what-is-guaranteed) and
-[Coupling](../guide/coupling.md#gradients-across-the-join) for the full contract.
-`**solve_kwargs` on `step`/`steady` reach the **potential solves only** (`differentiable`,
-`on_failure`, `method`, Newton options); transport steps always raise on failure.
+Ping-pong is one pass of differentiable operations. Iterate runs its passes to convergence without a graph, then re-runs one pass on the graph and attaches the implicit adjoint of the interface equations, so memory is one pass. The full contract is in [Differentiability](differentiability.md#what-is-guaranteed) and [Coupling](../guide/coupling.md#gradients-across-the-join); the keyword arguments that reach the solves are in [Model options](../reference/model-options.md#differentiability).
