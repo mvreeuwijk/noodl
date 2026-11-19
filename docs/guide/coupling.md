@@ -194,8 +194,9 @@ A worked example is in the [examples](../examples/index.md).
 - **No steady solve.** `CoupledModel` steps in time only. To reach a coupled steady state, step
   until the interface values stop changing.
 - **Fixed relaxation.** Each step uses a constant `relaxation` (default 0.5), with no adaptive
-  scheme. Where the coupled problem has several fixed points, a constant relaxation can settle on
-  the wrong one or fail to hold an unstable one, as in the building application's case with three
+  scheme. The street and building demo fixtures converge in 21 to 27 passes to
+  `iterate_rtol=1e-10`. Where the coupled problem has several fixed points, a constant relaxation
+  can settle on the wrong one or fail to hold an unstable one, as in the building application's case with three
   steady states. Check a suspect result against a smaller `relaxation` or another start.
 - **One species on one flow kind.** A two-way link is refused at construction (`ValueError`)
   unless both layers have a single species and the recipient's layer has exactly one flow kind.

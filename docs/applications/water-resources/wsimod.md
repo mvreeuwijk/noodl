@@ -312,21 +312,5 @@ mid-run, hang or silently do something else:
 
 ## Limitations
 
-- **Scope.** Every WSIMOD 0.8.1 class is ported except `EnfieldFoulSewer`. Not ported:
-  `GrowingSurface.residue` (surface data named `*-residue` is refused), the `NutrientPool`
-  override hook (the pool's parameters are drivers instead), the `("RiparianBuffer", "volume")`
-  check (no such class exists in WSIMOD 0.8.1) and `Model.change_impervious_area`.
-- **Input and output.** A configuration is read, not written. `extensions` and
-  `unified_data_file` are refused.
-- **Speed.** The day is a transcription of many small operations, with no compilation, so it is slower per day than a compiled model; a batch amortises the cost.
-- **Not re-entrant.** One `WsimodDay` holds one engine that every step reuses, so two steps of
-  one model must not run at once (threads, or a step that calls another).
-- **`Model.to`.** `model.to(dtype=torch.float64)` (or a CPU device) works and changes nothing.
-  Another dtype or a device move is refused by name (`TypeError`): the port is float64 on the
-  CPU, as bitwise equality with WSIMOD needs.
-- **River ties.** WSIMOD breaks a tie in the river order by set-hash order, which varies with
-  `PYTHONHASHSEED`; noodl takes the configuration order, so a model whose river ties matter may
-  differ from a WSIMOD run in the last bit. Neither demo has a `River`.
-- **A gapped time-area** (`QueueGroundwater`) may differ from WSIMOD by an ulp: WSIMOD walks the
-  queue in dict insertion order, noodl in ascending time.
-- **The recursion rule over-approximates** and may refuse a model WSIMOD runs.
+What is not ported, what is refused and where results can differ in the last bit are listed on
+[Limitations](limitations.md).

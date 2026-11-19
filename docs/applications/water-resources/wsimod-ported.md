@@ -253,7 +253,10 @@ when the model is built, in WSIMOD's own arithmetic. Its quirks, reproduced, are
 Refused by name: `wilting_point >= field_capacity`, `crop_factor_stages` and
 `crop_factor_stage_dates` of different lengths, a stage date list on which WSIMOD's
 interpolation would raise on one of the run's dates, a `sowing_day` or `harvest_day` that is not
-a whole day, and an `adsorption_nr_maxiter` that is not a non-negative integer. With `nitrate`
+a whole day, and an `adsorption_nr_maxiter` that is not a non-negative integer. As a driver,
+`crop_factor_stages` has one row per surface, padded with 0 to the longest list; a padding entry
+other than 0 on a shorter surface is refused when the day is bound, naming the surface and the
+index. With `nitrate`
 among the pollutants a growing surface needs the monthly fertiliser and manure data
 (`nhx-fertiliser`, `noy-fertiliser`, `srp-fertiliser`, `nhx-manure`, `noy-manure`,
 `srp-manure`, kg/m²/d) in either mode.
@@ -298,7 +301,10 @@ driver.
 - **Adsorption** (HYPE's Freundlich isotherm): the adsorbed and dissolved inorganic phosphorus
   are split at equilibrium by an unrolled Newton iteration of `adsorption_nr_maxiter` passes
   under a mask, then the adsorbed concentration moves `1 - exp(-kadsdes)` of the way to the
-  equilibrium.
+  equilibrium. The convergence limit `adsorption_nr_limit` enters only comparisons and has no
+  gradient. A negative `kadsdes` is accepted, as WSIMOD runs it, though it is non-physical (the
+  concentration moves away from the equilibrium); below -709.78 WSIMOD's `exp(-kadsdes)`
+  overflows and noodl refuses it by name.
 
 **Refused with `nitrate`, in either mode:** a missing one of `ammonia`, `nitrite`, `phosphate`,
 `org-nitrogen`, `org-phosphorus`, `solids` and `temperature`; `rooting_depth`, `bulk_density`,

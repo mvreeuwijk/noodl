@@ -25,7 +25,8 @@ differentiability modes and the proportional sharing are on
 [the physics page](allocation-physics.md).
 
 **Maturity: verified on a stated subset.** The default `"hard"` mode reproduces WSIMOD 0.8.1's
-realised flows on its two demonstration models to 1e-16 and on scripted networks with binding
+realised flows on its `quickstart_demo` model to 1e-16 and on 20 of the 21 arcs of `oxford_demo` to
+1.9e-9 (the `sewer_to_wwtw` arc is excluded, see the evidence), and on scripted networks with binding
 capacities and headroom to 4.4e-16
 ([evidence](../../reference/verification/water-resources.md)). The `"smooth"` and
 `"projection"` modes have no external reference: they are checked against the hard clip and by

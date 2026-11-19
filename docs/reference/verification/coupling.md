@@ -23,7 +23,6 @@ the building's infiltration changes the street concentration by 0.5897 %. On a s
 realistic size one building's infiltration changes the street's concentration very little, and
 the coupled result should be read with that in mind.
 
-The synthetic case is deliberately sized so that the building matters: a 2×3 m canyon, where the building's infiltration changes the street concentration by 0.5897 %. On a street of realistic size one building's infiltration changes the street's concentration very little, and the coupled result should be read with that in mind.
 
 ## Cost of a two-way run
 

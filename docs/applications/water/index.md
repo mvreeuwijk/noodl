@@ -16,8 +16,10 @@ upstream inflow rather than by head difference.
 
 The reference tool is **EPANET 2.2** (also used through WNTR). On the supported subset below,
 noodl reproduces EPANET's hydraulics and water quality: heads and flows agree to a relative
-1e-6 or better, which is the precision of EPANET's own float32 output file, and water quality
-agrees to 1e-5 of the quality's scale. Where the formulas are EPANET's own constants and
+1e-6 in steady state, which is the precision of EPANET's own float32 output file, and to 1e-5 in
+extended-period runs of whole networks; Net6 is looser (heads 2e-5, flows 5e-4). Water quality
+agrees to 1e-5 of the quality's scale, and to 1.7e-5 to 2.5e-5 at dead ends. The rows are on the
+[verification page](../../reference/verification/water.md). Where the formulas are EPANET's own constants and
 algorithms (its composite Darcy-Weisbach law, rounded unit factors, whole-second step lengths, the
 Lagrangian quality procedure), they are transcribed, not approximated.
 
@@ -42,14 +44,17 @@ its first 6 h 55 min only; see [Limitations](limitations.md).
   relative speed and speed patterns; pump energy and cost.
 - All six valve types (TCV, FCV, PBV, GPV, PRV, PSV), check valves, closed pipes and link
   status and settings.
-- Every form of `[CONTROLS]`, and `[RULES]` with EPANET's own premise logic.
+- `[CONTROLS]` of every form EPANET accepts (a numeric setting on a pipe is refused by
+  `validate()`), and `[RULES]` with EPANET's own premise logic.
 - Demand patterns, reservoir head patterns, `[TIMES]` options, pressure-driven demand and
   emitters.
 - Extended-period simulation with EPANET's event-shortened steps.
 - Water quality: CHEMICAL, AGE and TRACE, bulk, wall and tank reactions, sources, tank mixing
   models.
 - Batches of instances and gradients of heads, flows, levels, demands and quality with respect to
-  roughness, demand, pump speed, tank area and reaction coefficients.
+  the drivers (demands, head and speed patterns) and the initial state. In a model built from a
+  file the coefficients (roughness, tank area, reaction rates) are fixed at build time and are not
+  learnable; see [Limitations](limitations.md).
 - Reading an EPANET `.inp` in any of its flow units, converted to SI.
 
 **Not supported (refused by name, or not modelled)**

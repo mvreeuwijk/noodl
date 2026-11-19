@@ -1,7 +1,7 @@
 # Differences from WSIMOD
 
-noodl runs WSIMOD 0.8.1's day with the same calls, order and arithmetic, so on every model it
-accepts it agrees with WSIMOD exactly. This page lists the places where WSIMOD's source is
+noodl runs WSIMOD 0.8.1's day with the same calls, order and arithmetic, so on the demonstration
+models and the tested cases it agrees with WSIMOD exactly, except where listed below. This page lists the places where WSIMOD's source is
 defective or silent and says what noodl does instead. There are four outcomes:
 
 - **Reproduced:** noodl does what WSIMOD does, defect included, so results stay comparable.
