@@ -31,6 +31,13 @@ PAGES = [
     "applications/water-resources/wsimod.md",
     "applications/electrical/index.md",
     "applications/electrical/matpower.md",
+    "project/extending/law.md",
+    "examples/calibrate-demands.md",
+    "examples/water-day.md",
+    "examples/natural-ventilation.md",
+    "examples/street-release.md",
+    "examples/sewer-sulfide.md",
+    "examples/street-building.md",
 ]
 FIXTURES = ["sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",
             "modelica/ChimneyShaftWithVolume.json",

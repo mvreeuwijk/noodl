@@ -1,9 +1,8 @@
 # Water and street air quality: measurements behind design choices
 
 Measurements that justify choices in `noodl.apps.water` and `noodl.apps.street_aq`. The
-source keeps the reasoning; the numbers live here. All were taken on the platform and
-versions of the day they were written (October 2026, Windows, CPU, float64); treat them as
-orders of magnitude, not as asserted values.
+source keeps the reasoning; the numbers live here. All were taken on one platform (Windows,
+CPU, float64, October 2026); treat them as orders of magnitude, not as asserted values.
 
 ## Headloss inversion
 
@@ -24,7 +23,7 @@ crossing, as EPANET does (Manual section 13.1 item 17, p. 113; `hydraul.c`,
 | step rule | worst reported-step tank-level difference to EPANET |
 | --- | --- |
 | fixed 1 h | 2.07 m (the pump switches a whole hour late) |
-| shortened to the exact control crossing (2 extra steps; an earlier step rule, since replaced) | 8.181e-5 m (3.8e-5 m with EPANET's 1.99998 pump exponent) |
+| shortened to the exact control crossing (2 extra steps; the rule `water_run` used before it followed EPANET) | 8.181e-5 m (3.8e-5 m with EPANET's 1.99998 pump exponent) |
 | EPANET's step rule (`water_run`: rounded crossings, volume margin, 26 steps) | 2.5e-5 m |
 
 Reproduce: `tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`

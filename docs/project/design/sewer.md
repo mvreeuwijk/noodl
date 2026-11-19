@@ -47,8 +47,7 @@ statistics of the check):
 | float32 leak branch | 1.352e-12 / 1.855e-11 |
 | float64 leak branch | 4.518e-13 / 6.141e-12 |
 
-Measured when the headspace model was built; the check is the one named C1 in
-`tests/apps/sewer/test_air.py`.
+The check is the one named C1 in `tests/apps/sewer/test_air.py`.
 
 ## Storage quasi-steady agreement
 
