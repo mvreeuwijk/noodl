@@ -46,6 +46,26 @@ python -m pytest -q -n 4 --no-cov tests/test_*.py tests/layers tests/solvers tes
   live in `benchmarks/` (`python -m benchmarks.report_composed_scaling`, `--quick` for a short
   run).
 
+## What runs by default
+
+The default `pytest` run deselects `slow` and runs every verification comparison else. The
+live-engine comparisons skip themselves when their engine is not installed. `wntr`, `pyswmm`
+and `wsimod` come with the `dev` extra. `contamxpy` comes with the `contam` extra, which exists
+only on Windows x86-64, so the ContamX comparisons are marked `external` and do not run on Linux
+CI. The power-flow comparisons are marked `external` too: they need MATPOWER's case files,
+fetched on first use, and skip, naming the file to place by hand, when there is no network
+connection. The stored-output comparisons, the WSIMOD demo replay and every closed-form
+comparison need no external engine.
+
+The dynamic Modelica comparisons are split. For building physics, the default run compares the
+first few rows of each of the 15 models (between 2 and 21 rows each); `pytest -m slow` compares
+every row and adds a check that the time-integration error falls with the order of the scheme.
+The measured values for every Modelica column are committed with the test data
+(`parity-algebraic.json` and `parity-dynamic.json` for building physics,
+`parity-electrical.json` for electrical circuits). The WSIMOD comparisons run the shipped demos
+in full for `quickstart` and for the first 365 days of `oxford`; full `oxford` and the long
+horizons run under `-m slow`.
+
 ## What CI runs
 
 | Job | Runs on | What it runs |

@@ -133,7 +133,7 @@ step, ramp or pulse edge, the start of a sine), which use backward Euler. The tr
 rule rings after a discontinuity (it is A-stable, not L-stable); one backward Euler step
 damps that. This is the practice of SPICE. `scheme="backward_euler"` uses backward Euler
 throughout. `transient` finds the restart steps and hands them to
-[`Model.march`](../../guide/workflow.md#marching-over-a-time-grid). A pulse-driven RC circuit
+[`Model.march`](../../guide/time-stepping.md#marching-over-a-time-grid). A pulse-driven RC circuit
 restarts at every edge:
 
 ```python

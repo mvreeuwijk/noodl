@@ -295,6 +295,15 @@ single ventilated zone — buoyancy-only, envelope-loss, assisting-wind and oppo
 plus an independent `scipy.optimize.fsolve` reference for a two-zone doorway case and a golden
 regression at rtol 1e-8.
 
+| Case | Tolerance | Measured |
+|---|---|---|
+| Airflow closed forms: series and parallel power laws, a fan-driven zone, a fan curve against a leak, a three-zone stack (`scipy.optimize.brentq` or `fsolve` where no closed form exists), each once alone and as a batch of 64 random instances: flows, zone pressures | 1e-9 relative, no absolute allowance, Newton solved to 1e-12 | Single instances at round-off (at most 8.2e-16); batches of 64 up to 9.7e-11 (stack), 1.6e-11 (fan-driven zone), 1.1e-11 (series) |
+| Same, nodal residual | 1e-11 kg/s, ten times Newton's stopping bound | within the bound |
+| Natural ventilation, single zone (buoyancy only, envelope loss, assisting wind, opposing wind with three steady states): ventilation flow | 1e-6 (1e-4 on the three-root opposing-wind case) | at most 1.8e-10; the stable opposing-wind states are found by time stepping |
+| Natural ventilation, two-zone doorway: zone temperatures | 1e-5 K absolute | 7.1e-10 K |
+
+The airflow closed forms check the solver and the element laws, not CONTAM itself. The residual error is Newton's stopping tolerance. At the default tolerance (the square root of machine epsilon, about 1.5e-8) the error reaches 1.7e-6 on small flows. That is the per-instance stopping rule, not batching: on the series case the batch and 64 separate solves stop at the same 9.8e-7. Coupled steady states converge to the Newton tolerance.
+
 `tests/apps/building_physics/test_outputs.py` checks the outputs of occupants, age of air and air change rates against closed forms. The
 local mean age of air: one zone ($\rho V / q$), three zones in series (the ages add up) and
 two zones with recirculation, to 1e-12, and an air handler's zero-volume plenum, whose age

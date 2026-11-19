@@ -5,7 +5,7 @@ requested flows between stores, clipped by arc capacity and free storage) and a 
 port of WSIMOD 0.8.1**, the Water Systems Integrated Modelling framework of Imperial College
 London (land, groundwater, rivers, reservoirs, sewers, treatment works and demands, stepped one
 day at a time). Both run batched on PyTorch tensors and give exact gradients of any output with
-respect to any parameter, forcing or initial store.
+respect to the parameters, forcings and initial stores listed on the [gradients page](wsimod-gradients.md).
 
 | Part | Maturity | Why |
 | --- | --- | --- |

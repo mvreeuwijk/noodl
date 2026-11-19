@@ -120,7 +120,7 @@ This section states the guarantees as a list of bounded claims.
   linear-solver route than the primal passes did — the returned state reproduces the certified
   pass to *solver accuracy*, not identically by construction. Conservation does not depend on
   which route ran: it is a property of the pass function itself
-  (see [Coupling](../guide/coupling.md#differentiating-the-fixed-point) for the full
+  (see [Coupling](../guide/coupling.md#gradients-across-the-join) for the full
   derivation). The GMRES solve runs one independent system per batch instance when EVERY
   interface tensor carries the batch shape as its leading dims — a documented precondition on
   the caller (instances must not couple through the pass), checked only by shape, not proven
@@ -199,7 +199,7 @@ Every application checks its gradients against finite differences; the evidence 
 
 | Application | Check | Tolerance | Measured |
 |---|---|---|---|
-| Water | demand, roughness, pump $h_0$, tank area | $10^{-6}\times$ scale | 3.2e-6 / 2.5e-10 / 1.0e-6 / 2.8e-9 |
+| Water | demand, roughness (a learnable law parameter), pump $h_0$, tank area | $10^{-6}\times$ scale | 3.2e-6 / 2.5e-10 / 1.0e-6 / 2.8e-9 |
 | Sewer | inflow, `T_head`, leak area, `f_air`, vs Richardson-extrapolated central differences | rel $10^{-6}$ | holds |
 | Allocation | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
 | Coupling | gradient across the join vs central differences | rel $10^{-5}$ | holds |

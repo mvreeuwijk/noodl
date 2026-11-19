@@ -10,7 +10,7 @@ flattened network exactly as they do on one built by hand.
 
 Components live in `noodl.components`. The building application adds factory functions that
 return components (`room`, `door`, `crack`, `window`, `shaft`, `fan`, `duct`, `air_handler`); see
-[Building physics](../applications/building/index.md#building-from-components).
+[Building physics](../applications/building/assembling.md#building-from-components).
 
 ## A house from rooms and a door
 
@@ -44,7 +44,7 @@ print(names.resolve("door.a"))
 A.air
 ```
 
-This is the model of the [two-zone example](../applications/building/index.md#building-a-model-in-python),
+This is the model of the [two-zone example](../applications/building/index.md#a-worked-example),
 assembled from parts. Rooms `A` and `B` each bring their air node. The door brings two
 edges, a low and a high opening, between two terminals. Each leak brings one edge, from
 the shared `ambient` node to a terminal. `connect` joins each terminal to a room, and

@@ -2,8 +2,8 @@
 
 Status: **decided and implemented** (EPANET hydraulics completion, 2026-11). The sections
 below are the analysis the decisions were taken on and describe the code as it stood then;
-the implementation is in [Water distribution](../applications/water/index.md#valves) and
-[Link status, settings and check valves](../applications/water/index.md#link-status-settings-and-check-valves).
+the implementation is in [Water distribution](../applications/water/valves.md#valves) and
+[Link status, settings and check valves](../applications/water/valves.md#link-status-settings-and-check-valves).
 Follow-up of #23 ("PRV and PSV valves, which switch status on the absolute head at one end").
 
 ## Decisions (answers to section 5)

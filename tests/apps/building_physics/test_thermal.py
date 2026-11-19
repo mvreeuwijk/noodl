@@ -188,7 +188,7 @@ def test_gradients_flow_through_the_application_built_model():
 
 def test_wall_mass_refuses_a_non_positive_conductance_naming_it():
     """A negative `ua` makes the conduction operator anti-diffusive -- it breaks the maximum
-    principle docs/applications/building/background.md section 7 claims for the layer -- and
+    principle docs/applications/building/physics.md (conduction) claims for the layer -- and
     nothing downstream looks at
     the sign, so every solve would report success. It is refused where the wall is built."""
     with pytest.raises(ValueError, match=r"WallMass 'z_wall'.*ua_zone.*strictly positive.*-1"):

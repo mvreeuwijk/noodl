@@ -209,4 +209,4 @@ A worked example is in the [examples](../examples/index.md).
   the street only through species concentrations, and its ambient density comes from the CONTAM
   file's own outdoor temperature.
 
-If a coupled step fails to converge, see [Troubleshooting](troubleshooting.md).
+If a coupled step fails to converge, see [Troubleshooting](troubleshooting.md). The checks behind these claims, with tolerances and measured agreement, are on the [coupling verification page](../reference/verification/coupling.md).

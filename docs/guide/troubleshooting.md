@@ -71,7 +71,7 @@ or reconnect the part that was cut off.
 model with `model.to(dtype=...)` (see [Devices, dtype, copying and saving](devices.md)). The
 precision changes two things.
 
-- **Tolerances.** Newton's default tolerances follow the dtype (about 1.2e-4 relative for float32,
+- **Tolerances.** Newton's default tolerances follow the dtype (about 3.5e-4 relative for float32,
   1.5e-8 for float64). A tolerance tighter than the dtype can reach never converges. An application
   that pins its own tight defaults (`water_steady`'s 1e-11, the building and electrical solves)
   needs looser ones in float32, `atol=rtol=1e-5` or so.

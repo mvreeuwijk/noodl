@@ -13,7 +13,7 @@ Kirchhoff layer in this codebase. SWMM's dynamic-wave engine is the heavier comp
 the sewer's full 1-D Saint-Venant equations with surcharging and reverse flow, "a genuinely
 dynamic (not quasi-steady) network". SWMM's KINWAVE routing, which shares the continuity-first
 assumption, is the comparison target for the kinematic-wave path and its live dynamic-wave runs
-for the dynamic-wave path; see the [sewer background](../sewer/background.md).
+for the dynamic-wave path; see the [sewer background](../sewer/physics.md).
 
 ## Head loss in pipes
 

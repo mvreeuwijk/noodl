@@ -126,8 +126,8 @@ module. Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Version 0.1.0. The core and all eight applications are implemented, each with its verification
-cases in the test suite.
+Version 0.1.0. The core, the six application areas (flow allocation and WSIMOD together form
+water resources) and coupling are implemented, each with its verification cases in the test suite.
 
 ## The name
 

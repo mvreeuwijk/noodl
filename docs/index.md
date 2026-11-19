@@ -6,7 +6,7 @@
 </p>
 
 **Read your EPANET, SWMM or CONTAM model into PyTorch: run many variants in one call and get
-exact gradients of any output with respect to any parameter.**
+exact gradients of any output with respect to the drivers, the initial state and the parameters you mark learnable.**
 
 noodl physics is an open-source framework for differentiable network modelling of physical
 systems. Ready-made applications cover buildings, streets, sewers, water mains, water resources

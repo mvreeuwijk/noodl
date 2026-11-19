@@ -62,4 +62,4 @@ cached in `~/.cache/noodl`. To run the slow comparisons for your pull request, a
 `run-slow` label.
 
 A new application also follows the checklist in
-[Extending noodl](docs/project/extending/index.md#what-a-real-application-must-ship).
+[A new application](docs/project/extending/application.md#what-a-real-application-must-ship).

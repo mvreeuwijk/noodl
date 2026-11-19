@@ -129,6 +129,6 @@ implicit adjoint of the interface equations — memory is one pass, not all of t
 gradient error is of the order of the primal residual rather than tied to the pass count. The
 convergence *decision* is still made on detached copies, so it never appears in the graph. See
 [Differentiability](differentiability.md#what-is-guaranteed) and
-[Coupling](../guide/coupling.md#differentiating-the-fixed-point) for the full contract.
+[Coupling](../guide/coupling.md#gradients-across-the-join) for the full contract.
 `**solve_kwargs` on `step`/`steady` reach the **potential solves only** (`differentiable`,
 `on_failure`, `method`, Newton options); transport steps always raise on failure.

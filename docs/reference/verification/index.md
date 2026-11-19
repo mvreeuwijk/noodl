@@ -42,6 +42,7 @@ finite-difference gradients.
 | Water distribution | EPANET 2.2 (live engine) | Heads, flows, pump head gain, tank levels; pressure-driven demand; traced source | 1e-6 on heads and flows, at the float32 floor of EPANET's output | [Water distribution](water.md) |
 | Water resources | WSIMOD 0.8.1, pinned exactly (live engine and stored output) | Allocated arc flows; every node class and the whole model on the shipped demos and purpose-built cases; gradients by central differences | Allocation 1e-9 abs; whole-model series exactly equal where the arithmetic allows; gradients 1e-6 relative | [Water resources](water-resources.md) |
 | Electrical circuits and power flow | Closed forms; Modelica Standard Library 4.1.0 and Buildings Library 13.0.0 via OpenModelica (stored output); pandapower 3.5.6 | Device laws, transients and phasors; 14 Modelica circuits; AC and DC power flow on MATPOWER cases | Closed forms 1e-12; Modelica algebraic 1e-9 relative, dynamic 1e-6 of range; power flow 1e-8 p.u. | [Electrical](electrical.md) |
+| Coupling | Closed forms, central differences, conservation | Two-way fixed point, conservation, gradient across the join, back-coupling on a synthetic canyon | Closed forms 1e-9 absolute; gradients 1e-5 relative; calibration error 1.3e-4 | [Coupling](coupling.md) |
 
 ## Intentional differences
 

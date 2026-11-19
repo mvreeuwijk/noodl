@@ -84,3 +84,5 @@ The causes admitted, each asserted in its test:
   with 5000 trials; nine of them are beyond the bound with wntr's Windows build, all ten with
   its Linux build. Two points (J-433 at 23050 s; J-145 at 14400 s, Windows only) are closed-link leaks.
   The run stops at 6:54:59 because the hydraulics diverge after it ([Limitations](../../applications/water/limitations.md)).
+
+A TRACE comparison covers one traced source at a time; runs with several traced sources are not compared.
