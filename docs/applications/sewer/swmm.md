@@ -180,8 +180,8 @@ section's constants are computed exactly as `xsect.c::xsect_setParams` does, fro
 numbers (the unit factor applied as SWMM applies it). Under `STEADY` or `KINWAVE` any shape
 but `CIRCULAR` is refused with the line number, as is `[TRANSECTS]`.
 
-**Transects (dynamic wave).** `[TRANSECTS]` `NC nLeft nRight nChannel`, `X1 Name nSta
-xLeftBank xRightBank 0 0 Lfactor Xfactor Yfactor` and `GR Elevation Station ...` lines are read
+**Transects (dynamic wave).** `[TRANSECTS]` `NC nLeft nRight nChannel`,
+`X1 Name nSta xLeftBank xRightBank 0 0 Lfactor Xfactor Yfactor` and `GR Elevation Station ...` lines are read
 with SWMM's reader state (`transect.c`): a zero Manning n on an `NC` line keeps the value
 of the previous transect (the main channel's, as SWMM leaves it after scaling it by
 `sqrt(Lfactor)`), an overbank n of 0 takes the channel's, the station multiplier `Xfactor` and
