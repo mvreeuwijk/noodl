@@ -10,8 +10,8 @@ more than the flow target's floor. noodl is built with ``iterate_tol=1e-13`` and
 ``iterate_max=2000``. The targets are the parity suite's: depth within 1e-7 m, flows within 1e-6
 relative plus 1e-9 m3/s, per step and per node or link, over every junction, outfall and link.
 
-What the fixtures exercise (SWMM 5.2.4 ``src/solver`` references; docs/applications/sewer.md,
-"Evaporation and seepage losses"):
+What the fixtures exercise (SWMM 5.2.4 ``src/solver`` references;
+docs/applications/sewer/dynamic-wave-structures.md, "Evaporation and seepage losses"):
 
 - an open conduit evaporates ``topWidth * length * Evap.rate`` from the mean of the step-start
   and current link depth (link.c:1334-1399), taken half from each end node and as the momentum

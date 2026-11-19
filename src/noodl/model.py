@@ -509,7 +509,7 @@ class Model:
         function or a lambda is left as it is: the tensors it closes over do not move (give
         it a `to` method). State and drivers are the caller's: pass them on the new device
         and dtype. Refused when the network's topology or attributes changed since the
-        layers were built (rebuild instead). See `docs/concepts/ownership.md`.
+        layers were built (rebuild instead). See `docs/guide/devices.md`.
         """
         from noodl.layers._device import Mover
 

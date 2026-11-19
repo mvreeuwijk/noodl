@@ -5,96 +5,106 @@
   <img src="assets/noodl-physics-full-dark.svg#only-dark" alt="noodl physics — complex networks, differentiable by design" width="640">
 </p>
 
-**noodl physics** is an open-source framework for differentiable network modelling of physical
-systems, built on PyTorch. It combines graph
-topology, conservation laws, and modular descriptions of physical processes to model flows,
-storage, transport, and reactions within a common framework. Different physical systems can be
-composed and coupled through shared network structures, while differentiable solvers support
-simulation, parameter estimation, and optimisation.
+**Read your EPANET, SWMM or CONTAM model into PyTorch: run many variants in one call and get
+exact gradients of any output with respect to the drivers and the initial state. For models you assemble yourself, also the parameters you mark learnable.**
 
-## The idea in one paragraph
+noodl physics is an open-source framework for differentiable network modelling of physical
+systems. Ready-made applications cover buildings, streets, sewers, water mains, water resources
+and electrical circuits; the framework underneath lets you compose your own.
 
-An enormous range of engineering systems are networks carrying something conserved. Air moves
-between the rooms of a building through leaks and doors; water falls through a sewer and is
-pumped through a distribution main; pollutants are carried along a street and exchanged with
-the air above; current divides between the branches of an electrical circuit. Each of these has its own literature and its own simulation tool, and each of
-those tools re-implements the same three things: a graph, a conservation law at every node, and
-a constitutive law on every edge. noodl physics factors that common core out once. What remains
-specific to a problem — the pressure-flow relation of a crack, the friction law of a pipe,
-the chemistry of a street canyon — is a small, replaceable object plugged into the core.
+```python
+import torch
+from noodl.apps.water import read_epanet_inp, build_model, water_steady, initial_drivers
 
-Because the core is written in PyTorch, every quantity in it is a tensor and every operation is
-differentiable. The same model that simulates forward will also tell you the derivative of any
-output with respect to any parameter, which is what turns a simulator into a tool for
-calibration, sensitivity analysis and design optimisation.
+net = read_epanet_inp("twoloop_si.inp")                  # an EPANET file
+model, state, _ = build_model(net)
+water = model.refs.water
 
-![The noodl physics model stack: a network, then constitutive laws, heads and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
+# three demands at junction J4, solved in one call (m3/s)
+demand = torch.tensor([0.005, 0.010, 0.015], dtype=torch.float64, requires_grad=True)
+final = water_steady(model, state, initial_drivers(model, demand={"J4": demand}))
+head = water.head.named(final[water.head])["J6"]         # head at J6 (m), one per variant
+
+head.sum().backward()                                    # exact gradient, one extra linear solve
+print("head at J6 (m):", [round(h, 3) for h in head.tolist()])
+print("d head / d demand:", [round(g, 1) for g in demand.grad.tolist()])
+```
+
+```text
+head at J6 (m): [48.528, 48.123, 47.669]
+d head / d demand: [-75.4, -86.0, -95.5]
+```
+
+## Where to start
+
+<div class="grid cards" markdown>
+
+-   **Use an application**
+
+    You have a model file or a building, street, sewer, water main or circuit to simulate.
+    Pick the application that matches your reference tool and read its file.
+
+    [:octicons-arrow-right-24: Get started](get-started/index.md) ·
+    [Applications](applications/index.md)
+
+-   **Build your own model**
+
+    You want to compose networks, constitutive laws and layers, or add a new physical system.
+
+    [:octicons-arrow-right-24: Concepts](concepts/index.md) ·
+    [Extending noodl](project/extending/index.md)
+
+-   **Check the evidence**
+
+    You want to know how closely each application reproduces its reference tool, with
+    tolerances and measured errors.
+
+    [:octicons-arrow-right-24: Verification](reference/verification/index.md)
+
+</div>
+
+## Applications
+
+<div class="grid cards" markdown>
+
+-   **[Building airflow and heat](applications/building/index.md)**
+
+    Multi-zone airflow, heat and contaminants. Reads CONTAM and Modelica Buildings models.
+
+-   **[Street air quality](applications/street/index.md)**
+
+    Canyon exchange and routing of pollutants through an urban street network.
+
+-   **[Sewers](applications/sewer/index.md)**
+
+    Gravity hydraulics, headspace air and sulfide. Reads SWMM `.inp` files.
+
+-   **[Water distribution](applications/water/index.md)**
+
+    Pressurised mains, pumps, tanks, demand and quality. Reads EPANET `.inp` files.
+
+-   **[Water resources](applications/water-resources/index.md)**
+
+    Capacity-limited flow allocation and the WSIMOD urban water cycle. Reads WSIMOD configurations.
+
+-   **[Electrical circuits](applications/electrical/index.md)**
+
+    DC, transient and AC circuits and power flow. Reads Modelica and MATPOWER files.
+
+</div>
+
+See the [chooser](applications/index.md) for the reference tool, file formats and maturity of
+each, and [File formats](reference/formats.md) for what each reader accepts and refuses.
 
 ## What it gives you
 
 | | |
 |---|---|
-| **One topology layer** | A typed multigraph with incidence, gradient and cycle-basis operators, boundary/interior selectors, spanning forests and sign-aware upwind/downwind indexing. Edges carry a `kind`, so one network holds several physical systems at once. |
-| **Four ways to determine an edge flow** | Solve for a potential (Newton on a nodal conservation residual); prescribe the flow from a driver; compute it from a closure; or clip a requested flow against arc capacity and receiver headroom. Most network tools support exactly one of these. |
-| **Composable physics layers** | Kirchhoff solves, multi-species and heat transport, reactions, and capacity-limited allocation — several of them on one network, stepped together under either of two coupling schemes. |
-| **Matvec-free solvers** | A `LinearOperator` contract with dense, graph-Laplacian and advection implementations; Newton with per-instance convergence; an implicit-function adjoint so gradients cost one linear solve rather than an unrolled tape. |
-| **Batching over instances** | Every solve is batched. A thousand building variants, or one network under a thousand weather realisations, is one call. |
-| **Verified by code-to-code comparison** | Each application is compared against a reference implementation for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD, the Modelica Standard Library and pandapower — with the tolerances and measured errors written down. |
+| **One topology layer** | A typed multigraph with incidence, gradient and cycle-basis operators. Edges carry a `kind`, so one network holds several physical systems at once. |
+| **Four ways to determine an edge flow** | Solve for a potential, prescribe the flow from a driver, compute it from a closure, or clip a requested flow against capacity. See [the four modes](concepts/four-modes.md). |
+| **Composable physics layers** | Kirchhoff solves, transport, reactions and allocation on one network, stepped together. |
+| **Batching** | Every solve is batched: a thousand variants, or one network under a thousand weather realisations, is one call. |
+| **Exact gradients** | An implicit-function adjoint gives gradients for the cost of one linear solve, not an unrolled tape. |
+| **Compared with reference tools** | Code-to-code comparisons with CONTAM, SWMM, EPANET, WSIMOD, the Modelica libraries and pandapower, with tolerances and measured errors written down. The street application is compared with MUNICH's formulas and SIRANE's results and is only partly verified; its page says where. |
 
-## Applications
-
-noodl physics is one generic solver for networks whose edges carry a flow and whose nodes conserve it.
-The applications are physical systems modelled with that solver, each a thin layer of domain
-physics over the shared core:
-
-| Application | Physical system | Flow determination | Entry point |
-|---|---|---|---|
-| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | Kirchhoff: Newton on zone pressure | `build_model` |
-| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
-| [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
-| [Flow allocation](applications/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| [Electrical circuits](applications/electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
-| [Coupling](applications/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
-
-## Reading model files
-
-A model can be built directly in Python or, where a reader exists, read from a file in an
-established exchange format. A model read from a file can be batched, differentiated and coupled
-exactly like one built by hand.
-
-| Format | Reader | What it describes | Produces a model for |
-|---|---|---|---|
-| [CONTAM](formats/contam.md) `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow, contaminants and occupants; weather | [Building physics](applications/building_physics.md) |
-| [Modelica Buildings Library](formats/modelica.md#buildings-library-airflow) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](applications/building_physics.md) |
-| [SWMM](formats/swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](applications/sewer.md) |
-| [EPANET](formats/epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](applications/water.md) |
-| [Modelica circuits](formats/modelica.md#electrical-circuits) (JSON + CSV export) | `read_modelica_circuit` | Lumped circuits from the Modelica Standard Library and Buildings Library | [Electrical circuits](applications/electrical.md) |
-| [MATPOWER](formats/matpower.md) `.m` | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | [Electrical power flow](applications/electrical.md#power-flow) |
-
-See [File formats](formats/index.md) for what each reader accepts and refuses.
-
-## Where to go next
-
-- **[Installation](installation.md)** — pip, the optional extras, and what each one buys you.
-- **[Quick start](quickstart.md)** — a working two-node model in fifteen lines, then a batched one.
-- **[Concepts](concepts/index.md)** — how the framework fits together: networks, constitutive laws, layers, solvers, differentiability.
-- **[Using noodl](usage.md)** — the one way every model is set up, checked, run and read, whatever its physics.
-- **[Applications](applications/index.md)** — the eight worked systems.
-- **[Catalogue](catalogue/core.md)** — every type each application offers: what it does and how to call it.
-- **[API reference](api.md)** — generated from the docstrings.
-- **[Theory](theory.md)** — the background: Tellegen's theorem, port-Hamiltonian systems, differentiable physics, and the literature each application builds on.
-
-## The name
-
-*noodl* stands for **N**etwork-**O**riented **O**pen **D**ifferentiable **L**ibrary; *physics*
-says what it is for. The package is installed as `noodl-physics` and imported as `noodl`. The
-mark is a single continuous pipe between two nodes — flow through a network, drawn in one
-stroke.
-
-## Credits and licence
-
-The topology layer is built on PyTorch, and the physics is implemented as nodal state-space
-modules with storage at nodes, typed edges, and batching over instances.
-
-Copyright (c) 2026, Maarten van Reeuwijk, John Craske and Imperial College London. Licensed under the BSD 3-Clause License; see `LICENSE`.
+![The noodl physics model stack: a network, then constitutive laws, heads and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)

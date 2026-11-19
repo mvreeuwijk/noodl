@@ -44,7 +44,8 @@ class WallMass:
     layer. A NEGATIVE `ua` makes the conduction term `A_c diag(g) A_c^T` indefinite instead of
     positive semi-definite, so the heat layer's operator is anti-diffusive: heat flows UP the
     temperature gradient and a wall node can overshoot both of its neighbours, breaking the
-    maximum principle `docs/theory.md` section 7 claims for the layer -- and every solve still
+    maximum principle `docs/applications/building/physics.md` (the conduction paragraph) claims
+    for the layer -- and every solve still
     reports success, because nothing downstream ever looks at the sign. A ZERO conductance is
     refused with it: it is a wall that conducts nothing, leaving the wall node with no
     conduction path to the rest of the network.

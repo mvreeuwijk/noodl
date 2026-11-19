@@ -721,7 +721,7 @@ class WaterNetwork:
 
 
 def twoloop() -> WaterNetwork:
-    """The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`).
+    """The two-loop example network, in SI units.
 
     One reservoir `R1` at 50 m, six junctions at elevation 0 with constant demands 5, 8, 6,
     10, 7 and 9 L/s, and eight Hazen-Williams pipes (C = 130) forming exactly two
@@ -1445,7 +1445,7 @@ def _pump_kind(net: WaterNetwork, pump: Pump) -> str:
 def power_curve(points) -> tuple[float, float, float]:
     """`(h0, r, n)` of EPANET 2.2's power-function pump curve ``h = h0 - r q^n`` through
     `points` (`(flow, head)` pairs): one point, or three with the first at zero flow
-    (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`).
+   .
 
     One point ``(q1, h1)``: EPANET adds the points ``(0, 1.33334 h1)`` and ``(2 q1, 0)``
     and fits the three (`three_point_curve`, whose exponent is 1.99998). Three points
@@ -1695,9 +1695,9 @@ def _setting_tolerance(link, head_scale: float) -> float:
 def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
                 step: float) -> tuple[State, Tensor]:
     """`(state, changed)`: `state` after the network's `[RULES]` are tested on it at `time` (s
-    since the start) and the actions that stand are taken (EPANET 2.2, `rules.c`,
-    `checkrules`; `evaluate_rules`, `take_actions`); `changed` says per instance whether any
-    action was TAKEN, EPANET's action count (`takeactions`), which asks for a new solve. It is
+    since the start) and the actions that stand are taken (EPANET 2.2's rule logic); `changed`
+    says per instance whether any
+    action was TAKEN, EPANET's action count, which asks for a new solve. It is
     not movement of the carried values: a pump the solver shut at its shut-off head is closed
     to `STATUS IS OPEN`, which is then taken (and `changed`) on every check while the pump
     stays shut, though the carried status is OPEN throughout. `water_run` follows
@@ -1935,8 +1935,8 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
 def pattern_factor(net, pattern: str | None, time: float) -> float:
     """The multiplier of `pattern` (a `net.patterns` name; `None` is the constant 1) at
     `time` s since the start: EPANET's `F[p mod length]` with the pattern period
-    `p = (t + Pstart) / Pstep` in whole seconds (`hydraul.c`, `demands`; `net.pattern_start`,
-    `net.pattern_timestep`)."""
+    `p = (t + Pstart) / Pstep` in whole seconds
+    (`net.pattern_start`, `net.pattern_timestep`)."""
     if pattern is None:
         return 1.0
     if pattern not in net.patterns:

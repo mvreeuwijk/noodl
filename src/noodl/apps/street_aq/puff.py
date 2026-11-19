@@ -24,8 +24,8 @@ steady limit of a continuous source is the steady kernel itself for any `dt`. Un
 moments `sxz`, `sx2_shear` (`advance`, `_evaluate`; design Sect. 4.7).
 
 "design Sect. N" below refers to the sections of the design note
-`docs/design/street_puffs.md`; the user's account is the section "Unsteady above-roof
-transport (puffs)" of `docs/applications/street_aq.md`.
+`docs/applications/street/puffs.md`; the user's account is the section "Unsteady above-roof
+transport (puffs)" of `docs/applications/street/index.md`.
 """
 
 from __future__ import annotations

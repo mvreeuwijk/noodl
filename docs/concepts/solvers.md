@@ -2,29 +2,18 @@
 
 Underneath every layer is the same stack: a **linear operator** that knows how to apply itself
 but need not store itself, a **Newton** iteration built on it, and a **selection** rule that
-picks a linear backend on measured evidence.
+picks a linear backend on measured evidence. How to choose a backend explicitly is in the [solver guide](../guide/solvers.md).
 
 ## The `LinearOperator` contract
 
 Operators are matvec-free. An operator must apply itself; everything else is optional and
 advertised:
 
-```python
-class LinearOperator(Protocol):
-    shape: tuple[int, ...]
-    dtype: torch.dtype
-    device: torch.device
-    symmetric: bool
-
-    def matvec(self, x: Tensor) -> Tensor: ...
-    def rmatvec(self, x: Tensor) -> Tensor: ...
-    def diagonal(self) -> Tensor: ...              # for Jacobi preconditioning
-    def assemble(self) -> Tensor | None: ...       # dense form, if it has one
-    def spd_certificate(self) -> Tensor | None: ...
-```
-
-An operator may additionally implement `assemble_sparse() -> (row, col, values)` — the
-`SparseAssembling` protocol — which is what unlocks the sparse-direct backend.
+An operator carries its shape, dtype, device and whether it is symmetric, and applies itself
+(`matvec`, and `rmatvec` for the transpose). Optionally it gives its diagonal, for Jacobi
+preconditioning, a dense form, an SPD certificate, and sparse triplets (`assemble_sparse`),
+which is what unlocks the sparse-direct backend. The full protocol is in the
+[API reference](../reference/api/index.md).
 
 Four implementations ship:
 
@@ -64,7 +53,7 @@ network, a bare "newton: did not converge" is not enough to find the culprit.
 
 ## `solve`: the `auto` table
 
-```python
+```py
 from noodl.solvers.select import solve
 
 result = solve(op, b, method="auto", rtol=1e-10, on_failure="raise")
@@ -88,26 +77,18 @@ refusal — `auto` is a promise to choose a backend that works.
 
 ### Why that default, and why the batch threshold
 
-Measured on the reference composed model (1028 unknowns, ~5300 nonzeros, float64, 14 threads,
-median of 3 warm runs):
-
-| Pass | Ensemble | PCG | sparse-direct | |
-|---|---|---|---|---|
-| forward | 1 | 128.4 ms | 28.0 ms | 4.59x faster |
-| forward | 100 | 2399 ms | 2182 ms | a tie |
-| forward | 1000 | 29489 ms | 19263 ms | 1.53x faster |
-| backward | 1 | 44.9 ms | 13.8 ms | 3.25x faster |
-| backward | 100 | 1741 ms | 476 ms | 3.66x faster |
-
-PCG needed 168–180 iterations per Newton step at this conditioning; the factorisation needs one.
-But SuperLU is driven by a per-instance Python loop whose cost is *linear* in the ensemble,
-while PCG's batched arithmetic is sub-linear — hence the threshold at 32 rather than an
-unconditional preference. A batched vendor backend would replace the loop, not the algorithm.
+Measured on a composed model of about a thousand unknowns, sparse-direct beat PCG on both the
+forward and the backward pass at an ensemble of one and at an ensemble of a thousand, and the two
+tied at a hundred. PCG needed 168 to 180 iterations per Newton step at this conditioning; the
+factorisation needs one. But SuperLU is driven by a per-instance Python loop whose cost is *linear*
+in the ensemble, while PCG's batched arithmetic is sub-linear, hence the threshold at 32 rather
+than an unconditional preference. A batched vendor backend would replace the loop, not the
+algorithm.
 
 Because the choice depends on runtime predicates a caller cannot otherwise observe — the batch
 size, and whether SciPy is importable at all — `diagnostics` reports `method` (what you asked
 for) and `backend` (what ran) separately. Without that distinction, an installation missing the
-`sparse` extra looks identical to one that has it, at 4.6x the cost.
+`sparse` extra looks identical to one that has it, at several times the cost.
 
 ### Failure
 
@@ -127,7 +108,7 @@ its status and residual, and returns `self` when all converged, so it chains.
 
 ## Newton
 
-```python
+```py
 from noodl.solvers.newton import newton
 
 result = newton(residual, operator, x0, atol=None, rtol=None, max_iter=50,
@@ -176,7 +157,7 @@ starting again from a better one. A `KirchhoffLayer` built with `fallback=` (or 
 given one) climbs a short ladder when, and only when, Newton did not converge, and stops at the
 first rung that does:
 
-```python
+```py
 air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
                      fallback=("linear_guess", "storage_ramp"))
 ```
@@ -209,7 +190,7 @@ air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
   flow can settle nowhere: Net1 in its resistance form, its laws started at zero flow,
   carries the 52 m between its reservoir and its tank over the pipes' `RQtol` floor, a
   flow of 1e7 m³/s, and the ramp from the warm start converges in 16 iterations instead
-  (`tests/apps/water/test_fallback.py`). Its laws give their own start flows
+  (a regression case of the water application). Its laws give their own start flows
   (`ImplicitLaw.start_flow`, EPANET's first iterate), so the guess is within a factor of
   two of the solution and the first ramp converges. `diagnostics["fallback_iterations"]` then counts
   both ramps' stages. On a layer without flow unknowns the shift keeps the operator

@@ -1,28 +1,28 @@
-"""One WSIMOD day as a noodl integrating closure: :class:`WsimodDay` (spec, The daily driver).
+"""One WSIMOD day as a noodl integrating closure: :class:`WsimodDay`.
 
 ``model.step(state, drivers, dt=86400, t=k * 86400)`` runs day ``k`` of the configuration's
-dates (D16) through the closure, which owns every ``"wsimod.*"`` state key:
+dates through the closure, which owns every ``"wsimod.*"`` state key:
 
 1. the carried stores are loaded from the state into the nodes and arcs, and the per-day
-   values reset (W68, W75);
+   values reset;
 2. day ``k``'s slice of every driver is bound: the parameters ``"wsimod.<Class>.<parameter>"``
-   (rows: the nodes of that configured class, D6), ``"wsimod.<SurfaceClass>.<parameter>"``
+   (rows: the nodes of that configured class), ``"wsimod.<SurfaceClass>.<parameter>"``
    (rows: the surfaces of every ``Land``), the storage family's
    ``"wsimod.<Class>.decays.constant"`` and ``".exponent"`` ``(n, K)`` (all-inert rows for a
-   node without decays, absent in a quantity-only run; X9, X34; the surfaces' under the
+   node without decays, absent in a quantity-only run; the surfaces' under the
    surface class, labelled ``(node, surface)``), ``"wsimod.Arc.capacity"`` and
    ``"wsimod.Arc.preference"`` (rows: every arc), and the forcing series
    ``"wsimod.precipitation"``, ``"wsimod.et0"``, ``"wsimod.temperature"`` ``(..., T,
    n_readers)``, ``"wsimod.flow"`` ``(..., T, n_catchments)`` and ``"wsimod.concentration"``
    ``(..., T, n_catchments, K)``;
-3. the orchestration runs slot by slot, each slot's nodes in configuration order
-   (``model.py:999-1003``), then ``River.distribute`` in the river order (``:1005-1007``);
+3. the orchestration runs slot by slot, each slot's nodes in configuration order, then
+  ``River.distribute`` in the river order;
 4. the day is recorded (:class:`DayRecord`, ``:1063-1170``), at the state it has reached;
-5. ``end_timestep`` runs on every node, then on every arc (``:1172-1176``), and the carried
+5. ``end_timestep`` runs on every node, then on every arc, and the carried
    stores are dumped into the returned state.
 
-The call structure is static (spec, Approach). The closure is built with one tracing day
-(D2): batch shape ``()``, ``torch.no_grad()``, day 0's configured drivers, values discarded.
+The call structure is static. The closure is built with one tracing day: batch shape ``()``,
+``torch.no_grad()``, day 0's configured drivers, values discarded.
 It fixes every ``QueueArc``'s request-call labels (``begin_tracing``/``end_tracing``) and so
 its rows, and the day's whole call sequence (``Ctx.sequence``, which includes every
 distribute-loop site); every later day must repeat it, or the day raises (an internal error).
@@ -30,7 +30,7 @@ distribute-loop site); every later day must repeat it, or the day raises (an int
 State layout (D10; spec, State). Every key has a leading batch shape; the rows are labelled:
 
 - ``"wsimod.storage"`` ``(..., n_tanks, 1+K)``: the nodes in configuration order, each node's
-  tanks in ``dir()`` (alphabetical) order as ``record_all`` walks them (``model.py:1119-1133``),
+  tanks in ``dir()`` (alphabetical) order as ``record_all`` walks them,
   ``(node, attribute)``; a ``Land``'s surfaces follow its tanks as ``(node, "surface:<name>")``.
 - ``"wsimod.active_storage"`` ``(..., n_queue_tanks, 1+K)``: each ``QueueTank``'s
   ``active_storage``, ``(node, attribute)``.
@@ -40,7 +40,7 @@ State layout (D10; spec, State). Every key has a leading batch shape; the rows a
   ``AltQueueArc`` (arc order), one row per travel time ``(arc, i)``, ``i = 0 ... L`` with the
   arc's own ``L``; ``present`` is WSIMOD's key set (W48: a bool, or 0/1 as a float).
 - ``"wsimod.arc_queue"`` ``(..., n_rows, 1+K)``: every ``QueueArc``'s request rows
-  ``(arc, direction, i, j)`` (D1), and ``"wsimod.arc_queue_since"`` ``(..., n_anchors)`` its
+  ``(arc, direction, i, j)``, and ``"wsimod.arc_queue_since"`` ``(..., n_anchors)`` its
   anchors ``(arc, direction)``.
 - ``"wsimod.liquor"`` (every ``WWTW`` and ``FWTW``), ``"wsimod.previous_pulled"`` (``FWTW``)
   and ``"wsimod.treated"`` (``WWTW``), ``(..., n, 1+K)`` by node.
@@ -49,16 +49,16 @@ State layout (D10; spec, State). Every key has a leading batch shape; the rows a
   (extracted from the tank's ``storage`` at the next end of day, ``tanks.py:694``), and the
   decayed mass of the last end of day of each ``Land`` surface, ``(node, "surfaces.<name>")``
   (X35: the attribute path, where ``"wsimod.storage"`` has ``"surface:<name>"``), in the state
-  layout's order (D7). A surface's rows exist when ``nitrite`` is a pollutant: the next day's
-  ``Surface.run`` converts them (``land.py:427-439``).
+  layout's order. A surface's rows exist when ``nitrite`` is a pollutant: the next day's
+  ``Surface.run`` converts them.
 - ``"wsimod.river_temperature_lag"`` and ``"wsimod.river_phosphorus_lag"`` ``(..., n_slots)``:
   the ``lagged_temperatures`` (``degC``) and ``lagged_total_phosphorus`` (``kg``) registers of
-  every ``River`` with biochemistry (``"nitrate"`` a pollutant, D9), ``max_temp_lag + 1`` and
+  every ``River`` with biochemistry (``"nitrate"`` a pollutant), ``max_temp_lag + 1`` and
   ``max_phosphorus_lag + 1`` slots per river, labelled ``(river, i)`` with slot 0 the oldest
-  and zero-padded at the front (X17). They are not water held. A run can start from another
+  and zero-padded at the front. They are not water held. A run can start from another
   run's registers (a warm start); all zeros is WSIMOD's empty lists.
 
-Units (W20): volumes ``m3``, flows and capacities ``m3/d``, additive pollutants ``kg``,
+Units: volumes ``m3``, flows and capacities ``m3/d``, additive pollutants ``kg``,
 non-additive ones by name (``temperature`` ``degC``); never converted.
 """
 
@@ -351,9 +351,9 @@ _SURFACE_FIELDS = {
 
 @dataclass
 class DayRecord:
-    """What one day records (``model.py:1063-1170``), at the state the day reached, before
+    """What one day records, at the state the day reached, before
     ``end_timestep``; every tensor has the day's batch shape in front. ``WsimodDay`` completes
-    the record after ``end_timestep`` (D14): ``storage_end``, and ``terms``, ``dropped``,
+    the record after ``end_timestep``: ``storage_end``, and ``terms``, ``dropped``,
     ``dropped_arcs`` and ``events`` again, so what ``end_timestep`` records counts in its day.
 
     - ``arc_flow`` ``(..., n_arcs)``: each arc's ``vqip_out`` volume (``m3/d``);
@@ -364,7 +364,7 @@ class DayRecord:
     - ``surface``: ``{field: (..., n_surfaces)}`` for the surfaces of the nodes under the type
       key ``"Land"`` (``WsimodDay.surface_names``), NaN where WSIMOD records no such field (an
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
-    - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
+    - ``terms``: the mass-balance terms ``"<Class>.<term>"``, VQIPs ``(..., 1+K)``;
       ``parts`` the breakdown of the Land's running terms, ``{"in"|"out": {name: VQIP}}``,
       which is not part of the balance;
       ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``dropped_arcs`` the part
@@ -373,14 +373,14 @@ class DayRecord:
       after ``end_timestep``, all ``(..., 1 + K_additive)`` (the volume and the additive
       columns). ``storage_end`` is ``None`` until the record is completed: a consumer at the
       ``run_days`` yield point must not read it. ``wsimod_run`` assembles the balance from
-      them, over the window ``storage_start`` to ``storage_end`` (X8): the next day's
+      them, over the window ``storage_start`` to ``storage_end``: the next day's
       ``storage_start`` is this day's ``storage_end``. A ``QueueTank`` push below
-      ``FLOAT_ACCURACY`` stays in the tank's storage, so it is not in ``dropped`` (W49); water
+      ``FLOAT_ACCURACY`` stays in the tank's storage, so it is not in ``dropped``; water
       pushed into a ``WWTW`` after its ``calculate_discharge`` is the term
-      ``"WWTW.unprocessed_input"`` (W69).
-    - ``events``: ``{condition: (..., n_nodes) bool}`` (D13), ``(..., n_arcs)`` for an event
-      recorded at an arc (``"decay_arc_order_unknown"``, D21); ``maxiter``: ``{(node, method,
-      call index): (...) bool}``; ``decisions``: the branch records (D12) when
+      ``"WWTW.unprocessed_input"``.
+    - ``events``: ``{condition: (..., n_nodes) bool}``, ``(..., n_arcs)`` for an event
+      recorded at an arc (``"decay_arc_order_unknown"``); ``maxiter``: ``{(node, method,
+      call index): (...) bool}``; ``decisions``: the branch records when
       ``WsimodDay.record_decisions``, else ``None``.
     """
 
@@ -444,14 +444,14 @@ def _f64(x) -> Tensor:
 
 
 class WsimodDay:
-    """WSIMOD 0.8.1's daily step as an integrating closure (spec, The daily driver).
+    """WSIMOD 0.8.1's daily step as an integrating closure.
 
     ``WsimodDay(network, pollutants=...)`` refuses what cannot run (:func:`check_network`),
     builds the :class:`Engine`, the river order and the orchestration plan, and runs the
-    tracing day (D2). ``pollutants=False`` runs on the volumes alone (``K = 0``; spec W10).
+    tracing day. ``pollutants=False`` runs on the volumes alone (``K = 0``).
 
     Called by ``Model.step`` with a ``StepContext``: ``t`` must be a whole number of days
-    inside the configuration's dates and ``dt`` one day (D16), each refused by name
+    inside the configuration's dates and ``dt`` one day, each refused by name
     otherwise; called with ``ctx=None`` (a query) it returns nothing. A driver key left out of
     the drivers takes the configured value (:meth:`driver_template`). :meth:`run_days` steps
     the same day without a ``Model`` and yields each day's context at the record point.
@@ -526,9 +526,9 @@ class WsimodDay:
 
     def _recorded_tank(self, node: str, attribute: str) -> bool:
         """Whether ``record_all`` reports the tank: it lists ``Tank``, ``QueueTank`` and
-        ``ResidenceTank`` by their exact class (``model.py:1123``), so a ``DecayTank`` or a
+        ``ResidenceTank`` by their exact class, so a ``DecayTank`` or a
         ``DecayQueueTank`` drops out of the ``tank_*`` results while its storage stays in the
-        state (X40)."""
+        state."""
         tank = self.engine.nodes[node]
         for part in attribute.split("."):
             tank = getattr(tank, part)
@@ -756,7 +756,7 @@ class WsimodDay:
         return drivers
 
     def driver_template(self) -> dict[str, Tensor]:
-        """Every driver at its configured value (D6), unbatched."""
+        """Every driver at its configured value, unbatched."""
         return {key: d.template.clone() for key, d in self._drivers.items()}
 
     @property
@@ -918,16 +918,16 @@ class WsimodDay:
         )
 
     def state_labels(self, key: str) -> list:
-        """The row labels of the state key ``key`` (D10)."""
+        """The row labels of the state key ``key``."""
         return list(self._labels[key])
 
     def _rank(self, key: str) -> int:
         return 1 if key in _FLAT_KEYS else 2
 
     def initial_state(self) -> dict[str, Tensor]:
-        """The configuration's values (spec, Inputs): every tank's ``initial_storage``,
-        ``QueueTank`` ``active_storage = storage`` (``tanks.py:478``), registers holding keys 0
-        and 1 only (``arcs.py:567``), empty request rows with ``since = n``, and empty liquor,
+        """The configuration's values: every tank's ``initial_storage``,
+        ``QueueTank`` ``active_storage = storage``, registers holding keys 0
+        and 1 only, empty request rows with ``since = n``, and empty liquor,
         previous pulled and treated water."""
         parts: dict[str, list[Tensor]] = {key: [] for key in STATE_KEYS}
         for slot in self._slots:
@@ -996,8 +996,8 @@ class WsimodDay:
         return torch.broadcast_shapes(*shapes) if shapes else torch.Size(())
 
     def _reset_day(self, shape: torch.Size) -> None:
-        """The per-day values as WSIMOD resets them (W68, W75), and every arc's
-        accumulators (``arcs.py:259-265``), at the day's batch shape: every store a class
+        """The per-day values as WSIMOD resets them, and every arc's
+        accumulators, at the day's batch shape: every store a class
         writes under a batched mask is batched before the day starts."""
         for name, node in self.engine.nodes.items():
             fresh = {
@@ -1136,8 +1136,8 @@ class WsimodDay:
     def _trace_sequence(self) -> None:
         """The tracing day again, from the initial state with every ``J`` fixed (a
         ``QueueArc``'s ``update_queue`` visits all its rows, so its calls depend on ``J``): it
-        records the day's call sequence (``Ctx.sequence``), which every later day must repeat
-        (D2), and its distribute loops (``loop_sites``). Its values are discarded too."""
+        records the day's call sequence (``Ctx.sequence``), which every later day must repeat,
+        and its distribute loops (``loop_sites``). Its values are discarded too."""
         with torch.no_grad():
             generator = self._day(self.initial_state(), self.driver_template(), 0)
             ctx = next(generator)
@@ -1238,7 +1238,7 @@ class WsimodDay:
         from ``state`` (default :meth:`initial_state`) with ``drivers`` (default the configured
         ones), yielding ``(day, ctx, engine)`` after each day's orchestration, record and river
         order, before ``end_timestep``; the day's :class:`DayRecord` is ``last_record``, whose
-        ``storage_end`` is ``None`` until the generator resumes and completes it (D14). The
+        ``storage_end`` is ``None`` until the generator resumes and completes it. The
         state after the last day is ``last_state``."""
         state = dict(self.initial_state() if state is None else state)
         drivers = dict(self.driver_template() if drivers is None else drivers)
@@ -1261,7 +1261,7 @@ class WsimodDay:
         """The water held in the carried stores, ``(..., 1 + K_additive)``: every carried store
         but a ``QueueTank``'s active storage and queue (inside its storage), an ``FWTW``'s
         liquor (pushed on the day it is made, ``wtw.py:603-605``), its ``previous_pulled`` (the
-        quality of yesterday's pulled water, not water held, W75) and a ``QueueTank``'s
+        quality of yesterday's pulled water, not water held) and a ``QueueTank``'s
         register (inside its storage), added row by row in the state's order. ``stores`` caches
         ``node.stores()`` by element ``id``."""
         p = self.p
@@ -1351,7 +1351,7 @@ class WsimodDay:
 
     def event_columns(self, condition: str) -> list[str]:
         """The elements an event's columns stand for: the nodes, or the arcs for an event
-        recorded at an arc (``arcs.ARC_EVENTS``, D21)."""
+        recorded at an arc (``arcs.ARC_EVENTS``)."""
         return self.arc_names if condition in ARC_EVENTS else self.node_names
 
     def _events(self, ctx: Ctx) -> dict[str, Tensor]:
@@ -1372,15 +1372,15 @@ class WsimodDay:
     def _finish_record(self, ctx: Ctx, shape: torch.Size) -> None:
         """D14: complete ``last_record`` after ``end_timestep``, on the same object (``wsimod_run``
         holds it from the yield point). ``storage_end`` is the water held now, which the next
-        day loads, so the windows meet (X8). ``terms``, ``dropped``, ``dropped_arcs`` and
-        ``events`` are snapshotted again, so what ``end_timestep`` records counts in this day
-        (D22); it records no decision and no ``maxiter``, and the record keeps those as taken.
-        ``storage_total`` keeps the record point's value (X32).
+        day loads, so the windows meet. ``terms``, ``dropped``, ``dropped_arcs`` and
+        ``events`` are snapshotted again, so what ``end_timestep`` records counts in this day;
+        it records no decision and no ``maxiter``, and the record keeps those as taken.
+        ``storage_total`` keeps the record point's value.
 
         The end-of-day rule (``Engine.end_day``): ``end_timestep`` must not call ``ctx.decide``
         or ``ctx.call``; such a call would be absent from the D2 sequence check, and this
         re-snapshot, which takes no decision and no ``maxiter``, would miss it. Decay caps are
-        evaluated at bind (D5)."""
+        evaluated at bind."""
         record = self.last_record
         record.storage_end = self._held(shape, {})
         record.terms = dict(ctx.terms)

@@ -34,7 +34,7 @@ forward and 3.3x to 3.7x faster backward. The per-instance Python loop is its re
 `_sparse_direct`), which is why the rule DOES carry an ensemble threshold
 (`_SPARSE_DIRECT_MAX_BATCH`) and why a batched vendor backend stays admissible: it would
 replace the loop, not the algorithm. Measurements and how to reproduce them:
-see docs/design/solvers.md#sparse-direct-versus-pcg.
+see docs/project/design/solvers.md#sparse-direct-versus-pcg.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ Tensor = torch.Tensor
 # cross. 32 is the last measured batch at which the factorisation is clearly ahead and 64 is
 # the tie; the whole 32-64 band is within 1.0-1.5x, so choosing 32 rather than 64 costs
 # little. It is a CPU + SciPy measurement at one problem size, and is the thing to re-measure
-# when either changes. Data: see docs/design/solvers.md#the-ensemble-threshold.
+# when either changes. Data: see docs/project/design/solvers.md#the-ensemble-threshold.
 _SPARSE_DIRECT_MAX_BATCH = 32
 
 # Set once, the first time `auto` falls back to PCG for the ONE reason that is an environment
@@ -255,7 +255,7 @@ def transport_solver_kwargs(
     side and are used ONLY to decide whether ``"auto"`` may factorise under grad (hazard 2
     below); no solve reads them here.
 
-    ``"auto"`` (docs/design/solvers.md#transport-solver-choice) resolves to
+    ``"auto"`` (docs/project/design/solvers.md#transport-solver-choice) resolves to
     ``method="sparse_direct"`` when ``batch_size <= _SPARSE_DIRECT_MAX_BATCH`` (the same
     constant ``solve``'s own "auto" uses) and to plain ``gmres`` above it.
     ``gmres_jacobi`` and ``gmres_ilu`` are never chosen by ``auto``: the benchmark found

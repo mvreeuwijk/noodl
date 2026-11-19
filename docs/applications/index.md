@@ -1,104 +1,39 @@
 # Applications
 
-noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
-layer of domain physics (its constitutive laws, heads and closures) over the shared core. Any of them can
-be built directly in Python, as each page shows, or, where a reader exists, read from a model
-file; see [File formats](../formats/index.md). Every application is initialised the same way,
-with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
-[Using noodl](../usage.md). The electrical application has no `initial_drivers`: its
-`build_model` returns every driver, and `initial_state(model, drivers)` solves the consistent
-initial point of the circuit.
+An application is a physical system modelled on the shared core: its constitutive laws, heads
+and closures, usually with a reader for the file format of the tool it reproduces. Each is
+built with `build_model`, initialised by name and run the same way; see the
+[user guide](../guide/workflow.md).
 
-| Application | Physical system | Flow determination | Entry point |
-|---|---|---|---|
-| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | Kirchhoff: Newton on zone pressure | `build_model` |
-| [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
-| [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
-| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| [WSIMOD](wsimod.md) | WSIMOD's urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed; bitwise equal to WSIMOD 0.8.1 | `build_model`, `read_wsimod_config` |
-| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
-| [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
+## Choosing an application
 
-![The four flow-determination modes](../assets/four-modes.svg)
+| Application | Matches | Reads | Maturity | Start |
+|---|---|---|---|---|
+| Building airflow and heat | CONTAM (ContamX), Modelica Buildings Library | CONTAM `.prj`, `.wth`, `.ctm`; Modelica JSON + CSV | Verified on a stated subset | [Building](building/index.md) |
+| Street air quality | MUNICH, SIRANE | MUNICH and SIRANE case files (`read_case`); NetCDF output | Partial | [Street air quality](street/index.md) |
+| Sewers | SWMM 5.2 | SWMM `.inp` | Verified on a stated subset | [Sewers](sewer/index.md) |
+| Water distribution | EPANET 2.2 | EPANET `.inp` | Verified on a stated subset | [Water distribution](water/index.md) |
+| Water resources | WSIMOD 0.8.1 | WSIMOD `config.yml` and CSV forcing | Verified on a stated subset | [Water resources](water-resources/index.md), [limitations](water-resources/limitations.md) |
+| Electrical circuits and power flow | Modelica Standard Library, pandapower | Modelica JSON + CSV; MATPOWER `.m` | Verified on a stated subset | [Electrical](electrical/index.md) |
 
-## Why these eight
+Maturity labels:
 
-They are not a feature list. They are the argument that the factorisation works.
+- **Verified on a stated subset**: compared with the reference tool on the cases and features
+  the application page lists as supported, at a stated tolerance. Anything outside that list is
+  refused by name or marked unsupported.
+- **Partial**: some comparisons pass, others are open or are only regression guards. The
+  application page and the verification page say which.
+- **Experimental**: no reference comparison yet.
 
-Each uses a **different one of the four flow-determination modes**, and between them they cover
-all four:
+The evidence behind each label, with tolerances and measured agreement, is under
+[Verification](../reference/verification/index.md). Verification means agreement with another
+code or a closed form; it is not validation against measurements.
 
-- The **building physics** and **water** applications solve for a potential — pressure in
-  pascals, hydraulic head in metres. Newton on a nodal conservation residual.
-- The **street air quality** application has no potential at all. The along-canyon velocity is
-  a closed-form function of the wind aloft, so a closure computes every flow directly.
-- The **sewer** application's kinematic-wave water side exploits the fact that a tree has an
-  empty cycle space: continuity alone fixes every discharge, in closed form, with no solve. Its
-  dynamic-wave water side is a Kirchhoff layer on head, iterated to SWMM's fixed point, and
-  admits loops and backwater. Its *headspace air* side, on the same graph, is a full Newton
-  Kirchhoff solve.
-- The **flow allocation** application has no potential and no continuity solve — a
-  request, clipped against capacity and headroom.
-- The **WSIMOD** application is a closure too: WSIMOD's own day of push and pull requests,
-  transcribed call for call, so the flows are WSIMOD's rules, bitwise equal to WSIMOD 0.8.1 on its
-  demos and on 36 purpose-built cases, batched and differentiable ([verification](../verification.md)).
-- The **electrical circuits** application solves for a potential, the node voltage, with the
-  currents of ideal sources, inductors and transformers as extra unknowns: the nodal solve the
-  building and water applications use, with the implicit laws' flows added as unknowns.
+## Related
 
-And they share machinery in ways that would be coincidence if the abstraction were wrong. The
-sewer's headspace air layer uses the *same* `Stack` buoyancy term the
-building application uses for room air. The water application's Darcy-Weisbach pipes can be the
-framework's own `Duct` element in volumetric form (`friction="colebrook"`), though by default
-they follow EPANET's own composite friction law. The sewer and water `.inp` readers share one
-tokenizer. The `solve_monotone` root-finder that inverts Manning's equation for sewer depth also
-solves the per-node QP inside the allocation layer's projection mode.
-
-## Verification
-
-Each application page ends with a **Verification** section: code-to-code comparisons against
-established reference models that solve the same equations (CONTAM and ContamX and the Modelica
-Buildings Library for building physics, MUNICH for street air quality, SWMM through pyswmm for
-sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation and for the WSIMOD application, the
-Modelica Standard Library and pandapower for electrical circuits), plus
-checks against analytical solutions, conservation identities and finite-difference gradients.
-
-A comparison of this kind runs noodl physics and a reference model on the same input and compares the
-outputs at a stated tolerance. It shows that noodl physics solves the same model as the reference; it is
-not evidence that the model describes reality. Where the reference model has not been run, as
-for MUNICH on this release, the check is instead against the formulas and published results the
-reference documents, and the application page says so. **Validation**, comparison against
-measurements, is not claimed by any application yet.
-
-Each page states its comparisons with an explicit tolerance and the value actually measured. The
-pages are equally explicit about what a comparison *does not* show, and those caveats are
-sometimes the most important thing on the page:
-
-- The [flow allocation](allocation.md#where-the-layer-differs-from-wsimod) page
-  explains that WSIMOD's shipped demos never exercise a binding clip, how scripted WSIMOD cases
-  cover those branches instead, and where the layer's semantics differ from WSIMOD's: sharing
-  one node's headroom, and bottlenecks behind a pass-through node.
-- The [street air quality](street_aq.md#limitations-and-caveats) page records that the published
-  MUNICH idealised case cannot be reproduced absolutely, because its geometry was never
-  published, and states the size of the remaining difference.
-- The [sewer](sewer.md#coefficient-provenance) page marks each coefficient as verified,
-  calibrated, or unverified, naming the source.
-
-Where a reference model and noodl physics disagree, the pages say which is more likely to be right and
-why. Several of the remaining discrepancies are the *reference*'s approximation — SWMM's
-51-point circular-geometry lookup table, EPANET's float32 binary output — not noodl physics'.
-
-## Starting a new application
-
-The eight are also a template. A new application is:
-
-1. A **network builder** — domain dataclasses plus a function that turns them into a `Network`
-   with the right edge kinds and attributes.
-2. **Constitutive laws and heads** for whatever laws are not already in the core.
-3. **Closures** for anything that is a function of solved state.
-4. A **file reader**, if your field has a standard exchange format.
-5. A **`build_*_model`** function returning `(model, state, drivers)`, and a `*_steady` helper if
-   reactions mean `Model.steady` is not enough.
-
-Every application follows exactly that shape, which makes them readable as worked examples.
+- Each application uses the flow-determination modes that suit its physics: see
+  [the four modes](../concepts/four-modes.md).
+- Two models can exchange values at a shared boundary: see [Coupling](../guide/coupling.md).
+- Every file reader and what it accepts: [File formats](../reference/formats.md).
+- Every type an application offers: the [catalogue](../reference/catalogue/index.md).
+- Adding a new application: [Extending noodl](../project/extending/index.md).

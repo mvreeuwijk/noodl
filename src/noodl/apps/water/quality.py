@@ -86,8 +86,8 @@ def flow_volume_scale(flow_units: str | None) -> float:
 
 @dataclass
 class QualityMassBalance:
-    """EPANET's water-quality mass balance (`MassBalance`, `quality.c`; reported by
-    `writemassbalance`, `report.c`): the mass `initial` in the network's pipes and tanks,
+    """EPANET's water-quality mass balance for a run: the mass `initial` in the network's pipes
+    and tanks,
     the `inflow` the sources and reservoirs added, the `outflow` the demands and the
     reservoirs' inflow removed, the mass `reacted` away (negative when a reaction made
     mass), the `final` mass stored, and the `ratio` of what left to what came in
@@ -108,7 +108,7 @@ class QualityMassBalance:
 
 
 def quality_step(net, hydraulic_step: int) -> int:
-    """The quality time step (s) of `net` (`input1.c`, `adjustdata`): the file's `QUALITY
+    """The quality time step (s) of `net`: the file's `QUALITY
     TIMESTEP` (`net.quality.quality_timestep`), else a tenth of the hydraulic step in whole
     seconds (`Hstep / 10`, the step after its pattern and report caps), and never longer
     than the hydraulic step. A step of 0 s is refused by name: EPANET's `nextqual` would
@@ -126,8 +126,8 @@ def quality_step(net, hydraulic_step: int) -> int:
 
 
 class SegmentPool:
-    """EPANET's segment memory (`mempool.c`; `qualroute.c`, `addseg`, `reversesegs`, the
-    `FreeSeg` list): every segment's concentration `c` and volume `v` in two 1-D float64
+    """EPANET's segment memory for water-quality routing: every segment's concentration `c` and
+    volume `v` in two 1-D float64
     tensors (their capacity doubles as segments are allocated; slots past the allocated
     ones are unused), each segment's `prev` (the segment behind it, upstream; -1 is NULL)
     and `owner` chain, and per chain its `first` (leading, downstream: `FirstSeg`) and
@@ -263,7 +263,7 @@ def _adjacency(n_nodes: int, ends: Sequence[tuple[int, int]]) -> list[list[tuple
 
 def sort_nodes(n_nodes: int, ends: Sequence[tuple[int, int]], direction: Sequence[int]
                ) -> tuple[list[int], int]:
-    """`sortnodes` and `selectnonstacknode` (`qualroute.c`): the nodes `0 .. n_nodes - 1`
+    """The nodes `0 .. n_nodes - 1`
     (EPANET's indices less one) from upstream to downstream along the links `ends` (`(N1,
     N2)` per link, EPANET's link order) whose flow `direction` is +1, -1 or 0 (stagnant
     links are left out), and the number of cycles broken. The nodes without inflow are

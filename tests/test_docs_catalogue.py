@@ -1,4 +1,4 @@
-"""The component catalogue (`docs/catalogue/`) cannot fall behind the code.
+"""The component catalogue (`docs/reference/catalogue/`) cannot fall behind the code.
 
 Adding or changing a public class, function or option means updating its docstring and
 re-running `python scripts/gen_catalogue.py`; these tests fail until both are done.
@@ -24,13 +24,21 @@ def test_every_public_name_and_option_is_documented():
     )
 
 
+def test_every_public_class_and_function_has_an_api_entry():
+    assert gen.unlinked() == [], (
+        "public names the API pages (docs/reference/api) do not render -- add them to the "
+        "`members` of a `:::` directive there"
+    )
+
+
 def test_the_committed_catalogue_matches_the_code():
     stale = [
         path.name for path, text in gen.generate().items()
         if not path.exists() or path.read_text(encoding="utf-8") != text
     ]
     assert stale == [], (
-        f"docs/catalogue is out of date for {stale}; run `python scripts/gen_catalogue.py`"
+        f"docs/reference/catalogue is out of date for {stale}; "
+        "run `python scripts/gen_catalogue.py`"
     )
 
 
@@ -108,8 +116,9 @@ def test_generator_signatures_roles_and_summaries():
     from noodl.refs import Field
     from noodl.validation import SetupReport
 
-    assert "*args" not in gen._signature("Field", Field)
-    assert gen._signature("HeadTerm", HeadTerm) == "HeadTerm(...)"
+    anchors = gen.api_anchors()
+    assert gen._api_link(Field, anchors) == "../api/model.md#noodl.refs.Field"
+    assert gen._api_link(HeadTerm, anchors) == "../api/laws.md#noodl.heads.HeadTerm"
     assert gen._role("SetupReport", SetupReport) == "class"
     assert gen._role("StepContext", StepContext) == "class"
     assert gen._role("ConstitutiveLaw", ConstitutiveLaw) == "base"

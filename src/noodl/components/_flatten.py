@@ -1,4 +1,4 @@
-"""Flattening a component tree into one `Network` (docs/concepts/components.md).
+"""Flattening a component tree into one `Network` (docs/guide/components.md).
 
 One walk over the tree, in this order: allocate a slot for every node, terminal and inner
 node; merge connected ports (union-find); check each merged set (at most one real node);

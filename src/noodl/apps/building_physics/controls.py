@@ -14,7 +14,7 @@ holds it (`held`) over the step's passes and sub-steps. A flow or pressure senso
 last airflow solve, and 0 before the first. A reading of a driver (a prescribed temperature,
 an ambient mass fraction) gives the value the previous step used. A block whose input comes
 later in the order reads that input's previous value; before the first evaluation it reads
-0, or a constant's value (ContamX presets its constant nodes, measured). The network
+0, or a constant's value (ContamX presets its constant nodes). The network
 carries its block outputs, its blocks' memory and whether it has been evaluated in the
 state, under `"<name>.outputs"`, `"<name>.memory"` and `"<name>.evaluated"` (1 once
 evaluated, per batch member). The memory holds what a block keeps between evaluations: a
@@ -201,7 +201,7 @@ class Block:
 
 class Constant(Block):
     """A constant value; a block earlier in the order reads it before its first evaluation
-    too (ContamX presets its constant nodes, measured)."""
+    too (ContamX presets its constant nodes)."""
 
     def __init__(self, value: float | Tensor, *, name: str = "") -> None:
         self.value, self.name = _parameter(value), name

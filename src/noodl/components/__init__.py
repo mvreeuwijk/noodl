@@ -1,5 +1,5 @@
 """Components: subnetworks with ports that nest, connect by merging ports, and flatten to
-one `Network`. See docs/concepts/components.md."""
+one `Network`. See docs/guide/components.md."""
 
 from noodl.components import _registry
 from noodl.components._component import Component, ComponentError, OuterRef, PortRef

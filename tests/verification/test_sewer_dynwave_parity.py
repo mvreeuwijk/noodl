@@ -2,7 +2,7 @@
 
 SWMM is run with MAX_TRIALS 500 and a HEAD_TOLERANCE of 1e-12 m (in the fixtures), so each of
 its routing steps is converged to the fixed point of its own trial equations; noodl solves the
-same equations (docs/applications/sewer.md, "Dynamic wave") to `ITERATE_TOL`. The comparison
+same equations (docs/applications/sewer/physics-dynamic-wave.md) to `ITERATE_TOL`. The comparison
 is only meaningful if SWMM converged on EVERY step, which each test asserts from SWMM's report
 ("% of Steps Not Converging" in its "Routing Time Step Summary").
 
@@ -334,7 +334,8 @@ def test_ramp_down_matches_swmm_until_swmm_stops_converging(tmp_path):
     outfall) reaches the switch of its normal-flow slope test: its limited flow is Manning's normal
     flow at J4's depth, at which the outfall's own depth (set from that flow) is J4's depth again,
     up to the ~1e-5 m interpolation mismatch of SWMM's tables, so neither side of the test need be
-    consistent (docs/applications/sewer.md, "Dynamic wave": the normal-flow slope switch). SWMM's
+    consistent (docs/applications/sewer/physics-dynamic-wave.md, "Normal-flow slope switch").
+    SWMM's
     last trial is then wherever its alternating trials stopped, J4 within ~6e-4 m of the outfall
     depth on either side, and later steps start from that state, so no later step is a fixed-point
     comparison: steps 145 onwards are excluded from the targets. They are asserted only to the scale

@@ -110,7 +110,7 @@ class FanCurve(ConstitutiveLaw):
 
 class AffinityFan(ConstitutiveLaw):
     """A fan curve run at another speed and air density, by the fan laws (ContamX's
-    performance-curve fan, measured against ContamX 3.4.1.7):
+    performance-curve fan):
 
         F = multiplier * s * r * F0(dp / (s^2 r)),    r = rho_up / rho_ref
 

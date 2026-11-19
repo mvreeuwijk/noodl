@@ -6,7 +6,7 @@ and interior selectors — and caches them, so building a layer costs the deriva
 
 ## Building one
 
-```python
+```py
 import torch
 from noodl.topology import Network
 
@@ -21,7 +21,7 @@ geometry to its elements: `orifice_law_from_edges` reads `Cd` and `area` off eve
 a kind, and `thermal_layer` reads `volume` off every node. Attributes are retrieved in bulk and
 as tensors, never one at a time:
 
-```python
+```py
 volumes = net.node_attr("volume", default=0.0)     # (n,) tensor, full node order
 areas = net.edge_attr("area", kind="airpath")      # (b_kind,) tensor, kind order
 ```
@@ -33,7 +33,7 @@ areas = net.edge_attr("area", kind="airpath")      # (b_kind,) tensor, kind orde
 Every edge has a `kind`, and every operator takes an optional `kind` argument that restricts it
 to those edges. This is the mechanism that lets one network hold several physical systems:
 
-```python
+```py
 net.add_edge("room", "ambient", kind="airpath")   # air can flow
 net.add_edge("room", "wall", kind="wall")          # heat conducts, air does not
 ```
@@ -43,27 +43,28 @@ advecting on `"airpath"` and conducting on `"wall"` sees both, in separate block
 application uses this to put water, headspace air and two quality layers on one graph; the
 street application uses it to separate `route`, `vent` and `exchange` edges.
 
-```python
+```py
 net.edge_kinds()            # ['airpath', 'wall']
 net.edge_index("airpath")   # positions of that kind's edges in full edge order
 ```
 
 ## The operators
 
-These are the graph-theoretic core. All are cached, all take a `kind`, and all move with
-`.to(device, dtype)`.
+The network derives and caches the graph-theoretic operators a layer needs, each restricted to an
+edge kind if you ask, and each moving with `.to(device, dtype)`:
 
-| Method | Returns |
-|---|---|
-| `incidence(kind=None)` | $A$, the $n \times b$ signed node-edge incidence matrix. |
-| `gradient(kind=None)` | $A^\top$, mapping nodal potentials to potential differences along edges. |
-| `difference(kind=None)` | The same difference operator in the form layers consume. |
-| `cycle_basis(kind=None)` | A basis for the cycle space: $n_{\text{cycles}} = b - n + n_{\text{islands}}$. |
-| `spanning_forest(kind=None)` | Tree and chord edge indices — a tree has an empty cycle space, which is what makes the sewer's flow solve closed-form. |
-| `endpoints(kind=None)` | `(source_idx, target_idx)` per edge, for matvec-free assembly. |
-| `accumulate(w, kind=None)` | Scatter-adds an edge quantity to its endpoints with sign — nodal balance, without ever forming $A$. |
-| `source_selector` / `target_selector` | Selection matrices for the two endpoints. |
-| `upwind(q, kind=None)` / `downwind(q, kind=None)` | Sign-aware indexing: which endpoint is upstream given the flow direction. This is what makes advection work on a graph whose edge orientations are arbitrary. |
+- the signed node-edge incidence $A$ ($n \times b$) and its transpose, the gradient $A^\top$, which
+  maps nodal potentials to potential differences along edges;
+- a basis for the cycle space, with $n_{\text{cycles}} = b - n + n_{\text{islands}}$;
+- a spanning forest, as tree and chord edge indices. A tree has an empty cycle space, which is
+  what makes the sewer's flow solve closed-form;
+- `endpoints`, the source and target index of every edge, and `accumulate`, which scatter-adds an
+  edge quantity to its endpoints with sign: nodal balance without ever forming $A$;
+- `upwind` and `downwind`, sign-aware indexing that says which endpoint is upstream given the
+  flow direction. This is what makes advection work on a graph whose edge orientations are
+  arbitrary.
+
+The signatures are in the [API reference](../reference/api/index.md).
 
 The `accumulate` / `endpoints` pair matters more than it looks. Layers assemble their operators
 through them rather than through a dense $A$, which is why a large network never materialises an
@@ -75,12 +76,12 @@ A node is *boundary* if its potential (or state) is prescribed rather than solve
 else is interior. You name the boundary when you build a layer, and the network turns that into
 index tensors:
 
-```python
+```py
 interior = net.interior_index(["ambient"])   # solved nodes
 boundary = net.boundary_index(["ambient"])   # prescribed nodes
 ```
 
-Boundary names may be aliases of nodes merged by [components](components.md#names);
+Boundary names may be aliases of nodes merged by [components](../guide/components.md#names);
 `net.canonical(names)` returns the node names they refer to, and both index methods raise
 `ValueError` when two of the names are the same node.
 
@@ -98,7 +99,7 @@ has two islands has two air systems that never exchange air.
 Most physical networks want a single node representing "outside". `with_ambient` adds one and
 returns the network for chaining:
 
-```python
+```py
 net = Network(dtype=torch.float64).with_ambient("ambient")
 ```
 
@@ -115,7 +116,7 @@ Potential differences live in the cut space, conservative flows live in the cycl
 two are orthogonal complements. The branch power sum is therefore zero regardless of what the
 elements are — it is a property of the graph, not of the physics.
 
-```python
+```py
 residual = net.power_residual(p, q)   # zero to machine precision for a conservative q
 ```
 
@@ -124,11 +125,11 @@ applications use it as one: the sewer application's headspace air layer pins its
 residual below $10^{-10}\,$W (measured $6.1\times10^{-12}$), and the street application checks
 that every kilogram emitted crosses the atmosphere boundary exactly. A model that violates
 Tellegen has a bug in its conservation, and the identity catches it without a reference
-solution. [The theory page](../theory.md) develops this properly.
+solution. [The theory page](theory.md) develops this properly.
 
 ## Devices and dtype
 
-```python
+```py
 net = net.to(device="cuda", dtype=torch.float64)
 ```
 
@@ -141,12 +142,10 @@ tolerance.
 `noodl.cycles` works in the cycle space directly, which is what you need when flows are measured
 rather than solved:
 
-| Function | Purpose |
-|---|---|
-| `branch_flows(net, amplitudes, kind)` | Turns cycle amplitudes into branch flows. Any such flow conserves at every node by construction. |
-| `particular_flow(...)` | A particular conservative flow matching prescribed nodal sources. On a tree this is the whole answer, which is how the sewer application solves its hydraulics without a Newton solve at all. |
-| `project_measured(...)` | Projects measured flows onto the conservative subspace — the least-squares correction that makes an inconsistent set of measurements satisfy continuity. |
-| `assert_forward_oriented(net, kind)` | Checks every edge of a kind points the way the physics assumes. |
+- `branch_flows` turns cycle amplitudes into branch flows. Any such flow conserves at every node by construction.
+- `particular_flow` gives a particular conservative flow matching prescribed nodal sources. On a tree this is the whole answer, which is how the sewer application solves its hydraulics without a Newton solve at all.
+- `project_measured` projects measured flows onto the conservative subspace: the least-squares correction that makes an inconsistent set of measurements satisfy continuity.
+- `assert_forward_oriented` checks that every edge of a kind points the way the physics assumes.
 
-The coupling application's third inverse example uses `project_measured` to recover all four
+The third inverse example of the coupling guide uses `project_measured` to recover all four
 branch flows of a network from one measured path, exactly (rtol $10^{-10}$).

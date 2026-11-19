@@ -224,17 +224,19 @@ class DriverAlias:
 
 
 class CoupledModel:
-    """Returned by `union`: "a `Model` across several networks". The fixed-point loop and the
+    """What `union` returns: several models stepped together, exchanging values each step.
+
+    It is "a `Model` across several networks". The fixed-point loop and the
     adjoint are shared with `Model` (`run_passes`, `differentiate_fixed_point`); the schedule
-    (sub-steps per model, recipient first, a conservative transfer) is its own, which is why it
-    stays a separate class (`docs/design/orchestration.md`).
+    (sub-steps per model, recipient first, a conservative transfer) is its own, and it is therefore
+    a separate class.
 
     `.step` takes and returns `{model_tag: State}` /
     `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged.
 
     `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
     changed the per-pass cost and the pass counts a coupling needs to reach a given
-    tolerance, so see `docs/applications/coupling.md` for current numbers rather than this
+    tolerance, so see `docs/guide/coupling.md` for current numbers rather than this
     docstring. A default of 20 is below what the street-building coupling demo needs.
 
     `iterate_atol=0.0` is a pure relative criterion: a shared value that is legitimately ZERO
@@ -912,7 +914,7 @@ def union(
 
     `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule
     changed the per-pass cost and the pass counts a coupling needs to reach a given
-    tolerance, so see `docs/applications/coupling.md` for current numbers rather than this
+    tolerance, so see `docs/guide/coupling.md` for current numbers rather than this
     docstring. `iterate_atol=0.0` makes the criterion purely relative, so a shared value that
     is legitimately ZERO needs a positive `iterate_atol` to be judged converged at all.
     `adjoint_rtol` is the tolerance of the implicit adjoint solve at the converged interface,

@@ -191,7 +191,7 @@ _FLOW_UNITS = {name: (LCF if name in _US_UNITS else 1.0, QCF / per_cfs)
 def unit_factors(flow_units: str) -> tuple[float, float]:
     """`(length, flow)` for the SWMM `FLOW_UNITS` keyword `flow_units`: the metres per length
     unit (0.3048 for the US system CFS, GPM and MGD, 1 for CMS, LPS and MLD) and the m3/s per
-    flow unit, SWMM's own conversion (units.c). An area converts with ``length**2``. Raises
+    flow unit, SWMM's own conversion. An area converts with ``length**2``. Raises
     ValueError for an unknown keyword."""
     try:
         return _FLOW_UNITS[flow_units.upper()]

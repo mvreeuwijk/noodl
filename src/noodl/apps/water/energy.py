@@ -56,7 +56,7 @@ F64 = torch.float64
 @dataclass
 class PumpEnergy:
     """Each pump's energy use over a run (`pump_names` in `WaterNetwork.pumps` order), as
-    EPANET reports it (`output.c`, `saveenergy`). `...` is the batch shape of the run.
+    EPANET reports it. `...` is the batch shape of the run.
 
     `utilisation` (..., n_pumps) the percent of the run's duration the pump is on line (a
     run whose duration is not a multiple of the step counts its last step whole, as EPANET

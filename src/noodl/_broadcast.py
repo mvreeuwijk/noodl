@@ -2,7 +2,7 @@
 
 `torch.broadcast_shapes` goes through `torch._refs` (symbolic-shape checks) and costs more
 than most of the small tensor operations it sizes; the airflow and transport steps call it
-about a hundred times per step (numbers: docs/design/orchestration.md#shape-broadcasting).
+about a hundred times per step (numbers: docs/project/design/orchestration.md#shape-broadcasting).
 The rules are the same: shapes are aligned on the right,
 a dimension of 1 stretches, any other mismatch raises `RuntimeError` (as torch does).
 """

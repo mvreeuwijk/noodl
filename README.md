@@ -15,14 +15,14 @@ composed and coupled through shared network structures, while differentiable sol
 simulation, parameter estimation, and optimisation.
 
 **[Documentation](https://mvreeuwijk.github.io/noodl/)** ·
-[Installation](https://mvreeuwijk.github.io/noodl/installation/) ·
-[Quick start](https://mvreeuwijk.github.io/noodl/quickstart/) ·
-[Using noodl](https://mvreeuwijk.github.io/noodl/usage/) ·
+[Installation](https://mvreeuwijk.github.io/noodl/get-started/installation/) ·
+[Quick start](https://mvreeuwijk.github.io/noodl/get-started/first-model/) ·
+[User guide](https://mvreeuwijk.github.io/noodl/guide/) ·
 [Concepts](https://mvreeuwijk.github.io/noodl/concepts/) ·
 [Applications](https://mvreeuwijk.github.io/noodl/applications/) ·
-[Catalogue](https://mvreeuwijk.github.io/noodl/catalogue/core/) ·
-[API reference](https://mvreeuwijk.github.io/noodl/api/) ·
-[Theory](https://mvreeuwijk.github.io/noodl/theory/)
+[Catalogue](https://mvreeuwijk.github.io/noodl/reference/catalogue/) ·
+[API reference](https://mvreeuwijk.github.io/noodl/reference/api/) ·
+[Examples](https://mvreeuwijk.github.io/noodl/examples/)
 
 ## Installation
 
@@ -42,7 +42,7 @@ cd noodl
 pip install -e ".[dev]"
 ```
 
-See [Installation](https://mvreeuwijk.github.io/noodl/installation/) for what each
+See [Installation](https://mvreeuwijk.github.io/noodl/get-started/installation/) for what each
 extra buys you.
 
 ## Quick start
@@ -119,15 +119,15 @@ docs/             the published documentation
 scripts/          fixture-regeneration scripts (Modelica, WSIMOD) and the catalogue generator
 ```
 
-Every model is set up and run the same way: see [Using noodl](docs/usage.md). The
-[catalogue](docs/catalogue/core.md) lists every type each application offers, what it
-does and how to call it, and the [API reference](docs/api.md) is organised module by
+Every model is set up and run the same way: see [Using noodl](docs/guide/workflow.md). The
+[catalogue](docs/reference/catalogue/core.md) lists every type each application offers, what it
+does and how to call it, and the [API reference](docs/reference/api/index.md) is organised module by
 module. Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Version 0.1.0. The core and all eight applications are implemented, each with its verification
-cases in the test suite.
+Version 0.1.0. The core, the six application areas (flow allocation and WSIMOD together form
+water resources) and coupling are implemented, each with its verification cases in the test suite.
 
 ## The name
 

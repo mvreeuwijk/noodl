@@ -30,7 +30,7 @@ no emission anywhere and a uniform `C_bg`, every street sits at `C_bg` and `C_ex
 stay at `C_bg`. The roof flux is neutral by construction (`C - C_ext = 0`). A junction
 source of `sum_out q C_street` is not: it re-emits background air that the plume sum then
 adds on top of the background it already contains (a lattice with nothing emitted then
-gives `max C_ext / C_bg > 1`; see `docs/design/water_street.md#junction-source`). The
+gives `max C_ext / C_bg > 1`; see `docs/project/design/water_street.md#junction-source`). The
 background is already in `C_bg`; only what the canopy adds to it may enter the plume sum.
 The subtraction uses the background of the street the air leaves,
 which is what that street would hold with no emissions under a uniform background.
@@ -45,7 +45,7 @@ which is what that street would hold with no emissions under a uniform backgroun
   `C_ext,i`: `G[i, i] = -K_j[i, j] q_in`, a loop that exists only because `C_ext-int` is
   missing. With the sink the junction plume's vertical profile is capped at `1/H`, which
   keeps that loop gain below one; without it the spectral radius of the coupling is exactly 0
-  (`docs/design/water_street.md#junction-source`).
+  (`docs/project/design/water_street.md#junction-source`).
   `junction_source="net"` keeps the sink, again as an excess over background,
   `F_j = F_up - F_down` with `F_down,j = sum_in q (C_ext,street - C_bg,street)` (the
   street the air enters), for comparison -- on SIRANE's archived `C_ext` the two modes are

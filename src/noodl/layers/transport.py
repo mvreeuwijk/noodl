@@ -121,7 +121,8 @@ def active_interior(
 # it (sparse_direct is not applicable there, and the gmres family's own ordering is not clean
 # enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu` are never
 # chosen by `auto`. The choice rests on an interleaved benchmark, see
-# docs/design/solvers.md#transport-solver-choice. See `select.transport_solver_kwargs` for the
+# docs/project/design/solvers.md#transport-solver-choice. See `select.transport_solver_kwargs` for
+# the
 # two hazards
 # this default must handle: SciPy absent,
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
@@ -300,7 +301,7 @@ class TransportLayer(TopologyGuard):
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
     every linear solve of this layer runs with (``steady``'s and the two implicit schemes'
     forward, backward adjoint and ``on_failure="return"`` paths alike). ``"auto"`` (the
-    default, see docs/design/solvers.md#transport-solver-choice) resolves to
+    default, see docs/project/design/solvers.md#transport-solver-choice) resolves to
     ``method="sparse_direct"`` at or under ``_SPARSE_DIRECT_MAX_BATCH`` instances and to plain
     ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
     absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see

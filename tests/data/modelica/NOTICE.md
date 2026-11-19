@@ -123,7 +123,7 @@ column's volume (`sha.vol.T`, `sha.vol.p`, `sha.vol.Xi[1]`). `TrickleVent`'s wea
 unchanged (same sha256).
 
 `PressurizationData.json` imports, but the dynamic parity tests do not yet compare it (an
-unresolved freeze of the room where its flow fades; `docs/formats/modelica.md`). Its CSV, at
+unresolved freeze of the room where its flow fades; `docs/applications/building/modelica.md`). Its CSV, at
 1e-13, is the reference for that comparison, and its weather and wind-pressure columns are
 compared now.
 

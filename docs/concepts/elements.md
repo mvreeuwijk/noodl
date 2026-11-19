@@ -10,61 +10,17 @@ the constitutive law sees it — buoyancy, wind pressure, interfacial drag.
 Together they are the replaceable part of the framework. The network, the conservation law and
 the solve are fixed; the constitutive law is where your physics goes.
 
-## The `ConstitutiveLaw` contract
+## What a law provides
 
-`noodl.elements.base.ConstitutiveLaw` subclasses `torch.nn.Module`. A law owns one edge `kind`.
-A constitutive law in the default, potential-controlled form provides three things:
+A law belongs to one edge kind and, in its default potential-controlled form, provides three things: the flow given the potential difference, the derivative of that flow, and a linear surrogate for the starting point.
 
-```py
-class ConstitutiveLaw(torch.nn.Module):
-    kind: str
+The derivative is supplied analytically rather than taken from autograd because it is assembled into the Jacobian $A_I \operatorname{diag}(g') A_I^\top$ at every Newton iteration, where an autograd round-trip per iteration would dominate the cost. Solvers that need a law's slopes as local blocks (a law with several ports, an implicit law, a phasor law) use the law's `jacobian`, which a law may give in closed form; otherwise it is computed by automatic differentiation. Every law of the electrical application gives it in closed form, so a circuit's Newton iterations evaluate no derivatives by automatic differentiation.
 
-    def flow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
-        """The branch law: flow given the potential difference."""
+The linear surrogate matters more than it appears. A nonlinear network solved from a cold start can take many Newton iterations or fail outright; solving the linear surrogate first puts the iteration inside the basin of attraction. Every built-in law provides one.
 
-    def dflow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
-        """Its derivative, d(flow)/d(dp). This is the Jacobian the Newton solve assembles."""
+A law may also report where it stops being smooth. `switching(dp, drivers)` returns values that change sign where the flow switches between two analytic pieces, such as the edges of a regularisation band, in units of the band's width. The default, `None`, means the law is smooth. The Modelica Buildings Library laws report their bands: the power law's `dp = ±dp_turbulent`, a door's buoyancy band and a discretised door's compartment bands. A time integrator can then put a step boundary on every switch (the Modelica runner's `simulate(scheme="midpoint")` does), because a band crossed inside a step spoils the error expansion that Richardson extrapolation relies on.
 
-    def linear_init(self, drivers: Mapping | None = None) -> tuple[Tensor, Tensor]:
-        """A linear surrogate (offset c, slope k), q ~ c + k dp, for the starting point."""
-```
-
-`dflow` is supplied analytically rather than taken from autograd because it is assembled into
-the Jacobian $A_I \operatorname{diag}(g') A_I^\top$ at every Newton iteration, where an
-autograd round-trip per iteration would dominate the cost.
-
-`jacobian` is the same idea for the solvers that need a law's slopes as local blocks (a law with
-several ports, an implicit law, a phasor law). A law may give its slopes in closed form by
-overriding `jacobian`; otherwise they are computed by automatic differentiation. Every law of
-the electrical application gives them in closed form, so a circuit's Newton iterations evaluate
-no derivatives by automatic differentiation.
-
-`linear_init` matters more than it appears. A nonlinear network solved from a cold start can
-take many Newton iterations or fail outright; solving the linear surrogate first puts the
-iteration inside the basin of attraction. Every built-in law provides one.
-
-A law may also report where it stops being smooth. `switching(dp, drivers)` returns
-values that change sign where the flow switches between two analytic pieces, such as the edges
-of a regularisation band, in units of the band's width (`noodl.elements.base.band_edges(x, w)` builds the pair
-`(x - w)/w`, `(x + w)/w`). The default, `None`, means the law is smooth. The MBL laws report
-their bands: the power law's `dp = ±dp_turbulent`, a door's buoyancy band and a discretised
-door's compartment bands. A time integrator can then put a step boundary on every switch
-(`simulate(scheme="midpoint")` in the Modelica runner does), because a band crossed inside a
-step spoils the error expansion that Richardson extrapolation relies on.
-
-### Parameters and learnability
-
-A law's differentiable quantities must be **registered parameters**, constructed with
-`learnable=True`:
-
-```py
-leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)
-```
-
-This is a hard requirement of the differentiable solve, not a style preference. A bare tensor
-held with `requires_grad=True` outside `named_parameters()` is invisible to the adjoint, and the
-solve raises naming the offending law and attribute rather than silently returning an absent
-gradient. See [Differentiability](differentiability.md#the-contract).
+A law's differentiable quantities are registered parameters, built with `learnable=True`, so that the differentiable solve can reach them (see [Differentiability](differentiability.md)). The rules a new law must follow are in [Extending noodl](../project/extending/index.md).
 
 ## Built-in laws
 
@@ -96,12 +52,12 @@ door pair (built by `open_door_pair`/`operable_door_pair`) and `DoorCompartment`
 by `discretized_door`/`discretized_operable_door`, or wrapped as two port streams by
 `DoorPortStream`); `AirMedium`, built by `medium(name)`, the fixed-density medium the others
 read. See
-[Airflow elements](../applications/building_physics.md#airflow-elements) for the physics, the
+[Airflow elements](../applications/building/physics.md) for the physics, the
 law each one evaluates and how it differs from its CONTAM counterpart.
 
 Applications add their own: the water application contributes `HazenWilliams`,
 `CompositeDarcyWeisbach`, `PumpCurve` and `MinorLoss`; the sewer application contributes
-`Headspace`; the [electrical application](../applications/electrical.md) contributes the circuit
+`Headspace`; the [electrical application](../applications/electrical/index.md) contributes the circuit
 laws `Resistance`, `Capacitance`, `Inductance`, `PrescribedVoltage`, `PrescribedCurrent`,
 `JunctionDiode`, `SwitchedConductance`, `TransformerRatio`, `MutualInductance` and
 `DependentSource`, most of them in the implicit, multi-port or dynamic forms described
@@ -116,9 +72,10 @@ $\lvert \Delta p \rvert = \Delta p_t$, of relative size $10^{-6}$ to $10^{-4}$ a
 depth. This is a property of the flow law as implemented, not a solver artefact, and it is
 stated rather than hidden because a Newton solve landing exactly on it will notice.
 
-## Writing your own
+## A law in a few lines
 
-The minimum is a `flow`, a `dflow` and a `linear_init`:
+The minimum is a flow, its derivative and a linear surrogate:
+
 
 ```python
 import torch
@@ -166,179 +123,11 @@ print([round(v, 9) for v in phi.tolist()], [round(v, 9) for v in q.tolist()])
 [6.0, 2.0, 0.0] [16.0, 16.0]
 ```
 
-Two rules worth stating explicitly, because both produce wrong answers rather than errors:
-
-- **Regularise at zero.** A law whose derivative diverges or vanishes at $\Delta p = 0$ will
-  stall Newton at the first iteration, since a cold start usually sits there. Every built-in
-  law is regularised there, but not all the same way: `PowerLaw` blends to a laminar
-  (linear) form below a `dp_transition` threshold, while the MBL power-law family blends to a
-  polynomial below a (wider) `dp_turbulent` threshold — see
-  [Airflow elements](../applications/building_physics.md#airflow-elements). `PowerLaw` with
-  $n < 1$ has infinite slope at the origin without it.
-- **Keep `dflow` consistent with `flow`.** Nothing checks them against each other at runtime. An
-  inconsistent pair converges to the right answer slowly, or to a wrong one confidently. Test it
-  with `torch.autograd.gradcheck` against `flow`.
-- **Declare a `dflow` that is not the derivative.** The differentiable solve uses `dflow` for
-  its Newton Jacobian and for the adjoint that computes gradients, so a `dflow` that is a
-  deliberate Newton aid (a slope floor, a slope split between two edges) would make the
-  gradients silently wrong. Such a law sets the class attribute `exact_slope = False`; the
-  differentiable solve then differentiates its `flow` by autograd instead, while the
-  non-differentiable solve keeps using `dflow`. `DoorPortStream` is the built-in example; every
-  other built-in law's `dflow` is exact, which `tests/elements/test_dflow_exact.py` checks.
-  The same attribute exists on `NodeWithdrawal`, and on `NodeStorage` for its `rate_slope`
-  (audited by the same test).
-- **A law is its module call.** A layer calls each law as a module, so an overridden
-  `forward` or a forward hook is part of the law. The module call of a law with a flow is
-  `law(dp, drivers, ctx)`, its flow; that of an implicit law is `law(dp, q, drivers, ctx)`,
-  its residual (`ImplicitLaw.forward` returns `residual`), so a hook on an implicit law acts
-  on its residual: scaling it leaves the root where it is, adding a term moves it. Wherever
-  such a law's module call differs from its own method, the layer evaluates it by that call
-  and takes its slope from that call by autograd, not from its `dflow` or `jacobian`: in
-  every solve, with or without `differentiable`, with or without flow unknowns; in the
-  starting guess (the call's value and slope at `dp = 0` replace its `linear_init`) and the
-  storage-ramp fallback; and in the layer's public `flows`, `residual`, `balance`,
-  `storage_flows`, `jacobian`, `dflows`, `adjoint` and `linear_init`. A `dp_independent`
-  law is still checked against its own `dflow`, but a hook may make its call depend on `dp`,
-  so the slope of that call is
-  taken by autograd too, zero where it does not depend on `dp`. The same holds for a
-  withdrawal and a storage. A law without either (every library law) keeps its own `flow`,
-  `dflow`, `jacobian` and `linear_init`.
-
 ## Implicit, coupled and dynamic constitutive laws
 
-Write `flow`; if you cannot, write `residual`. A law that gives its flow, `q = g(dp)`, one flow
-per edge as a function of that edge's own potential difference, writes `flow(dp, drivers)`. Every
-built-in airflow, water and sewer law does, and a layer whose laws all do is solved by nodal
-analysis. A law that cannot (a flow-controlled law, an ideal source, an inductance) subclasses
-`ImplicitLaw` and writes `residual(dp, q, drivers, ctx)` instead, the relation between the
-potential difference and the flow, zero when they agree; the layer then adds its flow as an
-unknown. Every law has `residual`: for a law with a flow it is `q - flow(dp)`, which the solve
-never calls. To read the law context (time, frequency, step-start values), name the third
-parameter of `flow` `ctx`. A `KirchhoffLayer` with an implicit law or a multi-port law adds those
-edges' flows as unknowns
-([Implicit, coupled and dynamic laws](layers.md#implicit-coupled-and-dynamic-laws));
-a dynamic or `ctx`-reading law that gives its flow adds none. Four class-level declarations on `ConstitutiveLaw` describe the rest.
+Write `flow`; if you cannot, write `residual`. A law with a flow, `q = g(dp)`, is the nodal half of circuit theory: its flow is eliminated in favour of the potentials, and a layer whose laws all have one is solved by nodal analysis. A law that cannot (a flow-controlled law `dp = h(q)`, an ideal source, an inductance) subclasses `ImplicitLaw` and writes `residual`, and the layer then adds its flow as an unknown. The contract, with the class-level declarations a law makes about itself, is in [A new constitutive law](../project/extending/law.md#implicit-coupled-and-dynamic-laws), and the layer side in [Implicit, coupled and dynamic laws](../reference/kirchhoff-options.md#implicit-coupled-and-dynamic-laws).
 
-| Declaration | Default | Meaning |
-|---|---|---|
-| `ports` | `1` | The edges of the kind form consecutive groups of `ports` edges, in the order they were added; the law may couple the edges within a group (a transformer's primary and secondary), never across groups. |
-| `dynamic` | `False` | The law reads its step-start values (`ctx.dp_prev`, `ctx.q_prev`): the layer then needs `history` on a step. A capacitance and an inductance implement every mode below. |
-| `phasor_capable` | `False` | The law accepts complex `dp` and `q` (a linear law with real or complex coefficients, or a law written for phasors). Only such laws are allowed in a phasor layer. |
-| `reads_heads` | `False` | The law's residual reads the absolute potentials at its edges' start and end nodes (`ctx.phi_from`, `ctx.phi_to`), not only the difference `dp`: a valve that holds the head downstream of it. Its `jacobian` then also returns `d r / d phi_from` and `d r / d phi_to`. Only a one-port `ImplicitLaw` may declare it; a layer refuses any other law that does (`TypeError`). |
-
-**The two forms.** A law with a flow is the nodal half of circuit theory: its flow is eliminated
-in favour of the potentials. An `ImplicitLaw` covers what cannot be written that way: a
-flow-controlled law `dp = h(q)`, an ideal potential source `dp = V` (no flow is a function of
-`dp`), an ideal constraint inside a multi-port law, and a law whose flow and potential are
-related through stored state. A subclass implements `residual`, which returns one value per
-edge, with the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's
-solution.
-
-A loss given as potential difference against flow, `dp = r q |q|`, in series with a linear
-conductance, between two prescribed potentials:
-
-```python
-import torch
-
-from noodl.elements import Conductance, ImplicitLaw
-from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.topology import Network
-
-F64 = torch.float64
-
-
-class QuadraticLoss(ImplicitLaw):
-    """A loss given as potential difference against flow: dp = r q |q|."""
-
-    def __init__(self, r, *, kind="loss", learnable=False):
-        super().__init__(kind)
-        self.r = self._param(r, learnable)
-
-    def residual(self, dp, q, drivers, ctx):
-        return dp - self.r * q * q.abs()
-
-
-net = Network(dtype=F64)
-for node in ("in", "mid", "out"):
-    net.add_node(node)
-net.add_edge("in", "mid", kind="loss")
-net.add_edge("mid", "out", kind="pipe")
-layer = KirchhoffLayer(
-    net, "w",
-    [QuadraticLoss(torch.tensor(2.0, dtype=F64)),
-     Conductance(torch.tensor(1.0, dtype=F64), kind="pipe")],
-    boundary=["in", "out"],
-)
-phi, q = layer.solve(torch.tensor([10.0, 0.0], dtype=F64))
-print(layer.implicit_edges.tolist())
-print(f"phi_mid = {float(phi[1]):.6f}, q = {[round(v, 9) for v in q.tolist()]}")
-```
-
-```text
-[0]
-phi_mid = 2.000000, q = [2.0, 2.0]
-```
-
-The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
-edges whose flow is an unknown, in layer edge order.
-
-**The start flow.** A layer's linear guess (`linear_init`, and the rungs of its
-[fallback ladder](solvers.md#when-newton-fails-the-fallback-ladder)) takes each implicit law's
-residual and Jacobian at zero interior potentials and at the law's start flow,
-`start_flow(drivers, ctx)`: one value per edge (with any batch dimensions in front, which must
-broadcast against the layer's batch), or `None`, the default, for zero flow. A start flow of
-another width or batch is refused, naming the law. The loss above has no slope at zero flow, so a guess taken there
-puts the whole 10 across it, at `q = 10`; with a start flow of 1 the guess is
-`phi_mid = q = 2.4`, and with the root, 2, it is the solution. Give one where a law's tangent at
-zero flow says little about its operating point: the water application's pipes start at 1 ft/s
-and its pumps at their design flow, EPANET's own first iterate. It moves only the guess: a solve
-still starts from zeros, or from its warm start, and the start flow carries no gradient.
-
-```py
-class StartedLoss(QuadraticLoss):
-    def start_flow(self, drivers=None, ctx=None):
-        return torch.ones(1, dtype=F64)      # one value per edge of the kind
-```
-
-**One scheme vocabulary for every layer.** A dynamic law reads `ctx.scheme`, one of the names in
-`SCHEMES = ("exact", "backward_euler", "trapezoidal")` (`noodl.elements.base`): the same names and
-the same keyword `scheme` a `TransportLayer` takes. A `KirchhoffLayer` gives its laws
-`"backward_euler"` or `"trapezoidal"`; `"exact"` is for transport layers only.
-
-**The law context.** A law whose `flow` has a `ctx` parameter (and every `ImplicitLaw`) receives a `LawContext` (`noodl.elements.base`), a frozen
-dataclass the layer builds for every solve:
-
-| Field | Meaning |
-|---|---|
-| `mode` | `"dc"` (the steady operating point), `"initial"` (the consistent initial point), `"transient"` (one implicit step) or `"phasor"` (the sinusoidal steady state) |
-| `dt` | The step length (transient only, else `None`) |
-| `t` | The evaluation time: the END of a transient step, the given time otherwise; `None` when the caller tracks no clock |
-| `scheme` | `"trapezoidal"` (default) or `"backward_euler"`; read in the transient mode |
-| `dp_prev`, `q_prev` | This kind's own potential differences and flows at the step start (transient only) |
-| `omega` | The angular frequency `2 pi f`, one per instance (phasor only) |
-| `phi_from`, `phi_to` | The potentials at the start and end nodes of each of this kind's edges, shaped like `dp` (only for a law that declares `reads_heads`, else `None`) |
-
-A dynamic law implements a form for each mode. The capacitance of the electrical
-application, `q = C d(dp)/dt`:
-
-```py
-def residual(self, dp, q, drivers, ctx):
-    if ctx.mode == "dc":
-        return q                                    # no current at rest
-    if ctx.mode == "initial":
-        return dp - self.v0                         # hold the initial potential difference
-    if ctx.mode == "phasor":
-        return q - 1j * ctx.omega * self.C * dp
-    if ctx.scheme == "backward_euler":
-        return q - self.C * (dp - ctx.dp_prev) / ctx.dt
-    return q + ctx.q_prev - 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev)   # trapezoidal
-```
-
-A dynamic law is implicit in every mode, so the layer's unknowns are the same whatever the mode.
-A multi-port law (`ports = 2`) receives the edges of all its groups together and pairs them
-itself: `dp.unflatten(-1, (-1, 2))` gives each group's `(port 1, port 2)`. The Jacobian is
-assembled within groups only, so a law that couples edges across groups gets a wrong Jacobian
-and wrong gradients, not merely a slower Newton convergence.
+A worked implicit law, a quadratic loss in series with a conductance, is on [A new constitutive law](../project/extending/law.md#implicit-coupled-and-dynamic-laws).
 
 ## Heads
 
@@ -366,14 +155,11 @@ application's headspace air layer solves with the *same* `Stack` the building ap
 uses for room buoyancy, plus a sewer-specific `Drag` term: the physics is different, the
 structure is not.
 
-### The rule a head term must obey
+### Why a head cannot read the potential
 
-**A head term is a function of the drivers alone.** It may read anything from the `drivers`
-mapping, and nothing else: not `phi`, not another layer's state.
+A head term is a function of the drivers alone: it may read anything from the `drivers` mapping, and nothing else, not `phi`, not another layer's state.
 
-This is structural. Keeping a head independent of $\phi$ is what keeps the Newton Jacobian
-exactly $A_I \operatorname{diag}(g') A_I^\top$, with no extra coupling term. A head that read
-$\phi$ would silently invalidate the Jacobian every solver in the package assembles.
+This is structural. Keeping a head independent of $\phi$ is what keeps the Newton Jacobian exactly $A_I \operatorname{diag}(g') A_I^\top$, with no extra coupling term. A head that read $\phi$ would silently invalidate the Jacobian every solver in the package assembles.
 
 The sewer application's `Drag` is the worked consequence. Physically, the drag the moving water
 surface exerts on the headspace air depends on the *relative* velocity $(U_s - U_{\text{air}})$,
@@ -383,29 +169,10 @@ and records the relative-velocity form as out of scope rather than quietly appro
 "structurally not differentiable by this framework's design, not an oversight."
 
 If you genuinely need a term that depends on solved state, it belongs in a **closure**, which
-runs between layer solves and writes driver values. See [Layers and models](layers.md#closures).
+runs between layer solves and writes driver values. See [Model options](../reference/model-options.md#closures).
 Because the head reaches the layer as a driver, a gradient reaches whatever produced it, and
 `EdgeHeads` holds no tensor the differentiable solve would miss.
 
 ## Withdrawals and node storage
 
-Two objects act at a node rather than on an edge, each as a function of that node's own
-potential, and each adds only a diagonal entry to the Jacobian:
-
-- **`NodeStorage`** (`noodl.NodeStorage`, `noodl.LinearStorage`): an amount stored at the node,
-  which the layer turns into a withdrawal over each step with its scheme's step rate. A
-  capacitor to ground, a tank, a zone's air mass. Every layer takes it, with or without
-  flow unknowns (not a phasor layer); at the consistent initial point a storage with an
-  `initial()` potential holds its node there. Under
-  `scheme="forward_euler"` a linear storage sits at a boundary node instead (an EPANET tank),
-  held through the solve and moved by explicit Euler after it. See
-  [Node storage](layers.md#node-storage).
-- **`NodeWithdrawal`** (`noodl.NodeWithdrawal`): a withdrawal that is **not** storage, `w(phi)` at the
-  current instant: EPANET's pressure-driven demand, a leak. A storage written as a withdrawal
-  with its own step-start drivers duplicates what the layer already does; give it to
-  `KirchhoffLayer(storage=...)` instead.
-
-A dynamic edge law (`Capacitance`, `Inductance`) and a node storage both turn a change into a
-rate with `noodl.elements.step_rate`: `change / dt` under backward Euler, `2 change / dt -
-previous` under the trapezoidal scheme, with `step_rate_factor` (`1/dt` or `2/dt`) its
-derivative.
+A node holds either storage (`NodeStorage`, `LinearStorage`: an amount the layer turns into a withdrawal over each step, such as a capacitor to ground, a tank or a zone's air mass) or a withdrawal that is not storage (`NodeWithdrawal`: EPANET's pressure-driven demand, a leak). Each is a function of that node's own potential and adds only a diagonal entry to the Jacobian. The options are in [Node storage](../reference/kirchhoff-options.md#node-storage).

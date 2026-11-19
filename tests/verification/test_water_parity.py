@@ -1564,7 +1564,7 @@ def test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head(tmp_path):
     (GCC 7.4), same 7 iterations, every other head 0.0 and flow 1.3e-10 m3/s apart. So J
     and L are compared at two steps, 1.5e-3 relative (MEASURED 2.8e-4 Windows, 1.0e-3
     Linux); every other head at 1e-6, every flow at 1e-6 m3/s, every state exactly.
-    Documented in docs/applications/water.md, Limitations."""
+    Documented in docs/applications/water/limitations.md."""
     model, final, drivers, results = _hand_built(tmp_path, *_fenced("J", "L"), accuracy=None)
     heads = results.node["head"].loc[0]
     assert _worst_heads(model, final, heads, skip=("J", "L")) < 1e-6
@@ -1642,7 +1642,7 @@ def test_check_valves_fencing_a_junction_match_epanet(tmp_path, case):
     limit, against EPANET's 56.668983), and the cause is EPANET's, not this model's: its
     head there is not a limit at all. MEASURED with P7 5 m, 500 m and 5000 m long, EPANET
     gives 55.3140, 56.6690 and 56.6655 m; the same family as the two-junction group of the
-    test above (docs/applications/water.md, Limitations), and like it at the copy's clamped
+    test above (docs/applications/water/limitations.md), and like it at the copy's clamped
     ACCURACY 1e-5: at a true 1e-7 EPANET stops on another iterate, 56.682732 m (8
     iterations, against 7), and with FLOWCHANGE 1e-10 it does not settle in 5000 trials
     (warning 2, unstable) and ends on 56.668984 m, the 1e-5 value (MEASURED)."""
@@ -1793,7 +1793,7 @@ def test_prv_psv_match_epanet(tmp_path, case):
 
     MEASURED with the file's demands (the pipes carry EPANET's rounded LPS factor): heads
     9.2e-8, flows 3.7e-8 m3/s, every state equal, every controlled head exactly its setting
-    and EPANET's (the table in docs/applications/water.md). (Before the rounded factor the
+    and EPANET's (the table in docs/reference/verification/water.md). (Before the rounded factor the
     heads differed by up to 2.4e-6, J3 of "prv-open-minor-loss".)"""
     texts, expected = _PRV_PSV_CASES[case]
     for k, text in enumerate(texts):
@@ -2042,7 +2042,7 @@ def test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head(tmp_path)
     they are held at the `1 / CBIG` limit, J1's 60 m (`_limit`), with no flow. EPANET
     reports 59.929776 for both (12 iterations, at ACCURACY 1e-7 and 1e-8 alike), and the
     same with a closed TCV in the PRV's place: its head of a group fed only through closed
-    links is not a limit (docs/applications/water.md, Limitations). J2 and J3 are compared
+    links is not a limit (docs/applications/water/limitations.md). J2 and J3 are compared
     at 2e-3 relative (MEASURED 1.2e-3; at the file's clamped 1e-5 EPANET stopped after 2
     iterations at 53.687092, and the bound was 0.2), every other head at 1e-6, every flow
     and every state exactly."""

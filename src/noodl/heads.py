@@ -239,7 +239,7 @@ class Stack:
 
 class DuctStack:
     """Hydrostatic term of a duct segment between two junctions: the air column at the
-    density of the junctions' MEAN TEMPERATURE (ContamX 3.4.1.7, measured), which at one
+    density of the junctions' MEAN TEMPERATURE (as ContamX computes it), which at one
     pressure is the harmonic mean of the two node densities:
 
         value_e = g * rho_e * (z_src - z_tgt),   rho_e = 2 / (1 / rho_src + 1 / rho_tgt)

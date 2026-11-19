@@ -8,6 +8,14 @@ repo_name: mvreeuwijk/noodl
 edit_uri: edit/main/docs/
 copyright: Copyright &copy; 2026 Maarten van Reeuwijk, John Craske and Imperial College London. BSD 3-Clause licence.
 
+validation:
+  nav:
+    omitted_files: info
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
 theme:
   name: material
   logo: assets/noodl-physics-symbol-white.svg
@@ -32,6 +40,8 @@ theme:
         name: Switch to light mode
   features:
     - navigation.instant
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.tracking
     - navigation.sections
     - navigation.top
@@ -46,61 +56,166 @@ theme:
 # directly on GitHub.
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - Quick start: quickstart.md
-  - Using noodl: usage.md
+  - Get started:
+      - get-started/index.md
+      - Installation: get-started/installation.md
+      - Your first model: get-started/first-model.md
+      - Run a model from a file: get-started/run-from-file.md
+      - Calibrate with gradients: get-started/calibrate.md
+  - User guide:
+      - guide/index.md
+      - Workflow: guide/workflow.md
+      - Time stepping: guide/time-stepping.md
+      - Reading results: guide/results.md
+      - Batches: guide/batches.md
+      - Gradients: guide/gradients.md
+      - Components: guide/components.md
+      - Coupling: guide/coupling.md
+      - Mutation, devices and serialization: guide/devices.md
+      - Choosing a solver: guide/solvers.md
+      - Troubleshooting: guide/troubleshooting.md
+  - Applications:
+      - applications/index.md
+      - Building physics:
+          - applications/building/index.md
+          - Assembling a building: applications/building/assembling.md
+          - Schedules and controls: applications/building/schedules-and-controls.md
+          - Contaminants and occupants: applications/building/contaminants-and-occupants.md
+          - Physics: applications/building/physics.md
+          - Airflow elements: applications/building/elements.md
+          - Importing CONTAM: applications/building/contam.md
+          - Importing Modelica Buildings: applications/building/modelica.md
+          - Limitations: applications/building/limitations.md
+      - Street air quality:
+          - applications/street/index.md
+          - Build and run a network: applications/street/networks.md
+          - Choosing the closures: applications/street/closures.md
+          - Above-roof concentration: applications/street/above-roof.md
+          - Unsteady above-roof puffs: applications/street/puffs.md
+          - Reading and writing cases: applications/street/cases.md
+          - Physics: applications/street/physics.md
+          - Limitations: applications/street/limitations.md
+      - Sewers:
+          - applications/sewer/index.md
+          - Kinematic-wave runs: applications/sewer/kinematic-wave.md
+          - Dynamic-wave runs: applications/sewer/dynamic-wave.md
+          - Structures and cross sections: applications/sewer/dynamic-wave-structures.md
+          - Inflows, runoff and RDII: applications/sewer/swmm-hydrology.md
+          - Headspace air and sulfide: applications/sewer/headspace-sulfide.md
+          - Physics: applications/sewer/physics.md
+          - Dynamic-wave physics: applications/sewer/physics-dynamic-wave.md
+          - Importing SWMM files: applications/sewer/swmm.md
+          - Limitations: applications/sewer/limitations.md
+      - Water distribution:
+          - applications/water/index.md
+          - Build and solve: applications/water/steady.md
+          - Extended-period simulation: applications/water/extended-period.md
+          - Tanks, controls and rules: applications/water/tanks-controls.md
+          - Water quality: applications/water/quality.md
+          - Valves and link status: applications/water/valves.md
+          - Physics: applications/water/physics.md
+          - Importing EPANET files: applications/water/epanet.md
+          - Limitations: applications/water/limitations.md
+      - Water resources:
+          - applications/water-resources/index.md
+          - Flow allocation: applications/water-resources/allocation.md
+          - Flow allocation physics: applications/water-resources/allocation-physics.md
+          - Running a WSIMOD model: applications/water-resources/wsimod.md
+          - Gradients, batches, long runs: applications/water-resources/wsimod-gradients.md
+          - What is ported: applications/water-resources/wsimod-ported.md
+          - Differences from WSIMOD: applications/water-resources/differences.md
+          - Limitations: applications/water-resources/limitations.md
+          - Importing WSIMOD config.yml: applications/water-resources/wsimod-config.md
+      - Electrical circuits:
+          - applications/electrical/index.md
+          - Circuits: applications/electrical/circuits.md
+          - AC and power laws: applications/electrical/ac.md
+          - Electro-thermal: applications/electrical/electro-thermal.md
+          - Power flow: applications/electrical/power-flow.md
+          - Physics: applications/electrical/physics.md
+          - Importing Modelica circuits: applications/electrical/modelica.md
+          - Importing MATPOWER files: applications/electrical/matpower.md
+          - Limitations: applications/electrical/limitations.md
+  - Examples:
+      - examples/index.md
+      - Calibrating demands: examples/calibrate-demands.md
+      - Natural ventilation: examples/natural-ventilation.md
+      - Sewer sulfide: examples/sewer-sulfide.md
+      - Street air into a building: examples/street-building.md
+      - Street release: examples/street-release.md
+      - A day of pumping: examples/water-day.md
   - Concepts:
       - concepts/index.md
+      - The four modes: concepts/four-modes.md
       - Networks: concepts/networks.md
-      - Components: concepts/components.md
       - Constitutive laws and drives: concepts/elements.md
       - Layers and models: concepts/layers.md
       - Solvers: concepts/solvers.md
       - Differentiability: concepts/differentiability.md
-      - Mutation, devices and serialization: concepts/ownership.md
-  - Applications:
-      - applications/index.md
-      - Building physics: applications/building_physics.md
-      - Street air quality:
-          - applications/street_aq.md
-          - Reading and writing cases: applications/street_aq_cases.md
-      - Sewers: applications/sewer.md
-      - Water distribution: applications/water.md
-      - Flow allocation: applications/allocation.md
-      - WSIMOD: applications/wsimod.md
-      - Electrical circuits: applications/electrical.md
-      - Coupling: applications/coupling.md
-  - Catalogue:
-      - Core library: catalogue/core.md
-      - Building physics: catalogue/building_physics.md
-      - Street air quality: catalogue/street_aq.md
-      - Sewers: catalogue/sewer.md
-      - Water distribution: catalogue/water.md
-      - WSIMOD: catalogue/wsimod.md
-      - Electrical circuits: catalogue/electrical.md
-  - Verification: verification.md
-  - File formats:
-      - formats/index.md
-      - CONTAM (.prj, .wth, .ctm): formats/contam.md
-      - Modelica: formats/modelica.md
-      - SWMM (.inp): formats/swmm.md
-      - EPANET (.inp): formats/epanet.md
-      - MATPOWER (.m): formats/matpower.md
-      - WSIMOD (config.yml): formats/wsimod.md
-  - Design notes:
-      - design/index.md
-      - Building physics and electrical: design/building_electrical.md
-      - Elements: design/elements.md
-      - Core orchestration: design/orchestration.md
-      - Sewers: design/sewer.md
-      - Solver selection: design/solvers.md
-      - Street puffs: design/street_puffs.md
-      - Water and street air quality: design/water_street.md
-  - Development:
-      - Extending noodl: development/extending.md
-  - API reference: api.md
-  - Theory: theory.md
-  - About: about.md
+      - Theory: concepts/theory.md
+  - Reference:
+      - reference/index.md
+      - API:
+          - reference/api/index.md
+          - Topology and networks: reference/api/topology.md
+          - Laws and heads: reference/api/laws.md
+          - Layers: reference/api/layers.md
+          - Model and coupling: reference/api/model.md
+          - Components: reference/api/components.md
+          - Solvers and operators: reference/api/solvers.md
+          - Building physics: reference/api/building.md
+          - Street air quality: reference/api/street.md
+          - Sewers: reference/api/sewer.md
+          - Water distribution: reference/api/water.md
+          - Water resources: reference/api/water-resources.md
+          - Electrical: reference/api/electrical.md
+          - Shared file helpers: reference/api/shared.md
+      - Catalogue:
+          - reference/catalogue/index.md
+          - Core library: reference/catalogue/core.md
+          - Building physics: reference/catalogue/building_physics.md
+          - Street air quality: reference/catalogue/street_aq.md
+          - Sewers: reference/catalogue/sewer.md
+          - Water distribution: reference/catalogue/water.md
+          - WSIMOD: reference/catalogue/wsimod.md
+          - Electrical circuits: reference/catalogue/electrical.md
+      - State and driver keys: reference/keys.md
+      - Kirchhoff layer options: reference/kirchhoff-options.md
+      - Transport layer options: reference/transport-options.md
+      - Model options: reference/model-options.md
+      - File formats: reference/formats.md
+      - Verification:
+          - reference/verification/index.md
+          - Building physics: reference/verification/building.md
+          - Street air quality: reference/verification/street.md
+          - Sewers: reference/verification/sewer.md
+          - Water distribution: reference/verification/water.md
+          - Water quality: reference/verification/water-quality.md
+          - Water resources: reference/verification/water-resources.md
+          - Electrical circuits: reference/verification/electrical.md
+          - Coupling: reference/verification/coupling.md
+  - Project:
+      - About: project/about.md
+      - Contributing: project/contributing.md
+      - Testing: project/testing.md
+      - Changelog: project/changelog.md
+      - Extending noodl:
+          - project/extending/index.md
+          - A new constitutive law: project/extending/law.md
+          - A new application: project/extending/application.md
+          - A new file reader: project/extending/reader.md
+      - Design notes:
+          - project/design/index.md
+          - Core orchestration: project/design/orchestration.md
+          - Sewers: project/design/sewer.md
+          - Solver selection: project/design/solvers.md
+          - Water and street air quality: project/design/water_street.md
+          - Street puffs: project/design/street_puffs.md
+          - WSIMOD port: project/design/wsimod-port.md
+
+exclude_docs: |
+  plans/
+  superpowers/
 
 plugins:
   - search
@@ -110,7 +225,7 @@ plugins:
           paths: [src]
           options:
             show_root_heading: true
-            show_source: true
+            show_source: false
             show_signature_annotations: true
             separate_signature: true
             signature_crossrefs: true
@@ -135,6 +250,9 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.superfences
   - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 extra_javascript:
   - javascripts/mathjax.js

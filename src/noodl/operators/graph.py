@@ -139,7 +139,7 @@ class GraphLaplacianOperator:
         # expanded to it. Both are pure functions of the key and of this operator's own
         # construction-time arrays, so caching them is a construction-time cost -- and at
         # the composed reference size the recomputation was ~11% of `pcg`'s time
-        # (see docs/design/solvers.md#operator-caches).
+        # (see docs/project/design/solvers.md#operator-caches).
         # Only INDEX tensors are cached, never an expanded view of `slopes`: `slopes` can
         # require grad, and a cached view of it would carry one autograd graph's
         # `ExpandBackward` into the next forward pass, so a second backward would try to
