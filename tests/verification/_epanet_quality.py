@@ -4,8 +4,9 @@ parity's (`epanet_results` and `epanet_session`, for `test_water_parity.py` and
 
 EPANET runs through its toolkit (`wntr` 1.5.0's `ENepanet` and its ctypes handle `ENlib` on the
 bundled `epanet22.dll`, `libepanet22.so` on Linux: two builds, MSVC and GCC 7.4, that differ in
-their last bits; where a reference rests on them its test measures both, docs/applications/
-water.md, Limitations) on the committed file, never on `EpanetSimulator`'s rewrite of it. Its
+their last bits; where a reference rests on them its test measures both, docs/reference/
+verification/water.md, EPANET's two builds) on the committed file, never on
+`EpanetSimulator`'s rewrite of it. Its
 copy (`epanet_copy`) adds only `[OPTIONS] ACCURACY 1e-8`, `TRIALS 400` (the hydraulic parity's
 setting, `test_water_networks.py`) and `[REPORT] STATUS YES` (for the mass-balance section of
 the report); noodl reads the unedited file. EPANET's reader clamps a file's ACCURACY to [1e-5,
