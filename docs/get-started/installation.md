@@ -1,15 +1,15 @@
 # Installation
 
 noodl physics needs **Python 3.11 or newer**. Its only hard dependencies are PyTorch, NetworkX and
-NumPy; everything else is an optional extra, described below.
+NumPy.
 
-## From PyPI
+## Install
 
 ```bash
 pip install noodl-physics
 ```
 
-## From source
+From a source checkout:
 
 ```bash
 git clone https://github.com/mvreeuwijk/noodl.git
@@ -17,68 +17,44 @@ cd noodl
 pip install -e .
 ```
 
-On a machine without a CUDA-capable GPU, install the CPU build of PyTorch first — it is a far
-smaller download, and noodl physics runs perfectly well on CPU:
+Without a CUDA-capable GPU, install the much smaller CPU build of PyTorch first:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e .
 ```
 
 ## Optional extras
 
-noodl physics keeps its optional dependencies genuinely optional. Nothing below is needed to build a
-network, solve it, or differentiate through it.
+Nothing below is needed to build, solve or differentiate a network. Install an extra with
+`pip install "noodl-physics[name]"`.
+
+| Extra | Adds | Use it for |
+|---|---|---|
+| `sparse` | `scipy` | The SuperLU sparse-direct solver. Without it, symmetric positive definite solves fall back to conjugate gradients (correct, but about 4.6 times slower at a batch of one) and circuits with flow unknowns use batched dense LU. Install it if single-instance speed matters. |
+| `street_aq` | `scipy` | Writing the [street air quality](../applications/street/index.md) NetCDF product. |
+| `contam` | `contamxpy` | Running NIST's ContamX directly, for comparisons with the [building application](../applications/building/index.md). Windows x86-64 only. |
+| `test` | pytest, hypothesis, ruff, `scipy` | The core test suite. |
+| `reference` | `pyswmm`, `wntr`, `wsimod` | The reference engines the comparisons run against. Large (`wntr` alone adds about 350 MB) and test-only. |
+| `dev` | `test` and `reference` | Everything the full test suite needs. |
+
+## Check the install
 
 ```bash
-pip install "noodl-physics[sparse]"        # sparse-direct linear solver
-pip install "noodl-physics[street_aq]"     # the street air quality application's file I/O
-pip install "noodl-physics[contam]"        # ContamX parity, Windows x86-64 only
-pip install "noodl-physics[test]"          # pytest, hypothesis, ruff, scipy: the core test suite
-pip install "noodl-physics[reference]"     # pyswmm, wntr, wsimod: the reference-engine comparisons
-pip install "noodl-physics[dev]"           # test + reference: everything the full suite needs
+python -c "import noodl; print(noodl.__version__)"
 ```
 
-| Extra | Adds | Why you might want it |
-|---|---|---|
-| `sparse` | `scipy>=1.11` | The SciPy SuperLU backend. This is a **runtime** extra, not a developer convenience — see the note below. |
-| `street_aq` | `scipy>=1.11` | The [street air quality application](../applications/street/index.md) writes its per-street NetCDF product (`write_network_concentration`) through `scipy.io.netcdf_file`. The modelling API itself needs only the base dependencies. |
-| `contam` | `contamxpy>=0.0.9` (Windows x86-64 only) | Runs NIST's ContamX engine directly for the [building physics application's](../applications/building/index.md) parity tests. The wheel bundles ContamX 3.4.1.7, so no separate CONTAM installation is needed. There is no wheel for any other platform, hence the marker. |
-| `test` | pytest, pytest-xdist, pytest-cov, hypothesis, ruff, `scipy>=1.11` | The core test suite. Nothing here requires NumPy 2, so it installs against the NumPy 1.26 minimum (the `minimum-versions` CI job). |
-| `reference` | `pyswmm`, `wntr`, `wsimod` | The reference engines for the parity tests against SWMM, EPANET and WSIMOD. `wntr>=1.5` requires NumPy 2.2.6 or newer. |
-| `dev` | `test` + `reference` | The full test suite. `pip install -e ".[dev]"` is the usual choice for a checkout. |
-
-**The `sparse` extra deserves a moment.** The default linear-solver selection,
-`method="auto"`, prefers the SciPy SuperLU backend for a certified-SPD operator at a batch of
-at most 32 instances. Without SciPy installed, that path silently never fires and every such
-solve falls back to preconditioned conjugate gradients — correct, but measured at roughly 4.6x
-slower at ensemble size 1. A layer with flow unknowns (a circuit) factorises with SuperLU at any batch size and, without SciPy, with batched dense LU, which grows quickly in time and memory with the circuit size. It remains optional rather than mandatory because the evidence for
-that default is one platform at one problem size, and PCG is a complete answer on its own. If
-you care about single-instance solve latency, install it.
-
-The reference engines in `dev` are **test-only** and deliberately not runtime extras. `wntr`
-in particular pulls in a measured 351 MB of mandatory dependencies, which is not a price to pay
-for a package whose water application needs nothing beyond `torch` and `sparse` to run. Every
-test that needs one of these engines skips itself when the import fails, so a partial install
-never breaks the suite.
-
-## Verifying the install
-
-```python
-import noodl
-print(noodl.__version__)
-```
-
-To run the test suite and build the documentation, see [Testing](../project/testing.md).
+To run the tests and build the documentation, see [Testing](../project/testing.md).
 
 ## GPU and dtype
 
-Every network and every solver moves with PyTorch's usual mechanics:
+Move a network and its solvers with the usual PyTorch calls:
 
-```python
+```py
 net = net.to(device="cuda", dtype=torch.float64)
 ```
 
-Use `float64` for anything involving a Newton solve you care about. The default is `float32`,
-which is fine for forward evaluation but leaves little headroom for tight convergence
-tolerances; every parity result in these docs was measured in double precision.
+Use `float64` for any Newton solve you care about. The default, `float32`, is fine for forward
+evaluation but leaves little headroom for tight convergence tolerances. Every comparison with a
+reference tool in these docs was measured in double precision.
+
+Next: [Your first model](first-model.md).

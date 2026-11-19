@@ -20,6 +20,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = [
+    "index.md",
+    "get-started/first-model.md",
+    "get-started/run-from-file.md",
+    "get-started/calibrate.md",
     "guide/workflow.md",
     "guide/components.md",
     "concepts/elements.md",
