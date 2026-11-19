@@ -1,4 +1,4 @@
-# Reading and writing street-network cases
+# Reading and writing cases
 
 A street-network case bundles a network with the meteorology, emissions and background
 concentrations that drive it hour by hour. `read_case(path) -> StreetCase` reads one from
@@ -40,7 +40,7 @@ two ends are the DBF's `NDDEB` -> `NDFIN` node ids, which are also the junction 
 `native["physics"]` carries the master-file switches that change SIRANE's own results --
 `background_on`, `plume_on` (the street-plume model above the roofs), `retro_on` (the
 retrotrajectory model), `dispersion_model`, `chemistry_on` -- recorded rather than acted on:
-noodl physics has no above-roof dispersion model. `native["options"]` holds every master-file
+the case readers do not switch the above-roof model on from a deck. `native["options"]` holds every master-file
 setting by its SIRANE keyword, `native["site_disp"]`/`native["site_meteo"]` the two site
 files, `native["streets"]` each record's SIRANE-consumed DBF fields, and
 `native["meteo_raw"]` the precipitation and cloud-cover columns `read_case` itself does not
@@ -315,8 +315,7 @@ for k in range(len(case.times)):
 print(state["street.x"])          # kg/m3 per street, at the case's last hour
 ```
 
-*(`munich_paris_excerpt` is a four-street excerpt of MUNICH's own published test case -- see
-`tests/data/street/munich_paris_excerpt/NOTICE.md`.)*
+*(`munich_paris_excerpt` is a four-street excerpt of MUNICH's own published test case.)*
 
 ## SIRANE worked example
 
@@ -364,5 +363,4 @@ state = model.steady(state, drivers)
 print(state["street.x"])          # kg/m3 per street, at hour 0
 ```
 
-*(`sirane_south_kensington` is SIRANE's own South Kensington deck with part of its archived
-results -- see `tests/data/street/sirane_south_kensington/NOTICE.md`.)*
+*(`sirane_south_kensington` is SIRANE's own South Kensington deck with part of its archived results.)*
