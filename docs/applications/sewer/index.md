@@ -12,7 +12,10 @@ does not have. A SWMM `.inp` file can be read directly ([SWMM `.inp`](swmm.md)).
 
 **Maturity: verified on a stated subset.** Flows, depths, volumes, velocities and overflows are
 compared with live SWMM 5.2.4 runs at every routing step, to 1e-6 or better in the quantities
-compared (depths 1e-7 m, flows 1e-6 relative), fixture by fixture
+compared (depths 1e-7 m, flows 1e-6 relative), fixture by fixture. There are exceptions: where
+SWMM's own iteration does not converge (the ramp-down fixtures) noodl is held only to SWMM's
+oscillation, up to 5.7e-4 m, and the tracer in downstream conduits is not asserted because of
+SWMM's one-step junction lag
 ([Verification: sewers](../../reference/verification/sewer.md)). The comparison is a stated set
 of fixtures and file-defined options, not the whole SWMM input language: a run of 1,646 public
 SWMM files runs 107 of them and refuses the rest by name. The headspace-air and sulfide model is
@@ -25,14 +28,19 @@ Supported:
 
 - Kinematic-wave and steady routing on dendritic networks of circular conduits, with SWMM's
   tabulated circular geometry (`geometry="tabulated"`) or the exact circle.
-- Dynamic-wave routing: loops, flat and adverse conduits, backwater, surcharge (`SLOT`,
-  `EXTRAN`), flooding and ponding, storage units, orifices, weirs, outlets, pumps and control
-  rules, every SWMM cross-section shape, transects, culverts, force mains, tidal and time-series
-  outfalls, and the fixed or variable routing step.
+- Dynamic-wave routing, compared with live SWMM: loops, flat and adverse conduits, backwater,
+  surcharge (`SLOT`, `EXTRAN`), flooding and ponding, storage units, orifices, weirs, outlets,
+  pumps and control rules, cross-section shapes, transects, culverts, force mains, tidal and
+  time-series outfalls, and the fixed or variable routing step. Some parts of these are
+  implemented from SWMM's source but not yet compared with a live run (a surcharged weir, bottom
+  orifices, flap gates, functional outlets, some storage shapes, tides beyond 24 h); they are
+  listed under [Limitations](limitations.md).
 - Lateral inflows, dry-weather flow, subcatchment runoff and RDII read from a SWMM file.
 - Water quality (BOD decay, Pomeroy–Parkhurst sulfide generation) and headspace air with
   two-film H₂S transfer.
-- Gradients of any output with respect to network, inflow and runoff parameters.
+- Gradients of outputs with respect to network, inflow and runoff parameters. Some quantities
+  carry no gradient: the step sizes of a variable-step run, the evaporation and infiltration
+  state of the climate, and the rainfall and dates of RDII.
 
 Not supported (each is refused by name, with the line number when it comes from a file; the
 full list is on [Limitations](limitations.md)):

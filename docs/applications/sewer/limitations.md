@@ -57,8 +57,8 @@ the line number when they come from a file. The evidence for what is supported i
   culvert cap is applied as a line in the head difference, not the upstream head alone, so the
   iteration of a culvert whose downstream end moves is slower (about 30 passes per step on the
   parity fixture) though its fixed point is SWMM's. A free outfall below the springing line of a
-  `RECT_ROUND` conduit is such a regime (the section above).
-- **Dynamic wave, where SWMM has no fixed point** (the three tie rules above): the EXTRAN
+  `RECT_ROUND` conduit is such a regime (see [Cross sections, losses, transects and culverts](dynamic-wave-structures.md#cross-sections-losses-transects-and-culverts)).
+- **Dynamic wave, where SWMM has no fixed point** (the three tie rules, described on [the physics page](physics-dynamic-wave.md#intentional-differences-from-swmm)): the EXTRAN
   crown hold, the normal-flow slope switch and the drop-end area switch. The Froude test of the
   normal-flow limit stays a lagged flag. The area switch picks one threshold per junction (the
   nearest to its head), so two drop ends of one junction switching in the same step are not

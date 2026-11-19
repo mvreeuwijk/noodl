@@ -6,7 +6,7 @@
 </p>
 
 **Read your EPANET, SWMM or CONTAM model into PyTorch: run many variants in one call and get
-exact gradients of any output with respect to the drivers, the initial state and the parameters you mark learnable.**
+exact gradients of any output with respect to the drivers and the initial state. For models you assemble yourself, also the parameters you mark learnable.**
 
 noodl physics is an open-source framework for differentiable network modelling of physical
 systems. Ready-made applications cover buildings, streets, sewers, water mains, water resources
@@ -105,6 +105,6 @@ each, and [File formats](reference/formats.md) for what each reader accepts and 
 | **Composable physics layers** | Kirchhoff solves, transport, reactions and allocation on one network, stepped together. |
 | **Batching** | Every solve is batched: a thousand variants, or one network under a thousand weather realisations, is one call. |
 | **Exact gradients** | An implicit-function adjoint gives gradients for the cost of one linear solve, not an unrolled tape. |
-| **Verified against reference tools** | Code-to-code comparisons with CONTAM, MUNICH, SWMM, EPANET, WSIMOD, the Modelica libraries and pandapower, with tolerances and measured errors written down. |
+| **Compared with reference tools** | Code-to-code comparisons with CONTAM, SWMM, EPANET, WSIMOD, the Modelica libraries and pandapower, with tolerances and measured errors written down. The street application is compared with MUNICH's formulas and SIRANE's results and is only partly verified; its page says where. |
 
 ![The noodl physics model stack: a network, then constitutive laws, heads and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)

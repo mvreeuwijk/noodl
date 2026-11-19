@@ -12,8 +12,10 @@ Circuits can be batched, differentiated and coupled to a heat network.
 pandapower.
 
 **Maturity: verified on a stated subset.** Fourteen Modelica example models agree with
-OpenModelica at every row and column of the reference, to `1e-9` relative plus `1e-12`
-absolute (algebraic models) or `1e-6` of the column range (dynamic models). Five MATPOWER
+OpenModelica on every column of the reference, to `1e-9` relative plus `1e-12`
+absolute (algebraic models) or `1e-6` of the column range (dynamic models). The full
+comparison covers every row, except the start row of the dynamic models; the default test run
+compares a subset of the rows (every tenth row, or the first rows of a dynamic model). Five MATPOWER
 cases (`case9`, `case14`, `case30`, `case118` and a feature-rich variant of `case9`) agree
 with pandapower to round-off, five or more orders inside the tolerances. Simpler circuits
 are checked against closed forms. The evidence is on the

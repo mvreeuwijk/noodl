@@ -68,7 +68,9 @@ step 2: loss at start 0.0000, demand 16.00 L/s
 recovered demand at J4 (L/s): 16.0
 ```
 
-The optimiser recovers the true value. The same recipe fits several parameters at once and any
+The optimiser recovers the true value. Here the parameter is a demand, which is a driver. The
+roughness of a pipe read from an EPANET file is not learnable through `build_model`; see the
+[water limitations](../applications/water/limitations.md). The same recipe fits several parameters at once and any
 differentiable parameter of any application; see [Gradients](../guide/gradients.md) for what can
 be differentiated and what to watch for, and the [examples](../examples/index.md) for fits to
 more realistic data.

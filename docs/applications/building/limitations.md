@@ -10,7 +10,9 @@ What the building physics application does not model, and where it differs on pu
   the balance as in ContamX. The Modelica route stores air mass by default (volume mass storage,
   see [Importing Modelica Buildings](modelica.md#volume-mass-storage)); `read_modelica(..., mass_storage=False)` gives the quasi-steady airflow there too, and
   the storage-dominated group on the [verification page](../../reference/verification/building.md#against-openmodelica-modelica-buildings-library) shows
-  what that costs.
+  what that costs: without mass storage the storage-dominated models are held only to bounds set
+  from measurement, 0.31 K, 243 Pa and 73 % of the largest flow on `ClosedDoors`, and 0.90 K and
+  566 Pa on `ReverseBuoyancy`, and `OneEffectiveAirLeakageArea` is refused.
 - **Control nodes cover ContamX's sensors, schedules, arithmetic, logic, switches,
   hysteresis and P and PI controllers.** Integration, running-average, delay, modifier,
   phantom nodes and value files are refused by name when an actuator, or a named report node

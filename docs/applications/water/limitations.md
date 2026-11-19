@@ -131,12 +131,16 @@ In these cases the exact equations have many solutions, and EPANET's choice depe
 - **The steady tracer is verified on a single source only.** The check uses a
   network with one source, where the answer is 100 % everywhere it reaches; mixing of several
   traced sources has not been compared against EPANET.
+- **Coefficients of a model built from a file are not learnable.** `build_model` builds the
+  pipe, pump, valve, tank and reaction coefficients as constants. Gradients reach the drivers
+  and the initial state, not the roughness or reaction rates; to fit those, build the elements
+  yourself with `learnable=True` (see [Gradients](../../guide/gradients.md)).
 - **Tank area does not enter a single `water_steady` call.** Only the tank's head enters the
-  steady solve, so gradients with respect to tank area come from a time-stepped run
+  steady solve, so gradients of a hand-built model with respect to tank area come from a time-stepped run
   (`water_run`), not from the steady state.
 - **ky10's quality is verified to 6:54:59 only.** After it EPANET's `pumpcoeff` caps the slope of
   the constant-power pump `~@Pump-10` (`CBIG`), which dead-heads against its closed CV and
   takes it to zero flow, where noodl keeps it on its power curve (5.4e-4 m³/s, 1396 m): the
   hydraulics, and so the quality, differ from 7 h. Forcing the pump closed in noodl matches EPANET to
-  10 h. The 24 h comparison is therefore not claimed; EPANET itself needs `TRIALS 5000` at `ACCURACY 1e-7` on this file, and `DAMPLIMIT 1e-2` (see [Verification](../../reference/verification/water.md#where-epanets-answer-is-not-unique)).
+  10 h. The 24 h comparison fails with these values, as expected, and is not claimed; EPANET itself needs `TRIALS 5000` at `ACCURACY 1e-7` on this file, and `DAMPLIMIT 1e-2` (see [Verification](../../reference/verification/water.md#where-epanets-answer-is-not-unique)).
 - **EPANET's own accuracy bounds the comparison.** A file's `ACCURACY` is clamped to 1e-5 by EPANET's reader; the reference sets 1e-7 through the toolkit, the tightest that converges everywhere. The reference tool's own convergence and its two builds are described on the [verification page](../../reference/verification/water.md#where-epanets-answer-is-not-unique).

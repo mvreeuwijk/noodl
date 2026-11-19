@@ -9,7 +9,7 @@ respect to the parameters, forcings and initial stores listed on the [gradients 
 
 | Part | Maturity | Why |
 | --- | --- | --- |
-| [Flow allocation](allocation.md), `"hard"` mode | Verified on a stated subset | Equals WSIMOD's realised flows on both of its demonstration models (1e-16) and on scripted networks with binding capacities and headroom (4.4e-16); differences from WSIMOD's call-order sharing are stated and tested |
+| [Flow allocation](allocation.md), `"hard"` mode | Verified on a stated subset | Equals WSIMOD's realised flows on `quickstart_demo` (1e-16) and on 20 of the 21 arcs of `oxford_demo` (1.9e-9; the `sewer_to_wwtw` arc is excluded), and on scripted networks with binding capacities and headroom (4.4e-16); differences from WSIMOD's call-order sharing are stated and tested |
 | Flow allocation, `"smooth"` and `"projection"` modes | Experimental | Checked against the hard clip, by gradient checks and by a hand-derived cross-gradient; no external reference |
 | [WSIMOD port](wsimod.md) | Verified on a stated subset | Bitwise equal to WSIMOD (worst difference 0) on both demonstration models and on 61 purpose-built cases, in two modes; 81 gradients agree with central differences to 5.3e-7. Subset: every class except `EnfieldFoulSewer`; configurations read from `config.yml` and CSV only |
 | [Importing `config.yml`](wsimod-config.md) | Verified on a stated subset | Reads WSIMOD's own saved format; anything it cannot run is refused by name |
@@ -18,7 +18,7 @@ The evidence is on the [verification page](../../reference/verification/water-re
 
 ## Supported and not supported
 
-| Supported | Not supported |
+| Supported | Not supported (see [Limitations](limitations.md)) |
 | --- | --- |
 | Reading WSIMOD's `config.yml` with CSV or CSV.GZ forcing, or the same structure as a Python mapping | Writing a configuration; `extensions` and the parquet `unified_data_file` (refused) |
 | All WSIMOD 0.8.1 node and arc classes except `EnfieldFoulSewer`, with the twelve default pollutants | `EnfieldFoulSewer` (undefined in WSIMOD itself); surface `*-residue` data |
@@ -70,6 +70,7 @@ To run a WSIMOD model, start from [Running a WSIMOD model](wsimod.md).
 - [WSIMOD: gradients, batches and long runs](wsimod-gradients.md).
 - [WSIMOD: what is ported](wsimod-ported.md): classes and processes.
 - [Differences from WSIMOD](differences.md).
+- [Limitations](limitations.md): what is not supported and where results can differ.
 - [Importing a WSIMOD `config.yml`](wsimod-config.md).
 - Reference: [WSIMOD catalogue](../../reference/catalogue/wsimod.md),
   [verification](../../reference/verification/water-resources.md),

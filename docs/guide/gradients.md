@@ -22,7 +22,9 @@ Gradients reach:
 
 - the drivers and the initial state (boundary values, sources, inflows, meteorology);
 - every law parameter built with `learnable=True`, which is registered on the law so that
-  `law.parameters()` lists it;
+  `law.parameters()` lists it (the application builders `build_model` for EPANET files create
+  their coefficients without it, so a roughness read from a file is not learnable; see the
+  [water limitations](../applications/water/limitations.md));
 - across a [coupled model](coupling.md), the parameters of the other model.
 
 Run forward-only work under `torch.no_grad()` or pass `differentiable=False` to a solve: it then
