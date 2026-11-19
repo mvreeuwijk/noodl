@@ -2,9 +2,9 @@
 
 One page per application plus one for the core library. Every public name (the module's
 `__all__`) is listed under its role -- set-up, network components, constitutive laws, heads,
-closures, reactions, sources, waveforms, files, functions, constants -- with the first line of its
-docstring and its call signature. A name exported twice for one object is listed once, with
-its other names.
+closures, reactions, sources, waveforms, files, functions, constants -- with the first sentence of
+its docstring and a link to its entry in the API reference (`docs/reference/api/`). A name
+exported twice for one object is listed once, with its other names.
 
 Run `python scripts/gen_catalogue.py` after adding or changing anything public.
 `tests/test_docs_catalogue.py` fails when the committed pages are stale or when a public
@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "reference" / "catalogue"
+API = ROOT / "docs" / "reference" / "api"
 
 PAGES = [
     # (file stem, title, page link for the application, modules, intro)
@@ -32,8 +33,9 @@ PAGES = [
       "noodl.validation", "noodl.layers",
       "noodl.elements", "noodl.heads", "noodl.withdrawals", "noodl.storage",
       "noodl.couple"],
-     "The framework every application builds on: the network, the layers, the model, the "
-     "set-up helpers, and the general-purpose constitutive laws and heads."),
+     "The framework every application builds on: the network, the layers (including the flow "
+     "allocation layer), the model, the set-up helpers, and the general-purpose constitutive "
+     "laws and heads."),
     ("building_physics", "Building physics", "../../applications/building/index.md",
      ["noodl.apps.building_physics", "noodl.elements", "noodl.heads"],
      "Multi-zone airflow, heat and contaminants (CONTAM's physics; CONTAM `.prj`/`.wth`, "
@@ -118,45 +120,63 @@ SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_mo
                "dc_power_flow"}
 
 
+_NOT_END = ("e.g", "i.e", "etc", "vs", "approx", "cf", "eq", "no", "fig")
+
+
+def _first_sentence(text: str) -> str:
+    """`text` up to the end of its first sentence: a full stop followed by a space and a capital
+    or a backtick, outside brackets and code spans and not after an abbreviation."""
+    depth, tick = 0, False
+    for i, ch in enumerate(text):
+        if ch == "`":
+            tick = not tick
+        elif tick:
+            continue
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(depth - 1, 0)
+        elif ch == "." and depth == 0 and text[i + 1:i + 2] == " " and (
+            text[i + 2:i + 3].isupper() or text[i + 2:i + 3] == "`"
+        ):
+            word = re.split(r"[\s(]", text[:i])[-1].lower()
+            if word not in _NOT_END:
+                return text[:i + 1]
+    return text
+
+
 def _summary(obj) -> str:
-    """The docstring's first paragraph, on one line; empty when there is none -- including a
+    """The docstring's first sentence, on one line; empty when there is none -- including a
     dataclass's auto-generated `Name(field, ...)` text, which is no description."""
     doc = inspect.getdoc(obj) or ""
     if inspect.isclass(obj) and doc.startswith(f"{obj.__name__}("):
         return ""
-    text = doc.strip().split("\n\n")[0].replace("\n", " ").strip()
+    text = _first_sentence(doc.strip().split("\n\n")[0].replace("\n", " ").strip())
     if text.endswith(":"):
         text = text[:-1].rstrip() + "."
     return text
 
 
-def _signature(name: str, obj) -> str:
-    try:
-        target = obj
-        if inspect.isclass(obj) and not dataclasses.is_dataclass(obj):
-            target = obj.__init__
-        sig = inspect.signature(target)
-    except (TypeError, ValueError):
-        return f"{name}(...)" if callable(obj) else name
-    # Names and defaults only: the annotations are in the API reference, and quoted forward
-    # references (`name: 'str'`) make a one-line call form hard to read.
-    params = [
-        p.replace(annotation=inspect.Parameter.empty)
-        for p in sig.parameters.values() if p.name != "self"
-    ]
-    text = str(sig.replace(parameters=params, return_annotation=inspect.Signature.empty))
-    if text == "(*args, **kwargs)" and inspect.isclass(obj):
-        try:
-            new = inspect.signature(obj.__new__)
-            params = [p.replace(annotation=inspect.Parameter.empty)
-                      for p in list(new.parameters.values())[1:]]
-            text = str(new.replace(parameters=params,
-                                   return_annotation=inspect.Signature.empty))
-        except (TypeError, ValueError):
-            text = "(...)"
-        if text in {"(*args, **kwargs)", "(**kwargs)"}:
-            text = "(...)"
-    return f"{name}{text}"
+def api_anchors() -> dict[tuple[str, str], str]:
+    """`{(module, name): "<page>.md#<module>.<name>"}` for every member the API pages render,
+    read from their `:::` directives (the anchor is the id mkdocstrings gives the heading)."""
+    found: dict[tuple[str, str], str] = {}
+    for page in sorted(API.glob("*.md")):
+        module = None
+        for line in page.read_text(encoding="utf-8").splitlines():
+            if line.startswith("::: "):
+                module = line[4:].strip()
+            elif module and (m := re.match(r"\s+- (\w+)\s*$", line)):
+                found[(module, m.group(1))] = f"{page.name}#{module}.{m.group(1)}"
+    return found
+
+
+def _api_link(obj, anchors: dict) -> str | None:
+    """The API page entry for a public class or function, or None when it has none."""
+    if not (inspect.isclass(obj) or inspect.isfunction(obj)):
+        return None
+    target = anchors.get((obj.__module__, obj.__name__))
+    return f"../api/{target}" if target else None
 
 
 def _role(name: str, obj) -> str:
@@ -325,6 +345,7 @@ def _attributes_section(modname: str) -> list[str]:
 
 def render(stem: str, title: str, link: str | None, modules: list[str], intro: str) -> str:
     entries = _entries(modules)
+    anchors = api_anchors()
     by_role: dict[str, list[dict]] = {r: [] for r, _, _ in ROLES}
     for e in entries:
         by_role[_role(e["name"], e["obj"])].append(e)
@@ -338,7 +359,8 @@ def render(stem: str, title: str, link: str | None, modules: list[str], intro: s
         "",
         f"Import from `{modules[0]}`" + (
             "" if len(modules) == 1 else " and the modules named in each table") + ". "
-        "The full reference, with every parameter, is in the [API reference](../api/index.md).",
+        "Each name links to its entry in the [API reference](../api/index.md), which gives every "
+        "parameter.",
         "",
     ]
     if stem in OPTION_MODULES:
@@ -361,23 +383,28 @@ def render(stem: str, title: str, link: str | None, modules: list[str], intro: s
                         f"`{a}`" for a in sorted(e["aliases"])) + "</small>"
                 lines.append(f"| {name} | {_esc(_constant_text(e['obj']))} |")
         else:
-            lines += ["| Name | What it does | How to call it |", "|---|---|---|"]
+            lines += ["| Name | What it does |", "|---|---|"]
             for e in group:
-                name = e["name"]
+                link = _api_link(e["obj"], anchors)
+                name = f"[`{e['name']}`]({link})" if link else f"`{e['name']}`"
                 if e["aliases"]:
                     name += "<br><small>also " + ", ".join(
                         f"`{a}`" for a in sorted(e["aliases"])) + "</small>"
-                else:
-                    name = f"`{name}`"
-                if e["aliases"]:
-                    name = f"`{e['name']}`" + name[len(e["name"]):]
                 where = "" if len(modules) == 1 else f"<br><small>`{e['module']}`</small>"
-                lines.append(
-                    f"| {name}{where} | {_esc(_summary(e['obj']))} | "
-                    f"`{_esc(_signature(e['name'], e['obj']))}` |"
-                )
+                lines.append(f"| {name}{where} | {_esc(_summary(e['obj']))} |")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def unlinked() -> list[str]:
+    """Public classes and functions the API pages do not render, as `module.name`."""
+    anchors = api_anchors()
+    return sorted({
+        f"{e['obj'].__module__}.{e['obj'].__name__}"
+        for _, _, _, modules, _ in PAGES for e in _entries(modules)
+        if (inspect.isclass(e["obj"]) or inspect.isfunction(e["obj"]))
+        and _api_link(e["obj"], anchors) is None
+    })
 
 
 def undocumented() -> list[str]:
@@ -402,11 +429,12 @@ def render_index() -> str:
         "",
         "<!-- Generated by scripts/gen_catalogue.py from the code; do not edit by hand. -->",
         "",
-        "Every public component, by application. The full signatures are in the "
-        "[API reference](../api/index.md).",
+        "Every public name with a one-line description, by application. Each name links to its "
+        "entry in the [API reference](../api/index.md), which gives the signature and every "
+        "parameter.",
         "",
     ]
-    lines += [f"- [{title}]({stem}.md)" for stem, title, *_ in PAGES]
+    lines += [f"- [{title}]({stem}.md): {intro}" for stem, title, _, _, intro in PAGES]
     return "\n".join(lines) + "\n"
 
 

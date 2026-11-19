@@ -1,10 +1,10 @@
-"""A WSIMOD configuration as a noodl ``Model`` (spec, Entry points): :func:`build_model`,
+"""A WSIMOD configuration as a noodl ``Model``: :func:`build_model`,
 :func:`initial_state` and :func:`initial_drivers`.
 
 The model is a :class:`~noodl.topology.Network` with one node per WSIMOD node and one edge of
 kind ``"arc"`` per arc, named as in the configuration, and no layers: the day is one
 integrating closure, :class:`~noodl.apps.wsimod.day.WsimodDay`, which owns every
-``"wsimod.*"`` state key (D17). ``model.step(state, drivers, dt=86400, t=k * 86400)`` runs day
+``"wsimod.*"`` state key. ``model.step(state, drivers, dt=86400, t=k * 86400)`` runs day
 ``k``, so the model couples with other noodl models::
 
     network = read_wsimod_config("tests/data/wsimod/small")
@@ -34,13 +34,13 @@ F64 = torch.float64
 def build_model(network: WsimodNetwork, *, pollutants: bool = True) -> tuple[Model, State, Drivers]:
     """``(model, state, drivers)`` for a WSIMOD configuration (``read_wsimod_config``).
 
-    Every build-time refusal (D7) is raised here, by name (``check_network``): what depends on
+    Every build-time refusal is raised here, by name (``check_network``): what depends on
     the parameters or on ``pollutants`` (neutral processes, ``decays``, porosity, leakage,
     preferences, travel times, check-recursion cycles, the river order, the orchestration,
     missing forcing). ``pollutants=False`` runs on the volumes alone; what that run ignores is
     listed in ``model.ignored_by_quantity_only``; what WSIMOD accepts and never reads (a
     ``Groundwater``'s forcing, a ``filename`` on a class that reads none) is ``model.unread``.
-    The closure runs one tracing day (D2) that fixes the call structure. ``model.wsimod_day`` is
+    The closure runs one tracing day that fixes the call structure. ``model.wsimod_day`` is
     the closure and ``model.driver_template`` the configured drivers; ``state`` and ``drivers``
     are :func:`initial_state` and
     :func:`initial_drivers` without values.
@@ -91,8 +91,7 @@ def _tensor(value) -> Tensor:
 
 
 def _vqip(day: WsimodDay, value, key: str, label) -> Tensor:
-    """A number (or batch tensor) is a volume with zero pollutants; a mapping a VQIP by name
-    (``tanks.py:36-50``)."""
+    """A number (or batch tensor) is a volume with zero pollutants; a mapping a VQIP by name."""
     p = day.p
     if isinstance(value, Mapping):
         unknown = [k for k in value if k != "volume" and k not in p.names]
@@ -119,12 +118,12 @@ def _assemble(base: Tensor, rows: dict[int, Tensor], flat: bool) -> Tensor:
 
 def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     """The configuration's state (``WsimodDay.initial_state``), then ``values`` by key and row
-    label (D10): ``{"wsimod.storage": {("river", "tank"): 9.0}}``.
+    label: ``{"wsimod.storage": {("river", "tank"): 9.0}}``.
 
     A VQIP key takes a number (or batch tensor) as a volume with zero pollutants and a mapping
     as a VQIP by name, ``{("gw", "tank"): {"volume": 5.0, "phosphate": 0.1}}``. Setting a
     ``QueueTank``'s ``"wsimod.storage"`` row sets its ``"wsimod.active_storage"`` row too, as
-    WSIMOD starts it (``tanks.py:478``), unless that row is given as well. A whole key may be
+    WSIMOD starts it, unless that row is given as well. A whole key may be
     given as a tensor. An unknown key or label is a ``KeyError`` with a suggestion.
     """
     day = _day(model)
@@ -158,7 +157,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
 
 
 def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
-    """The configured drivers (``model.driver_template``, D6), then ``values`` by key and row
+    """The configured drivers (``model.driver_template``), then ``values`` by key and row
     label.
 
     Row labels are node names (``"wsimod.<Class>.<parameter>"``), ``(node, surface)`` pairs

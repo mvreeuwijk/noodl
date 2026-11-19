@@ -1,6 +1,6 @@
 """Reads WSIMOD's own model description (``config.yml``, ``Model.load``) into dataclasses.
 
-The format is the one ``Model.load`` reads (``wsimod/orchestration/model.py:216-274``) with the
+The format is the one ``Model.load`` reads with the
 per-node CSV and CSV.GZ forcing files (``_load_individual_files``, ``:324-348``; ``read_csv``,
 ``:1252-1269``). A parsed mapping in the same structure is accepted too, with
 ``data_input_dict`` given inline as ``{(variable, date): value}``. Nothing of WSIMOD is
@@ -106,7 +106,7 @@ class SurfaceSpec:
 @dataclass
 class NodeSpec:
     """One node. ``cls`` is ``node_type_override`` or ``type_``; ``slot_key`` is the key of
-    ``Model.nodes_type`` the node is filed under (``model.py:650-673``)."""
+    ``Model.nodes_type`` the node is filed under."""
 
     name: str
     cls: str
@@ -151,7 +151,7 @@ class WsimodNetwork:
 
 
 def parse_date(text: str) -> datetime:
-    """A date as ``to_datetime`` parses it (``model.py:139-162``): the formats
+    """A date as ``to_datetime`` parses it: the formats
     ``%Y-%m-%d %H:%M:%S``, ``%Y-%m-%d`` and ``%Y-%m`` (the first of the month), in that order."""
     if not isinstance(text, str):
         raise ValueError(f"date {text!r} is not a string; write it in quotes, e.g. '2000-01-31'")
@@ -168,7 +168,7 @@ def parse_date(text: str) -> datetime:
 
 # --- forcing ---------------------------------------------------------------------------------
 def _read_csv(path: Path) -> Data:
-    """``read_csv`` (``model.py:1252-1269``): rows ``variable, time, value``; ``.gz`` is gzipped."""
+    """``read_csv``: rows ``variable, time, value``; ``.gz`` is gzipped."""
     opener = gzip.open if str(path).endswith(".gz") else open
     data: Data = {}
     with opener(path, "rt", encoding="utf-8", newline="") as handle:
@@ -211,7 +211,7 @@ def _forcing(entry: dict, base: Path | None, where: str) -> Data:
 # --- helpers ---------------------------------------------------------------------------------
 def _items(section: object, what: str) -> list[dict]:
     """A ``nodes``/``arcs``/``overrides`` section as a list of copied dicts: WSIMOD takes a
-    mapping and uses its values (``model.py:257-258``); a list is accepted as well."""
+    mapping and uses its values; a list is accepted as well."""
     if section is None:
         return []
     values = list(section.values()) if isinstance(section, Mapping) else section
@@ -263,7 +263,7 @@ def _checked_parameters(
 
 
 def _need_real(value: object, what: str) -> None:
-    """A WTW constant, exponent or liquor multiplier is multiplied (``wtw.py:191-201``): refuse
+    """A WTW constant, exponent or liquor multiplier is multiplied: refuse
     a string, ``None`` or a boolean by name, as ``read_decays`` does."""
     if isinstance(value, (str, bool)) or not isinstance(value, numbers.Real):
         raise ValueError(f"{what} {value!r} is not a number (WSIMOD multiplies it, wtw.py:191-201)")
@@ -273,7 +273,7 @@ def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) ->
     """A configured ``process_parameters`` or ``liquor_multiplier`` must name every additive
     pollutant, ``process_parameters`` with its ``constant`` and ``exponent``: WSIMOD reads them
     all (``wtw.py:188-201``, ``KeyError`` otherwise). An empty one is filled by
-    :func:`_fill_wtw_defaults`. Overrides may be partial (they merge, X36)."""
+    :func:`_fill_wtw_defaults`. Overrides may be partial (they merge)."""
     process = parameters.get("process_parameters") or {}
     liquor = parameters.get("liquor_multiplier") or {}
     for name in pollutants.additive if process else ():
@@ -301,7 +301,7 @@ def _refuse_partial_wtw(where: str, parameters: dict, pollutants: Pollutants) ->
 
 def _fill_wtw_defaults(parameters: dict, pollutants: Pollutants) -> None:
     """``WTW.__init__`` fills an empty ``process_parameters`` and ``liquor_multiplier`` from the
-    model's additive pollutants (``wtw.py:73-85``), a fresh dict per node."""
+    model's additive pollutants, a fresh dict per node."""
     if not parameters.get("process_parameters"):
         parameters["process_parameters"] = {
             x: {"constant": 0.01, "exponent": 1.001} for x in pollutants.additive
@@ -330,7 +330,7 @@ _POOL_PARAMETERS = (*NUTRIENT_POOL_PAIRS, *NUTRIENT_POOL_SCALARS)
 
 
 def _pool_parameter(key: str, where: str, what: str) -> str:
-    """The refusal of a ``NutrientPool`` parameter as configuration (L20, Y24)."""
+    """The refusal of a ``NutrientPool`` parameter as configuration."""
     return (
         f"{where}: {key!r} is a NutrientPool parameter, not {what}: WSIMOD builds the pool with "
         "its defaults (land.py:1273) and never calls its apply_overrides (np.py:155-181; L20). "
@@ -347,7 +347,7 @@ def _apply_overrides(
     *,
     surface: bool = False,
 ) -> None:
-    """Merge one override entry into ``parameters`` (D5): dict-valued ``pollutant_load``,
+    """Merge one override entry into ``parameters``: dict-valued ``pollutant_load``,
     ``liquor_multiplier`` and ``process_parameters`` update the node's own copy, everything
     else is replaced. A key outside the class's chain is refused (WSIMOD only prints)."""
     for key in overrides:
@@ -404,7 +404,7 @@ def _apply_overrides(
 def _override_filename(
     node: NodeSpec, value: object, where: str, unread: list[str], pollutants: Pollutants
 ) -> None:
-    """``Node.apply_overrides`` (``nodes.py:93-99``, D23): a string is read with ``read_csv`` as
+    """``Node.apply_overrides``: a string is read with ``read_csv`` as
     written, relative to the working directory (not the configuration's), and replaces the
     node's forcing; a falsy non-string (``None``, ``0``, ``[]``) is ignored; anything else is
     refused. The empty string is a string, so WSIMOD opens ``""`` and raises
@@ -435,13 +435,13 @@ def _override_filename(
 def _override_surface_data(
     surface: SurfaceSpec, value: object, where: str, pollutants: Pollutants
 ) -> None:
-    """``Surface.apply_overrides`` (``land.py:413-421``, Y22): a path is read with ``read_csv``
-    as written, relative to the working directory (X27); a mapping replaces the data; anything
+    """``Surface.apply_overrides``: a path is read with ``read_csv``
+    as written, relative to the working directory; a mapping replaces the data; anything
     else is ``ValueError`` in WSIMOD, and is refused here. The constructor fixed the inflows
-    (``:375-382``, L15), so the replacement must keep what the constructor's functions read:
+   , so the replacement must keep what the constructor's functions read:
     ``nhx-dry`` (``KeyError`` at the first run otherwise) and, with ``nitrate`` only (the
     fertiliser and manure inflows exist only then, ``:1276-1280``), a growing
-    surface's fertiliser and manure data (``:1649-1710``)."""
+    surface's fertiliser and manure data."""
     if isinstance(value, str):
         path = Path(value)
         if not path.is_file():
@@ -527,7 +527,7 @@ def _orchestration(section: object) -> list[tuple[str, str]]:
 
 
 def _lists(data: dict) -> tuple[Pollutants, float]:
-    """The pollutant lists and ``float_accuracy`` (``model.py:232-241``), WSIMOD's defaults when
+    """The pollutant lists and ``float_accuracy``, WSIMOD's defaults when
     absent. Inconsistent lists are refused by name (``Pollutants``)."""
     names = tuple(data.get("pollutants", POLLUTANTS))
     additive = tuple(data.get("additive_pollutants", ADDITIVE_POLLUTANTS))
@@ -608,8 +608,8 @@ def _read_arc(entry: dict, node_names: set[str], pollutants: Pollutants) -> ArcS
     """One arc. ``decays`` is read on a ``DecayArc`` or ``DecayArcAlt`` only (default ``{}``,
     ``arcs.py:671``, ``:734``); every other class never reads the key (``Arc.__init__`` stores
     it unread, ``arcs.py:52``), so it is refused. ``parent`` is refused on every arc: a
-    ``DecayObj`` reads its temperature from a ``parent`` attribute when there is one
-    (``core.py:465-468``), and a configured string would be read as a node and crash."""
+    ``DecayObj`` reads its temperature from a ``parent`` attribute when there is one, and a
+    configured string would be read as a node and crash."""
     name = _need(entry, "name", "an arc")
     where = f"arc {name!r}"
     type_ = _need(entry, "type_", where)
@@ -667,8 +667,8 @@ def read_wsimod_config(
     ``source`` is a directory holding ``config_name`` (``Model.load(address, config_name)``;
     the forcing files named in it are read relative to that directory), or the parsed mapping
     in the same structure. ``overrides`` replaces top-level keys of the description first,
-    as ``Model.load``'s own argument does (``model.py:229-230``). The ``overrides`` section is
-    merged into the nodes' and arcs' parameters (spec, Loading); see
+    as ``Model.load``'s own argument does. The ``overrides`` section is
+    merged into the nodes' and arcs' parameters; see
     ``docs/applications/water-resources/wsimod-config.md``
     for the keys read, ignored and refused. Every refusal is a ``ValueError`` naming the key.
     """

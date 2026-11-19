@@ -478,8 +478,8 @@ def _pump_speed(law, speed, drivers, like: Tensor) -> Tensor:
 
 class PumpCurve(ConstitutiveLaw):
     """A pump on a power-law curve, ``h_gain = w^2 (h0 - r (q/w)^n)``: EPANET 2.2's
-    ``POWER_FUNC`` pump (`input2.c`, `updatepumpparams`: one point, or three with the first
-    at zero flow, fitted by `input3.c`, `powercurve`; `hydcoeffs.c`, `pumpcoeff`).
+    ``POWER_FUNC`` pump (fitted to one point, or three with the first
+    at zero flow).
     ``h0``, ``r`` and ``n`` are per pump; ``w`` is the relative speed (EPANET's affinity
     laws, Manual p.108: ``h0 w^2`` and ``r w^(2-n)``).
 
@@ -672,8 +672,7 @@ class PumpCurve(ConstitutiveLaw):
 
 class PiecewisePumpCurve(ImplicitLaw):
     """A pump on a curve of straight segments: EPANET 2.2's ``CUSTOM`` pump, every head curve
-    that is neither one point nor three with the first at zero flow (`input2.c`,
-    `updatepumpparams`).
+    that is neither one point nor three with the first at zero flow.
 
     The head gain at flow ``q`` and relative speed ``w`` is ``w^2 h(q / w)`` (the affinity
     laws), ``h`` the curve: on the segment that brackets ``q / w``, ``h = h0 + r q / w`` with
@@ -1248,7 +1247,7 @@ class _Valve(ImplicitLaw):
 
 
 class ThrottleValve(_Valve):
-    """A throttle control valve (TCV): EPANET 2.2's `tcvcoeff` (`hydcoeffs.c`).
+    """A throttle control valve (TCV), as in EPANET 2.2.
 
     Active, it is a minor loss whose coefficient is its setting ``K``: ``dp = m q |q|`` with
     ``m = 0.02517 K / d^4`` in EPANET's units (`epanet_minor_coefficient`, ``cfs_per_m3s``
@@ -1291,7 +1290,7 @@ class FlowControlValve(_Valve):
 
 
 class BreakerValve(_Valve):
-    """A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`).
+    """A pressure breaker valve (PBV), as in EPANET 2.2.
 
     Active, it holds the head drop from its start node to its end node at ``setting``,
     whichever way the water flows: ``dp = setting``. It is an open valve, ``dp = m q |q|``
@@ -1317,7 +1316,7 @@ class BreakerValve(_Valve):
 
 
 class GeneralPurposeValve(_Valve):
-    """A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`).
+    """A general purpose valve (GPV), as in EPANET 2.2.
 
     The head loss follows the valve's head-loss curve, ``dp = sgn(q) (h0 + r |q|)``, with
     ``h0`` and ``r`` the intercept and slope of the curve segment that brackets ``|q|``

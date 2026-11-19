@@ -30,7 +30,7 @@ _LN10 = math.log(10.0)
 
 def air_viscosity(T) -> Tensor:
     """Dynamic viscosity of air (Pa s) at temperature `T` (K): ContamX's linear law,
-    1.81625e-5 + 4.92859e-8 (T - 293.15), measured between 253 and 333 K."""
+    1.81625e-5 + 4.92859e-8 (T - 293.15), valid between 253 and 333 K."""
     if not isinstance(T, Tensor) or not T.is_floating_point():
         T = torch.as_tensor(T, dtype=torch.float64)
     return MU_REF + MU_SLOPE * (T - T_MU_REF)
@@ -264,7 +264,7 @@ class AirDuct(_UpstreamAir):
 
 class DuctTerminal(_UpstreamAir):
     """A duct terminal, the zero-length duct between a junction and its zone, F (kg/s)
-    from dp (Pa), as ContamX 3.4.1.7 computes it (measured):
+    from dp (Pa), as ContamX computes it:
 
         dp = Ce F^2 / (2 rho A^2)            |F| >= F_t = 30 mu sqrt(A)
         dp = Ce F_t F / (2 rho A^2)          below F_t (the line through that point)

@@ -77,7 +77,7 @@ def _wall_from_roughness(net, pipe, factor: float) -> float:
 
 def pipe_coefficients(net, quality) -> tuple[Tensor, Tensor]:
     """`(kb, kw)` (n_pipes, `net.pipes` order, SI per second) of every pipe, check-valve pipes
-    included (`adjustdata`, `input1.c`: `Type <= PIPE`): its own `[REACTIONS] BULK` and
+    included: its own `[REACTIONS] BULK` and
     `WALL`, else the global; a pipe without its own WALL under a nonzero ROUGHNESS
     CORRELATION takes `_wall_from_roughness`."""
     kb, kw = [], []
@@ -95,13 +95,13 @@ def pipe_coefficients(net, quality) -> tuple[Tensor, Tensor]:
 
 def tank_coefficients(net, quality) -> Tensor:
     """Every tank's bulk coefficient (n_tanks, `net.tanks` order, SI per second): its own
-    `[REACTIONS] TANK`, else the global BULK (`adjustdata`, `input1.c`)."""
+    `[REACTIONS] TANK`, else the global BULK."""
     return torch.tensor([quality.tank_bulk.get(t.name, quality.global_bulk) for t in net.tanks],
                         dtype=F64)
 
 
 def bulk_rate(c: Tensor, kb: Tensor, order: float, limit: float, tiny: float) -> Tensor:
-    """`bulkrate` (`qualreact.c`): the bulk reaction rate (quality unit per s) at the
+    """The bulk reaction rate (quality unit per s) at the
     concentration `c` for the coefficient `kb`, the reaction `order` and the limiting
     potential `limit` (`Climit`, quality unit). Order 0: `kb`. Michaelis-Menten (order < 0):
     `kb c / c1`, `c1 = Climit + sgn(kb) c`, `c1` set to `sgn(c1) tiny` when `|c1| < tiny`
@@ -137,7 +137,7 @@ def bulk_rate(c: Tensor, kb: Tensor, order: float, limit: float, tiny: float) ->
 
 def wall_coefficients(flow: Tensor, diameter: Tensor, length: Tensor, kw: Tensor, *,
                       order: float, viscosity: float, diffusivity: float) -> Tensor:
-    """`ratecoeffs` and `piperate` (`qualreact.c`): every pipe's wall rate coefficient `Rc`
+    """Every pipe's wall rate coefficient `Rc`
     from its `flow` (m3/s as EPANET's quality reads it, 0 on a closed link), `diameter` and
     `length` (m) and wall coefficient `kw`, for the wall `order` (0 or 1), the kinematic
     `viscosity` and the chemical's `diffusivity` (m2/s); 0 where `kw` is 0. With the
@@ -170,7 +170,7 @@ def wall_coefficients(flow: Tensor, diameter: Tensor, length: Tensor, kw: Tensor
 
 
 def wall_rate(c: Tensor, diameter: Tensor, kw: Tensor, rc: Tensor, *, order: float) -> Tensor:
-    """`wallrate` (`qualreact.c`): the wall reaction rate (quality unit per s) at the
+    """The wall reaction rate (quality unit per s) at the
     concentration `c` of a pipe of `diameter` (m) with the wall coefficient `kw` and the rate
     coefficient `rc` (`wall_coefficients`). Order 0: the mass transfer `sgn(kw) c kf` or the
     reaction `kw / EPANET_LITRES_PER_M3`, whichever is smaller in magnitude (the reaction

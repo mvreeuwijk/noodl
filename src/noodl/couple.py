@@ -224,10 +224,12 @@ class DriverAlias:
 
 
 class CoupledModel:
-    """Returned by `union`: "a `Model` across several networks". The fixed-point loop and the
+    """What `union` returns: several models stepped together, exchanging values each step.
+
+    It is "a `Model` across several networks". The fixed-point loop and the
     adjoint are shared with `Model` (`run_passes`, `differentiate_fixed_point`); the schedule
-    (sub-steps per model, recipient first, a conservative transfer) is its own, which is why it
-    stays a separate class (`docs/project/design/orchestration.md`).
+    (sub-steps per model, recipient first, a conservative transfer) is its own, and it is therefore
+    a separate class.
 
     `.step` takes and returns `{model_tag: State}` /
     `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged.

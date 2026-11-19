@@ -5,136 +5,136 @@
 Gravity sewers: hydraulics, headspace air and sulfide (SWMM `.inp` reader). How the pieces fit together: [Sewers](../../applications/sewer/index.md).
 Every application is set up the same way; see [Using noodl](../../guide/workflow.md).
 
-Import from `noodl.apps.sewer`. The full reference, with every parameter, is in the [API reference](../api/index.md).
+Import from `noodl.apps.sewer`. Each name links to its entry in the [API reference](../api/index.md), which gives every parameter.
 
 ## Set-up
 
 Build the model and its starting state and inputs.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `build_model` | Assemble the sewer model and return `(model, state, drivers)`. | `build_model(net, *, storage=False, air=None, quality=None, species=('bod', 'sulfide'), f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=(), coupling='pingpong', scheme='backward_euler', dt_storage=None, iterate_tol=None, iterate_max=None, outfall_stage=None, iterate_flow_tol=None)` |
-| `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by outfall and species name. | `initial_drivers(model, *, values=None)` |
-| `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention). | `initial_state(model, drivers=None, *, values=None)` |
+| Name | What it does |
+|---|---|
+| [`build_model`](../api/sewer.md#noodl.apps.sewer.network.build_model) | Assemble the sewer model and return `(model, state, drivers)`. |
+| [`initial_drivers`](../api/sewer.md#noodl.apps.sewer.network.initial_drivers) | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by outfall and species name. |
+| [`initial_state`](../api/sewer.md#noodl.apps.sewer.network.initial_state) | All-zero state, dispatching on each layer's `quantity` (the app convention). |
 
 ## Network components
 
 Descriptions of the physical objects a network is built from.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `DynamicWaveOptions` | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration controls, and the defaults of `build_dynamic_wave_model`'s (`iterate_tolerances`; docs: "Iteration and convergence"). | `DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5, lengthening_step=0.0, lengthening_routing_step=None, force_main_equation='H-W', allow_ponding=False)` |
-| `Orifice` | An orifice (SWMM `[ORIFICES]`, dynamic wave only) from node `u` to node `v`: a ``"side"`` (vertical) or ``"bottom"`` (horizontal) opening of `shape` ``"circular"`` (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to `u`, with SWMM's ARMCO head loss on forward flow). It starts fully open; control rules (`ControlSet`) move it, `close_time` (hours, SWMM's CloseTime) being the time they take to move it through its full opening (0: at once). `order` is the line of the input file (SWMM's link index order). Flow follows `link.c::orifice_getInflow` (`noodl.apps.sewer.structures`). | `Orifice(name, u, v, orientation, shape, height, crest_height, discharge_coefficient, width=None, flap_gate=False, close_time=0.0, order=0)` |
-| `Weir` | A weir (SWMM `[WEIRS]`, dynamic wave only) from node `u` to node `v`. `kind` is ``"transverse"`` or ``"sideflow"`` (a rectangular opening `width` m wide), ``"v_notch"`` (a triangle `width` m wide at the top) or ``"trapezoidal"`` (bottom `width` m, `side_slopes` the left and right side slopes, horizontal per vertical); its opening is `height` m tall above the crest `crest_height` (m above `u`'s invert). `discharge_coefficient` is SWMM's Cd in SI units (m^0.5/s, the flow ``Cd L h^1.5``, ``Cd L^0.83 h^1.67`` sideflow, ``Cd s h^2.5`` V-notch, in m and m3/s), `end_discharge_coefficient` a trapezoid's end triangles' Cd (SWMM's Cd2), `end_contractions` the number of end contractions (SWMM's EndCon), `can_surcharge` SWMM's CanSurcharge (above the opening the weir flows as an orifice; else its head is capped at the opening height) and `flap_gate` as for `Orifice`. It starts fully open (control rules set its crest). Flow follows `link.c::weir_getInflow` (`noodl.apps.sewer.structures`). | `Weir(name, u, v, kind, height, width, crest_height, discharge_coefficient, side_slopes=(0.0, 0.0), end_contractions=0.0, end_discharge_coefficient=0.0, can_surcharge=True, flap_gate=False, order=0)` |
-| `Outlet` | An outlet (SWMM `[OUTLETS]`, dynamic wave only) from node `u` to node `v`, its crest `crest_height` m above `u`'s invert, with a rating ``("functional", a, b)`` for ``q = a h^b`` (m3/s, h in m) or ``("tabular", heads, flows)`` (m, m3/s; SWMM's RATING curve, heads strictly increasing, held at the end flows outside them). `h` is the upstream depth above the crest (SWMM's /DEPTH, the default) or, with `head_difference`, the head across the outlet (/HEAD). `flap_gate` closes it on flow from `v` to `u`. Flow follows `link.c::outlet_getInflow` (`noodl.apps.sewer.structures`). | `Outlet(name, u, v, crest_height, rating, head_difference=False, flap_gate=False, order=0)` |
-| `Pump` | A pump (SWMM `[PUMPS]`, dynamic wave only) from node `u` (its inlet, a manhole) to node `v`. `kind` is SWMM's pump type: ``"type1"`` (PUMP1 curve: flow steps with the inlet node's volume), ``"type2"`` (PUMP2: steps with the inlet depth), ``"type3"`` (PUMP3: flow against the head delivered, `v` minus `u`), ``"type4"`` (PUMP4: continuous in the inlet depth), ``"type5"`` (PUMP5: the variable-speed PUMP3, head divided by the squared speed `setting`) or ``"ideal"`` (no curve: the pump takes its inlet node's inflow). `curve` is ``(x values, flows)`` in SI (x in m3 for type1, m otherwise; flows m3/s; x strictly increasing); an ideal pump has none. The pump starts ON (`initial_on`, SWMM's Status), switches OFF when its inlet depth falls below `shutoff_depth` (m) and back ON above `startup_depth` (m); 0 disables either. Control rules can switch it and set its speed (`ControlSet`). `order` is the line of the input file (SWMM's link index order). | `Pump(name, u, v, kind='ideal', curve=(), initial_on=True, startup_depth=0.0, shutoff_depth=0.0, order=0)` |
-| `Manhole` | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth, m >= 0): how far dynamic-wave routing lets the water rise above the full depth before the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`). A `storage` curve makes it a SWMM storage unit (dynamic wave only). `ponded_area` is SWMM's Aponded (m2 >= 0): with `DynamicWaveOptions.allow_ponding` a flooded junction with a positive one stores the water above its full depth over that area instead of losing it (dynamic wave only; not for a storage unit). A storage unit also has SWMM's `evaporation_factor` Fevap (-, >= 0: the fraction of the potential evaporation rate it loses over its surface area) and an `exfiltration` (`Exfiltration`) into the soil (dynamic wave only; both need `SewerNetwork.climate` or subcatchment hydrology for the evaporation rate and the conductivity adjustment). | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0, initial_depth=0.0, storage=None, ponded_area=0.0, evaporation_factor=0.0, exfiltration=None)` |
-| `Outfall` | An outfall, where the network discharges: its `invert` elevation (m). | `Outfall(name, invert, kind='free', stage=None, flap_gate=False, tide=None, series=None, stage_series=None)` |
-| `Pipe` | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). `inlet_offset` and `outlet_offset` (m) are the heights of the pipe invert above the invert of its `u` and `v` node (SWMM's link offsets). | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0, barrels=1, max_flow=None, initial_flow=0.0, flap_gate=False, flap_gate_reversed=False, xsect=None, loss_inlet=0.0, loss_outlet=0.0, loss_average=0.0, transect_length_factor=1.0, culvert=0, seepage=0.0)` |
-| `SewerNetwork` | A gravity sewer: manholes, pipes, outfalls. Kinematic-wave and steady routing need a dendritic network (one outgoing pipe per manhole); dynamic-wave routing allows loops and flat pipes. | `SewerNetwork(manholes, pipes, outfalls, routing='kinematic_wave', notes=<factory>, geometry='analytic', dynamic_wave=DynamicWaveOptions(routing_step=20.0, inertial_damping='partial', normal_flow_limited='both', surcharge_method='extran', min_surface_area=None, head_tolerance=None, max_trials=None, variable_step=0.0, minimum_step=0.5, lengthening_step=0.0, lengthening_routing_step=None, force_main_equation='H-W', allow_ponding=False), orifices=(), weirs=(), outlets=(), inflows=None, pumps=(), controls=None, climate=None)` |
-| `Transect` | One `[TRANSECTS]` entry (`transect.c`), SI. ``stations`` (m, across the section, with the ``X1`` station multiplier applied) and ``elevations`` (m, with the ``yFactor`` offset applied); ``left_bank``, ``right_bank`` (m, station multiplier applied) end the overbanks; ``n_left``, ``n_right``, ``n_channel`` the Manning n values SWMM holds when it validates the transect (`transect_validate`: the main channel's, as stored, is the conduit's roughness) and ``length_factor`` the ratio of the main channel to the flood-plain length (``Lfactor``, `X1` field 8). SWMM scales the channel's n by ``sqrt(length_factor)`` in the tables and the conduit's roughness likewise (`link.c::conduit_validate`), and divides the conduit's length by ``length_factor`` (`conduit_getLength`). | `Transect(name, stations, elevations, left_bank, right_bank, n_left, n_right, n_channel, length_factor=1.0)` |
-| `Xsect` | A conduit's cross section as SWMM reads it (`[XSECTIONS]`), SI. | `Xsect(kind, geom=(), transect=None, curve=None)` |
-| `Adjustments` | `[ADJUSTMENTS]`: monthly `evaporation` (added to the rate, in/day or mm/day), `rainfall` and `conductivity` (multipliers, 12 each). | `Adjustments(evaporation=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), rainfall=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0), conductivity=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0))` |
-| `CurveNumber` | SCS Curve Number infiltration (``CURVE_NUMBER``): `curve_number` (clamped to 10..99, as SWMM does) and `dry_time` (s), the time for the soil's storage to regenerate; the obsolete conductivity of the file's line is not used by SWMM and is not kept. | `CurveNumber(curve_number, dry_time)` |
-| `Evaporation` | Potential evaporation of the subcatchments (`[EVAPORATION]`): `kind` ``constant`` or ``monthly`` (`monthly` holds the 12 monthly rates, in/day or mm/day) or ``timeseries`` (`series`: dates in s since START, rates in/day or mm/day, a step function), `dry_only` allows evaporation only when it is not raining and `recovery` the optional monthly factors of ``RECOVERY`` that scale the soil recovery of the infiltration models. | `Evaporation(kind='constant', monthly=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), series=None, dry_only=False, recovery=None)` |
-| `Exfiltration` | The seepage of a storage unit into the soil below it (SWMM's ``[STORAGE]`` exfiltration fields, `exfil.c`): the saturated hydraulic `conductivity` Ksat (m/s) and, for SWMM's modified Green-Ampt model, the capillary `suction` head (m) and the maximum initial moisture deficit `initial_deficit` (-, IMDmax). With ``initial_deficit == 0`` (the single Ksat form always) the rate is Ksat times the monthly conductivity adjustment, whatever the depth; with a positive one it follows the Green-Ampt model at the storage depth. `us_units` says whether the file was in US units, which decides the one place SWMM reads an area in the wrong unit (`losses.StorageLosses`). | `Exfiltration(conductivity, suction=0.0, initial_deficit=0.0, us_units=True)` |
-| `GreenAmpt` | Green-Ampt infiltration (``GREEN_AMPT`` or ``MODIFIED_GREEN_AMPT``): `suction` the capillary suction head (m), `conductivity` the saturated hydraulic conductivity (m/s) and `initial_deficit` the initial moisture deficit (fraction of the upper zone's volume, 0 to 1). `modified` selects SWMM's modified method (a new event does not reset the moisture deficit while the rain stays below the conductivity). | `GreenAmpt(suction, conductivity, initial_deficit, modified=False)` |
-| `Horton` | Horton infiltration (`[INFILTRATION]` ``HORTON`` or ``MODIFIED_HORTON``). | `Horton(f0, fmin, decay, dry_time, max_volume=0.0, modified=False)` |
-| `Hydrology` | The hydrology of a SWMM file: `gages`, `subcatchments`, `evaporation` and `adjustments`, on the calendar that starts at `start` and lasts `total_duration` s, with the runoff steps `wet_step` and `dry_step` (s; `wet_step` already lowered to the smallest rain interval, SWMM's ``gage_validate``, and `dry_step` raised to it). `us_units` says whether the rain and evaporation values of the file are in inches (else millimetres). `ignore_rainfall` is SWMM's IGNORE_RAINFALL. `rdii` is the file's RDII (`rdii.Rdii`; its unit hydrograph sets read rain gages, which SWMM then counts as used), or ``None``. | `Hydrology(gages, subcatchments, start, total_duration, wet_step=300.0, dry_step=3600.0, us_units=True, evaporation=Evaporation(kind='constant', monthly=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), series=None, dry_only=False, recovery=None), adjustments=Adjustments(evaporation=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), rainfall=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0), conductivity=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)), ignore_rainfall=False, rdii=None)` |
-| `RainGage` | A rain gage with a time series (`[RAINGAGES]` ``TIMESERIES``): `series` holds the rainfall in the file's rain units (in or mm per interval, or per hour) at the dates (s since the simulation START) of its entries, `kind` is ``intensity``, ``volume`` or ``cumulative`` and `interval` the recording interval (s). `snow_factor` (SWMM's snow catch deficiency factor) multiplies snowfall only and is 1 here (there is no snowfall). | `RainGage(name, series, kind='volume', interval=3600.0, snow_factor=1.0)` |
-| `Subareas` | A subcatchment's `[SUBAREAS]` line: Manning roughness `n_imperv` and `n_perv`, depression storage `s_imperv` and `s_perv` (m), `pct_zero` (percent of the impervious area with no depression storage), `route_to` (``outlet``, ``impervious`` or ``pervious``) and `pct_routed` (percent of the routed subarea's runoff that goes to the other subarea). Any number may be a torch scalar. | `Subareas(n_imperv, n_perv, s_imperv, s_perv, pct_zero=25.0, route_to='outlet', pct_routed=100.0)` |
-| `Subcatchment` | A subcatchment (`[SUBCATCHMENTS]` with its `[SUBAREAS]` and `[INFILTRATION]` lines). | `Subcatchment(name, gage, outlet, area, pct_imperv, width, slope, subareas=None, infiltration=None, outlet_is_subcatchment=False, n_perv_pattern=None, storage_pattern=None, infiltration_pattern=None)` |
-| `Rdii` | The RDII of a SWMM file: `sets` (`UnitHydrographSet`) and `inflows` (`RdiiInflow`, one per node). `ignore` is IGNORE_RDII. A set that no `[RDII]` line names still advances the rain gage (SWMM processes every set), so it stays here. | `Rdii(sets, inflows, ignore=False)` |
-| `RdiiInflow` | An `[RDII]` line: the `node` that receives the RDII of the unit hydrograph set `unit_hydrograph` over the sewershed `area` (m2; a torch scalar allowed). | `RdiiInflow(node, unit_hydrograph, area)` |
-| `UnitHydrograph` | One triangular unit hydrograph (SHORT, MEDIUM or LONG) of a month: response ratio `r` (the fraction of the rainfall that becomes RDII), time to peak `t` and recession ratio `k` (hours; the base is ``t * (1 + k)``) and the initial abstraction `ia_max` (rain depth, in or mm), `ia_recovery` (depth per day) and `ia_initial` (the depth used at the start of the run). Any number may be a torch scalar. | `UnitHydrograph(r=0.0, t=0.0, k=0.0, ia_max=0.0, ia_recovery=0.0, ia_initial=0.0)` |
-| `UnitHydrographSet` | A `[HYDROGRAPHS]` set: the rain `gage` it reads (``None`` when the file gives none) and `responses`, twelve months (January first) of three `UnitHydrograph` (short, medium, long). | `UnitHydrographSet(name, gage, responses)` |
+| Name | What it does |
+|---|---|
+| [`DynamicWaveOptions`](../api/sewer.md#noodl.apps.sewer.dynwave.DynamicWaveOptions) | SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults. |
+| [`Orifice`](../api/sewer.md#noodl.apps.sewer.network.Orifice) | An orifice (SWMM `[ORIFICES]`, dynamic wave only) from node `u` to node `v`: a ``"side"`` (vertical) or ``"bottom"`` (horizontal) opening of `shape` ``"circular"`` (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to `u`, with SWMM's ARMCO head loss on forward flow). |
+| [`Weir`](../api/sewer.md#noodl.apps.sewer.network.Weir) | A weir (SWMM `[WEIRS]`, dynamic wave only) from node `u` to node `v`. |
+| [`Outlet`](../api/sewer.md#noodl.apps.sewer.network.Outlet) | An outlet (SWMM `[OUTLETS]`, dynamic wave only) from node `u` to node `v`, its crest `crest_height` m above `u`'s invert, with a rating ``("functional", a, b)`` for ``q = a h^b`` (m3/s, h in m) or ``("tabular", heads, flows)`` (m, m3/s; SWMM's RATING curve, heads strictly increasing, held at the end flows outside them). |
+| [`Pump`](../api/sewer.md#noodl.apps.sewer.network.Pump) | A pump (SWMM `[PUMPS]`, dynamic wave only) from node `u` (its inlet, a manhole) to node `v`. |
+| [`Manhole`](../api/sewer.md#noodl.apps.sewer.network.Manhole) | A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow` (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth, m >= 0): how far dynamic-wave routing lets the water rise above the full depth before the manhole floods (kinematic and steady routing ignore it). |
+| [`Outfall`](../api/sewer.md#noodl.apps.sewer.network.Outfall) | An outfall, where the network discharges: its `invert` elevation (m). |
+| [`Pipe`](../api/sewer.md#noodl.apps.sewer.network.Pipe) | A conduit from manhole `u` to `v`: `length` and `diameter` (m), Manning's `n` and bed `slope` (m/m). |
+| [`SewerNetwork`](../api/sewer.md#noodl.apps.sewer.network.SewerNetwork) | A gravity sewer: manholes, pipes, outfalls. |
+| [`Transect`](../api/sewer.md#noodl.apps.sewer.xsect_spec.Transect) | One `[TRANSECTS]` entry, in SI. |
+| [`Xsect`](../api/sewer.md#noodl.apps.sewer.xsect_spec.Xsect) | A conduit's cross section as SWMM reads it (`[XSECTIONS]`), SI. |
+| [`Adjustments`](../api/sewer.md#noodl.apps.sewer.runoff.Adjustments) | `[ADJUSTMENTS]`: monthly `evaporation` (added to the rate, in/day or mm/day), `rainfall` and `conductivity` (multipliers, 12 each). |
+| [`CurveNumber`](../api/sewer.md#noodl.apps.sewer.runoff.CurveNumber) | SCS Curve Number infiltration (``CURVE_NUMBER``): `curve_number` (clamped to 10..99, as SWMM does) and `dry_time` (s), the time for the soil's storage to regenerate; the obsolete conductivity of the file's line is not used by SWMM and is not kept. |
+| [`Evaporation`](../api/sewer.md#noodl.apps.sewer.runoff.Evaporation) | Potential evaporation of the subcatchments (`[EVAPORATION]`): `kind` ``constant`` or ``monthly`` (`monthly` holds the 12 monthly rates, in/day or mm/day) or ``timeseries`` (`series`: dates in s since START, rates in/day or mm/day, a step function), `dry_only` allows evaporation only when it is not raining and `recovery` the optional monthly factors of ``RECOVERY`` that scale the soil recovery of the infiltration models. |
+| [`Exfiltration`](../api/sewer.md#noodl.apps.sewer.network.Exfiltration) | The seepage of a storage unit into the soil below it (SWMM's ``[STORAGE]`` exfiltration fields): the saturated hydraulic `conductivity` Ksat (m/s) and, for SWMM's modified Green-Ampt model, the capillary `suction` head (m) and the maximum initial moisture deficit `initial_deficit` (-, IMDmax). |
+| [`GreenAmpt`](../api/sewer.md#noodl.apps.sewer.runoff.GreenAmpt) | Green-Ampt infiltration (``GREEN_AMPT`` or ``MODIFIED_GREEN_AMPT``): `suction` the capillary suction head (m), `conductivity` the saturated hydraulic conductivity (m/s) and `initial_deficit` the initial moisture deficit (fraction of the upper zone's volume, 0 to 1). |
+| [`Horton`](../api/sewer.md#noodl.apps.sewer.runoff.Horton) | Horton infiltration (`[INFILTRATION]` ``HORTON`` or ``MODIFIED_HORTON``). |
+| [`Hydrology`](../api/sewer.md#noodl.apps.sewer.runoff.Hydrology) | The hydrology of a SWMM file: `gages`, `subcatchments`, `evaporation` and `adjustments`, on the calendar that starts at `start` and lasts `total_duration` s, with the runoff steps `wet_step` and `dry_step` (s; `wet_step` already lowered to the smallest rain interval, SWMM's ``gage_validate``, and `dry_step` raised to it). |
+| [`RainGage`](../api/sewer.md#noodl.apps.sewer.runoff.RainGage) | A rain gage with a time series (`[RAINGAGES]` ``TIMESERIES``): `series` holds the rainfall in the file's rain units (in or mm per interval, or per hour) at the dates (s since the simulation START) of its entries, `kind` is ``intensity``, ``volume`` or ``cumulative`` and `interval` the recording interval (s). |
+| [`Subareas`](../api/sewer.md#noodl.apps.sewer.runoff.Subareas) | A subcatchment's `[SUBAREAS]` line: Manning roughness `n_imperv` and `n_perv`, depression storage `s_imperv` and `s_perv` (m), `pct_zero` (percent of the impervious area with no depression storage), `route_to` (``outlet``, ``impervious`` or ``pervious``) and `pct_routed` (percent of the routed subarea's runoff that goes to the other subarea). |
+| [`Subcatchment`](../api/sewer.md#noodl.apps.sewer.runoff.Subcatchment) | A subcatchment (`[SUBCATCHMENTS]` with its `[SUBAREAS]` and `[INFILTRATION]` lines). |
+| [`Rdii`](../api/sewer.md#noodl.apps.sewer.rdii.Rdii) | The RDII of a SWMM file: `sets` (`UnitHydrographSet`) and `inflows` (`RdiiInflow`, one per node). |
+| [`RdiiInflow`](../api/sewer.md#noodl.apps.sewer.rdii.RdiiInflow) | An `[RDII]` line: the `node` that receives the RDII of the unit hydrograph set `unit_hydrograph` over the sewershed `area` (m2; a torch scalar allowed). |
+| [`UnitHydrograph`](../api/sewer.md#noodl.apps.sewer.rdii.UnitHydrograph) | One triangular unit hydrograph (SHORT, MEDIUM or LONG) of a month: response ratio `r` (the fraction of the rainfall that becomes RDII), time to peak `t` and recession ratio `k` (hours; the base is ``t * (1 + k)``) and the initial abstraction `ia_max` (rain depth, in or mm), `ia_recovery` (depth per day) and `ia_initial` (the depth used at the start of the run). |
+| [`UnitHydrographSet`](../api/sewer.md#noodl.apps.sewer.rdii.UnitHydrographSet) | A `[HYDROGRAPHS]` set: the rain `gage` it reads (``None`` when the file gives none) and `responses`, twelve months (January first) of three `UnitHydrograph` (short, medium, long). |
 
 ## Constitutive laws
 
 The relation between the flow through an edge and the potential difference across it.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `DynamicWaveConduit` | SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass. | `DynamicWaveConduit(kind='pipe')` |
-| `StructureLink` | A flow regulator (orifice, weir or outlet) or pump with its flow linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp (a pump's, which never flows backwards). | `StructureLink(kind)` |
-| `Headspace` | ``dp = R \|Q\| Q`` on a headspace edge, with ``R`` read from per-edge drivers. | `Headspace(length, pipe_positions, *, f_air=0.02, rho_air=1.2041, area_key='sewer.A_air', dh_key='sewer.D_h', dp_transition=1e-08, kind='headspace', learnable=False)` |
+| Name | What it does |
+|---|---|
+| [`DynamicWaveConduit`](../api/sewer.md#noodl.apps.sewer.dynwave.DynamicWaveConduit) | SWMM's dynamic-wave conduit with its coefficients frozen for one pass. |
+| [`StructureLink`](../api/sewer.md#noodl.apps.sewer.dynwave.StructureLink) | A flow regulator (orifice, weir or outlet) or pump with its flow linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp (a pump's, which never flows backwards). |
+| [`Headspace`](../api/sewer.md#noodl.apps.sewer.air.Headspace) | ``dp = R \|Q\| Q`` on a headspace edge, with ``R`` read from per-edge drivers. |
 
 ## Heads
 
 Terms added to an edge's potential difference (stack, wind, drag).
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `Drag` | Interfacial drag as a head term: the shear a moving water surface exerts on the air. | `Drag(length, pipe_positions, *, f_i=0.000749, c_s=1.0, rho_air=1.2041, v_key='sewer.v', width_key='sewer.T', area_key='sewer.A_air', zero_positions=(), kind='headspace')` |
+| Name | What it does |
+|---|---|
+| [`Drag`](../api/sewer.md#noodl.apps.sewer.air.Drag) | Interfacial drag as a head term: the shear a moving water surface exerts on the air. |
 
 ## Closures
 
 Functions of the state that compute drivers each step (densities, flows, levels).
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `DynamicWaveHydraulics` | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. | `DynamicWaveHydraulics(graph, net, *, layer='water', quality_layer=None, air=False, air_quality_layer='air_quality')` |
-| `H2STransfer` | Two-film water-to-air H2S transfer, as a `Model` closure. | `H2STransfer(n_nodes, manhole_idx, *, sulfide=1, water_layer='water_quality', air_layer='air_quality', out_pipe=None)` |
-| `SewerHydraulics` | The water side of a sewer, as a `Model` closure. | `SewerHydraulics(net, pipes, manholes, *, storage=False, dt=None, quality_layer='water_quality', air_quality_layer='air_quality', shaft_depth=None, surface_area=None, geometry='analytic', name='sewer')` |
+| Name | What it does |
+|---|---|
+| [`DynamicWaveHydraulics`](../api/sewer.md#noodl.apps.sewer.dynwave.DynamicWaveHydraulics) | The dynamic-wave closure: the conduit coefficients, junction surface areas and outfall heads of one pass, from the previous pass's heads and flows. |
+| [`H2STransfer`](../api/sewer.md#noodl.apps.sewer.quality.H2STransfer) | Two-film water-to-air H2S transfer, as a `Model` closure. |
+| [`SewerHydraulics`](../api/sewer.md#noodl.apps.sewer.hydraulics.SewerHydraulics) | The water side of a sewer, as a `Model` closure. |
 
 ## Reactions
 
 Transformations applied to transported species each step.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `OverflowLoss` | The contents a flooded junction loses with its overflow (a dynamic-wave quality reaction). | `OverflowLoss(n_species, layer='water_quality')` |
-| `SulfideGeneration` | Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay. | `SulfideGeneration(*, bod=0, sulfide=1, m_prime=0.00032, m_loss=0.64, k_bod=0.2, out_pipe=None, manhole_idx=None, n_nodes=None, n_species=None)` |
+| Name | What it does |
+|---|---|
+| [`OverflowLoss`](../api/sewer.md#noodl.apps.sewer.dynwave.OverflowLoss) | The contents a flooded junction loses with its overflow (a dynamic-wave quality reaction). |
+| [`SulfideGeneration`](../api/sewer.md#noodl.apps.sewer.quality.SulfideGeneration) | Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay. |
 
 ## Sources and storage
 
 Nodal sources, withdrawals and storage.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `JunctionStorage` | SWMM's junction continuity as a node storage: trapezoidal storage over the step, with a stiff bed below the invert, or no storage at all where the junction is EXTRAN-surcharged, capped by flooding at the junction's top. | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None, surchargeable=None, pond_head=None)` |
+| Name | What it does |
+|---|---|
+| [`JunctionStorage`](../api/sewer.md#noodl.apps.sewer.dynwave.JunctionStorage) | SWMM's junction continuity as a node storage: trapezoidal storage over the step, with a stiff bed below the invert, or no storage at all where the junction is EXTRAN-surcharged, capped by flooding at the junction's top. |
 
 ## Files
 
 Readers and writers of other tools' file formats.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `read_swmm_inp` | `(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`. | `read_swmm_inp(path, *, geometry='tabulated')` |
+| Name | What it does |
+|---|---|
+| [`read_swmm_inp`](../api/sewer.md#noodl.apps.sewer.inp.read_swmm_inp) | `(network, {node: {pollutant: kg/m3}}, {pollutant: {...}})` for `path`. |
 
 ## Other classes
 
 Supporting types.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `StorageCurves` | The storage area (m2) and volume (m3) of every junction as functions of its depth (m), vectorised over the junctions (no per-junction loop on a pass); a junction with no curve (``None``) has neither. `full_depth` (m, per junction) caps the volume (node.c:943-945); a curve whose full volume is negative is refused by name with `names` (node.c:219-222). | `StorageCurves(curves, full_depth, names=None)` |
-| `RunoffInflows` | The lateral inflow of a SWMM model with subcatchments: the `hydrology` and the file's `schedule` (`InflowSchedule` of time series, patterns, dry-weather flow; ``None`` if none). It stands where an `InflowSchedule` does (``net.inflows``, ``model.inflow_schedule``): `start`, `nodes`, ``driver(names)``, ``flows(t)``, ``at``. ``driver(names)`` is the ``inflow`` callable of `simulate_dynamic_wave` (it makes a fresh `RunoffModel` each time, so every run starts from dry subcatchments). Runoff to a node that is not in `nodes` of the network (an outfall) is dropped by the reader, as the dynamic wave ignores lateral inflow at an outfall; so is RDII (`rdii.py`) to a node outside `rdii_nodes`, which defaults to the nodes of ``hydrology.rdii``. The RDII of the file joins the runoff in the driver, whether or not the file has subcatchments. | `RunoffInflows(hydrology, schedule=None, nodes=None, rdii_nodes=None)` |
-| `RunoffModel` | SWMM's runoff computation for a `Hydrology`, advanced runoff step by runoff step. | `RunoffModel(hydrology)` |
-| `RdiiModel` | SWMM's RDII computation for an `Rdii` under the rain gages, calendar, WET_STEP and rainfall adjustments of a `Hydrology`. ``flows(t)`` is the RDII ``{node: m3/s}`` that SWMM adds to the lateral inflow of a routing step that starts `t` s into the run (sampled at ``t + 1 ms``, as the interface file is read); `t` must not decrease between calls by more than the record in force (the records are computed in order and kept). ``records`` holds ``{record number: {node: cfs}}`` for the records with some RDII, a record being ``RdiiStep`` long. | `RdiiModel(rdii, hydrology)` |
+| Name | What it does |
+|---|---|
+| [`StorageCurves`](../api/sewer.md#noodl.apps.sewer.storage.StorageCurves) | The storage area (m2) and volume (m3) of every junction as functions of its depth (m), vectorised over the junctions (no per-junction loop on a pass); a junction with no curve (``None``) has neither. |
+| [`RunoffInflows`](../api/sewer.md#noodl.apps.sewer.runoff.RunoffInflows) | The lateral inflow of a SWMM model with subcatchments: the `hydrology` and the file's `schedule` (`InflowSchedule` of time series, patterns, dry-weather flow; ``None`` if none). |
+| [`RunoffModel`](../api/sewer.md#noodl.apps.sewer.runoff.RunoffModel) | SWMM's runoff computation for a `Hydrology`, advanced runoff step by runoff step. |
+| [`RdiiModel`](../api/sewer.md#noodl.apps.sewer.rdii.RdiiModel) | SWMM's RDII computation for an `Rdii` under the rain gages, calendar, WET_STEP and rainfall adjustments of a `Hydrology`. |
 
 ## Functions
 
 Calculations and helpers.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `build_dynamic_wave_model` | Assemble a dynamic-wave sewer and return ``(model, state, drivers)``. | `build_dynamic_wave_model(net, *, iterate_tol=None, iterate_max=None, relaxation=0.5, acceleration='anderson', memory=5, iterate_flow_tol=None, outfall_stage=None, quality=False, species=('bod', 'sulfide'), scheme='backward_euler', air=False, f_air=0.02, f_i=0.000749, c_s=1.0, leak_area=0.0008, leak_cd=0.6, fans=())` |
-| `simulate_dynamic_wave` | Run the dynamic wave from `state` for `steps` steps, or for `duration` s. | `simulate_dynamic_wave(model, state, drivers, *, steps=None, duration=None, dt=None, inflow=None, outfall_stage=None, record=('water.phi', 'water.q'), diagnostics=None, **solve_kwargs)` |
-| `tidal_stage` | A TIDAL outfall's stage elevation (m) `t` s into the run (`node.c:: outfall_setOutletDepth`, node.c:1445-1452): the curve `tide` of ``(hour, stage)`` pairs is read at ``x = x_first + 24 frac(t / 1 day)`` (the elapsed time, not the clock time: the simulation's start is not added, so the tide begins at the curve's first hour and repeats every 24 h), by `table.c::table_lookup`: the first stage at or below the first hour, linear between entries, the last stage beyond the last hour (the curve is not wrapped, so one that stops short of 24 h holds its last stage). | `tidal_stage(tide, t)` |
-| `storage_unit` | A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert` (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert + max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow` (m3/s), SWMM's Fevap `evaporation_factor` and `exfiltration` (`Manhole`). Tabular depths and areas are stored as tuples (the manhole is hashable). | `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0, evaporation_factor=0.0, exfiltration=None)` |
-| `air_geometry` | ``(A_air, P_air, D_h)`` for the headspace above the water surface. | `air_geometry(h, diameter)` |
-| `capacity_flow` | ``Q_max = Q(H_MAX_RATIO D)``: the largest discharge the ascending Manning branch carries, and the surcharge threshold. | `capacity_flow(diameter, roughness, slope)` |
-| `henry_h2s` | Dimensionless Henry constant ``H = C_gas / C_liquid`` at absolute temperature (K). | `henry_h2s(temperature)` |
-| `kla_h2s` | ``K_L a`` in 1/s from the per-hour correlation ``a (1 + b Fr^2)(S0 V)^(3/8)/d_m``. | `kla_h2s(slope, velocity, depth, *, a=0.86, b=0.2)` |
-| `manning_flow` | Manning discharge ``Q = (1/n) A R^(2/3) sqrt(S0)`` (m^3/s), SI constant 1.0. | `manning_flow(h, diameter, roughness, slope)` |
-| `normal_depth` | Manning normal depth (m) for discharge ``q``, batched over pipes and instances. | `normal_depth(q, diameter, roughness, slope, *, names=None, tol=1e-14)` |
-| `pipe_table` | One row per pipe of every quantity the hydraulics closure publishes (the model's `pipe_columns` when it declares them, as a dynamic-wave model does); optionally to CSV. | `pipe_table(model, state, drivers, *, path=None)` |
-| `sewer_steady` | The explicit fixed point of transport PLUS reactions (the `street_steady` pattern). | `sewer_steady(model, state, drivers, *, reaction=None, dt=60.0, max_iter=500, tol=1e-12)` |
-| `to_mg_per_litre` | kg/m3 -> mg/L (the factor is exactly 1e3). | `to_mg_per_litre(x)` |
-| `to_ppm` | kg/m3 of headspace H2S -> ppm by volume at the headspace temperature (K). | `to_ppm(concentration, temperature)` |
-| `tree_steady` | The committed 5-conduit, 6-node fixture (`tests/data/sewer/tree_steady.inp`). | `tree_steady()` |
-| `unit_factors` | `(length, flow)` for the SWMM `FLOW_UNITS` keyword `flow_units`: the metres per length unit (0.3048 for the US system CFS, GPM and MGD, 1 for CMS, LPS and MLD) and the m3/s per flow unit, SWMM's own conversion (units.c). An area converts with ``length**2``. Raises ValueError for an unknown keyword. | `unit_factors(flow_units)` |
+| Name | What it does |
+|---|---|
+| [`build_dynamic_wave_model`](../api/sewer.md#noodl.apps.sewer.dynwave.build_dynamic_wave_model) | Assemble a dynamic-wave sewer and return ``(model, state, drivers)``. |
+| [`simulate_dynamic_wave`](../api/sewer.md#noodl.apps.sewer.dynwave.simulate_dynamic_wave) | Run the dynamic wave from `state` for `steps` steps, or for `duration` s. |
+| [`tidal_stage`](../api/sewer.md#noodl.apps.sewer.dynwave.tidal_stage) | A TIDAL outfall's stage elevation (m) `t` s into the run: the curve `tide` of ``(hour, stage)`` pairs is read at ``x = x_first + 24 frac(t / 1 day)`` (the elapsed time, not the clock time: the simulation's start is not added, so the tide begins at the curve's first hour and repeats every 24 h), by `table.c::table_lookup`: the first stage at or below the first hour, linear between entries, the last stage beyond the last hour (the curve is not wrapped, so one that stops short of 24 h holds its last stage). |
+| [`storage_unit`](../api/sewer.md#noodl.apps.sewer.network.storage_unit) | A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert` (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert + max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow` (m3/s), SWMM's Fevap `evaporation_factor` and `exfiltration` (`Manhole`). |
+| [`air_geometry`](../api/sewer.md#noodl.apps.sewer.geometry.air_geometry) | ``(A_air, P_air, D_h)`` for the headspace above the water surface. |
+| [`capacity_flow`](../api/sewer.md#noodl.apps.sewer.geometry.capacity_flow) | ``Q_max = Q(H_MAX_RATIO D)``: the largest discharge the ascending Manning branch carries, and the surcharge threshold. |
+| [`henry_h2s`](../api/sewer.md#noodl.apps.sewer.quality.henry_h2s) | Dimensionless Henry constant ``H = C_gas / C_liquid`` at absolute temperature (K). |
+| [`kla_h2s`](../api/sewer.md#noodl.apps.sewer.quality.kla_h2s) | ``K_L a`` in 1/s from the per-hour correlation ``a (1 + b Fr^2)(S0 V)^(3/8)/d_m``. |
+| [`manning_flow`](../api/sewer.md#noodl.apps.sewer.geometry.manning_flow) | Manning discharge ``Q = (1/n) A R^(2/3) sqrt(S0)`` (m^3/s), SI constant 1.0. |
+| [`normal_depth`](../api/sewer.md#noodl.apps.sewer.geometry.normal_depth) | Manning normal depth (m) for discharge ``q``, batched over pipes and instances. |
+| [`pipe_table`](../api/sewer.md#noodl.apps.sewer.report.pipe_table) | One row per pipe of every quantity the hydraulics closure publishes (the model's `pipe_columns` when it declares them, as a dynamic-wave model does); optionally to CSV. |
+| [`sewer_steady`](../api/sewer.md#noodl.apps.sewer.network.sewer_steady) | The explicit fixed point of transport PLUS reactions (the `street_steady` pattern). |
+| [`to_mg_per_litre`](../api/sewer.md#noodl.apps.sewer.report.to_mg_per_litre) | kg/m3 -> mg/L (the factor is exactly 1e3). |
+| [`to_ppm`](../api/sewer.md#noodl.apps.sewer.report.to_ppm) | kg/m3 of headspace H2S -> ppm by volume at the headspace temperature (K). |
+| [`tree_steady`](../api/sewer.md#noodl.apps.sewer.network.tree_steady) | A small example network of 5 conduits and 6 nodes. |
+| [`unit_factors`](../api/sewer.md#noodl.apps.sewer.inp.unit_factors) | `(length, flow)` for the SWMM `FLOW_UNITS` keyword `flow_units`: the metres per length unit (0.3048 for the US system CFS, GPM and MGD, 1 for CMS, LPS and MLD) and the m3/s per flow unit, SWMM's own conversion. |
 
 ## Constants and tables
 

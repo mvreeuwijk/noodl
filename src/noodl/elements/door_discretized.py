@@ -184,7 +184,9 @@ class _InflowDensities:
 
 
 class DoorCompartmentHead(_InflowDensities):
-    """The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl head term:
+    """The hydrostatic head of one compartment of a discretised door.
+
+    It is the hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl head term:
     ``rho_A hAg[i] - rho_B hBg[i]`` per compartment edge, shape ``(..., n_edges)``.
 
     ``hAg``/``hBg`` are MBL's ``g_n (h - (i - 0.5) dh)`` (``DoorDiscretized.mo:34-40``), one
@@ -703,8 +705,10 @@ def discretized_operable_door(
 
 
 class DoorPortStream(ConstitutiveLaw):
-    """One of the two port streams of a whole discretised door, as ONE edge from side A to
-    side B: ``direction="ab"`` returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns
+    """One port stream of a whole discretised door, as one edge from side A to side B.
+
+    It is one of the two port streams, as ONE edge from side A to side B: ``direction="ab"``
+    returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns
     ``port_b2.m_flow = -port_a2.m_flow = -mBA_flow`` (kg/s, both positive from A to B), from
     the compartment law ``comp`` (:class:`DoorCompartment` or
     :class:`OperableDoorCompartment`, one door) at the compartment pressure differences
