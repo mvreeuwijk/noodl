@@ -1,4 +1,4 @@
-# Components
+# Assembling from components
 
 A component is a piece of network with a declared boundary of ports. It holds its own nodes
 and edges, and it can hold other components, so a building is made of floors, a floor of
