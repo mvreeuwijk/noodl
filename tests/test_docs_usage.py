@@ -56,6 +56,11 @@ PAGES = [
     "applications/water-resources/wsimod-gradients.md",
     "applications/water-resources/wsimod-config.md",
     "applications/electrical/index.md",
+    "applications/electrical/circuits.md",
+    "applications/electrical/ac.md",
+    "applications/electrical/electro-thermal.md",
+    "applications/electrical/power-flow.md",
+    "applications/electrical/modelica.md",
     "applications/electrical/matpower.md",
 ]
 FIXTURES = ["sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",

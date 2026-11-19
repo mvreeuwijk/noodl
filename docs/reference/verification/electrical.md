@@ -2,6 +2,35 @@
 
 Evidence for the [electrical application](../../applications/electrical/index.md); the summary is on the [verification overview](index.md).
 
+## Verification
+
+Every check below is against a closed form or a hand analysis
+(`tests/apps/electrical/`, `tests/layers/test_mna*.py`):
+
+| Circuit | Compared | Tolerance |
+|---|---|---|
+| Divider; balanced and unbalanced Wheatstone bridge; floating voltage source between two non-ground nodes | Node voltages, bridge current | 1e-12 V or A abs |
+| Controlled sources (all four), ideal transformer, coupled windings at DC | Port voltages and currents against hand analysis | 1e-12 abs |
+| RC charge, RL, backward Euler | The exact backward Euler recurrence at every step | 1e-13 abs |
+| RC charge and series RLC ringing, trapezoidal | Convergence order over `dt`, `dt/2`, `dt/4` | order 2 within 0.1 |
+| RC charge through `transient` (backward Euler first step) | Error at 1 s with `dt = 0.01` and order from `dt = 0.02` | error < 1e-4, order >= 1.9 |
+| Series RLC, `ac_sweep` | Current modulus against `1 / sqrt(R^2 + (w L - 1/(w C))^2)` at seven frequencies from `f0/2` to `2 f0`, peak at `f0` | 1e-12 relative |
+| Series RLC, phasor layer | Complex current against `1 / (R + j w L + 1 / (j w C))` at three frequencies | 1e-12 relative |
+| RC with a `Sine` source of phase 0.3 rad, `ac_sweep` | Complex node voltage at three sweep frequencies | 1e-12 relative |
+| RC phasor model, `device_values` | Complex device voltages and currents | 1e-13 relative |
+| Constant-power load behind an impedance, phasor | Load voltage against a fixed-point iteration; drawn power | 1e-12 relative (voltage); 1e-12 abs (power, of magnitude 0.54) |
+| Tellegen identity, real and complex | `power_residual` | 1e-12 |
+| Diode with a resistor and capacitor, transient | KCL at the diode node; the diode current against its law | 1e-15 A abs; 1e-12 relative |
+| Diode behind a resistor, DC | The resistor and diode laws at the solution | 1e-10 and 1e-9 relative |
+| Gradients: a capacitance and a source value through three transient steps; a conductance, a source and a boundary potential at DC; a conductance and a source through a phasor magnitude | `torch.autograd.gradcheck` against finite differences | gradcheck defaults |
+| Gradients of the learnable divider resistances | Closed form | 1e-10 relative |
+| Gradients of an inductance, a mutual inductance, a controlled-source gain and four resistances through `initial_state` and three `transient` steps | Central differences | 1e-8 relative |
+| Power-flow gradients: the bus-3 load of the four-bus network, voltage magnitudes of buses 3 and 4 | Central differences | 1e-6 relative |
+
+Measured: the divider is exact, the backward Euler recurrence holds to 3.3e-16 V, the
+trapezoidal order through `transient` is 1.96 to 1.99 (RC) and 2.01 to 2.03 (RLC) over three
+halvings of the step, and the series RLC phasor current agrees to 4.9e-14 relative.
+
 ## Modelica electrical circuits, model by model
 
 Fourteen example models of the Modelica Standard Library 4.1.0 (`Modelica.Electrical.Analog`)
@@ -11,7 +40,7 @@ and the Modelica Buildings Library v13.0.0 (`Buildings.Electrical`), simulated b
 by column (`tests/verification/test_modelica_electrical_parity.py`). The columns are the
 currents of the MSL devices (with capacitor voltages, heat-port and heat-capacitor
 temperatures) and the conductor potentials and currents of every MBL terminal, real and
-imaginary parts for AC; see [the reader's page](../../applications/building/modelica.md#electrical-circuits).
+imaginary parts for AC; see [the reader's page](../../applications/electrical/modelica.md).
 
 - **Algebraic models** (no capacitor or inductor, so each output time is the same algebraic
   problem for both codes): every column at every row within `|noodl - omc| <= 1e-9 |omc| +
@@ -54,14 +83,11 @@ source `E` also feeds the omitted dynamic branch, so its two current columns are
 compared. Every other column of every CSV is.
 
 **What runs by default.** The algebraic models run in full, except MSL's `Resistor`, whose
-coupled thermal solve at each of its 501 rows takes about 48 s: by default every tenth row.
-Each dynamic model compares its first rows (6 to 100, each window holding the model's worst
-early row: Cauer's step, the first period of the transformers, the diode's first conduction;
+coupled thermal solve at each of its 501 rows is slow: by default every tenth row. Each
+dynamic model compares its first rows (6 to 100, each window holding the model's worst early
+row: Cauer's step, the first period of the transformers, the diode's first conduction;
 `SeriesResonance`'s window ends at 7 ms, well before its resonance at 0.5 s, which only the
-full run reaches); `pytest -m slow` compares every row, between about 1 and 42 minutes a model
-(73 s for `RCModel` to 2,507 s for `SeriesResonance`; each step costs 10 to 30 ms, a coupled
-one about 100 ms). The record is rewritten only by a run with
-`NOODL_RECORD_PARITY=1`.
+full run reaches); the tests marked `slow` compare every row.
 
 ## Power flow against pandapower
 
@@ -80,5 +106,18 @@ cross-checked every case against PYPOWER 5.1.21; the script is never run by the 
 neither package is a dependency of noodl physics. pandapower's own `pandapower.networks.case9`
 and `case118` are not MATPOWER's files: their generator setpoints differ and `case118` loses its
 30° slack angle, which moves voltages by up to 0.04 p.u. and angles by up to 0.52 rad. They are
-not used. The per-case agreement is on the [electrical
-page](../../applications/electrical/index.md#power-flow-against-pandapower).
+not used. Tolerances (absolute): |V| 1e-8 p.u., angles 1e-8 rad, generator P and Q (per bus) and DC
+branch flows 1e-6 p.u. Measured worst absolute differences, against pandapower 3.5.6 (which
+agrees with PYPOWER 5.1.21 to 1.1e-13 or better):
+
+| Case | Newton iterations | \|V\| (p.u.) | Angle (rad) | Pg (p.u.) | Qg (p.u.) | DC angle (rad) | DC Pg (p.u.) | DC branch flow (p.u.) |
+|---|---|---|---|---|---|---|---|---|
+| `case9` | 4 | 7.1e-15 | 1.9e-14 | 1.1e-13 | 4.8e-14 | 5.6e-17 | 0 | 6.7e-16 |
+| `case14` | 5 | 8.9e-16 | 4.4e-16 | 2.2e-15 | 9.3e-15 | 1.1e-16 | 8.9e-16 | 1.1e-15 |
+| `case30` | 4 | 1.6e-15 | 6.7e-15 | 3.4e-14 | 8.4e-15 | 3.5e-17 | 3.9e-16 | 3.9e-16 |
+| `case118` | 5 | 2.9e-15 | 2.8e-15 | 4.6e-14 | 5.1e-14 | 2.8e-15 | 6.7e-15 | 1.4e-14 |
+| `case9_features` | 5 | 2.3e-14 | 2.7e-14 | 2.1e-14 | 1.2e-13 | 8.3e-17 | 5.6e-16 | 6.7e-16 |
+
+Every difference is at round-off, five or more orders inside the tolerance: both codes solve
+the same equations, noodl to a Newton residual of 1e-11 p.u. The reader and the case files are
+described on [MATPOWER files](../../applications/electrical/matpower.md).
