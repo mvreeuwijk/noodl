@@ -6,11 +6,11 @@ documentation** are complete; the test suite enforces all three.
 ## Every change that adds or changes functionality updates the documentation
 
 - **Docstrings.** Every public class, function and option has a docstring whose first
-  paragraph says what it does. The [catalogue](docs/catalogue/core.md) is generated from
+  paragraph says what it does. The [catalogue](docs/reference/catalogue/core.md) is generated from
   them: run `python scripts/gen_catalogue.py` and commit the result. A parameter with a
   physical unit states it in the docstring; the catalogue is where users look it up.
 - **Pages.** Update the application page (`docs/applications/`), and
-  [Using noodl](docs/usage.md) if the common workflow changes. Examples are executed by
+  [Using noodl](docs/guide/workflow.md) if the common workflow changes. Examples are executed by
   `tests/test_docs_usage.py`; mark a snippet that is not meant to run on its own as `py`.
 - **Names.** Identifiers say what they do physically (`temperature`, `roof_exchange`), not
   which tool they come from. Renames do not keep the old name as an alias while noodl is
@@ -62,4 +62,4 @@ cached in `~/.cache/noodl`. To run the slow comparisons for your pull request, a
 `run-slow` label.
 
 A new application also follows the checklist in
-[Extending noodl](docs/development/extending.md#what-a-real-application-must-ship).
+[Extending noodl](docs/project/extending/index.md#what-a-real-application-must-ship).

@@ -15,7 +15,7 @@ pump checks (a curve without a power-function fit, or whose flows do not rise an
 not fall: error 227) and a constant-power pump without a positive power. So reading a file
 never changes what it means and building one never silently drops a feature. The reader
 itself refuses only what it cannot read: a malformed record, an unknown name, a curve used
-in two roles whose units differ, and the `[RULES]` forms `docs/formats/epanet.md` lists.
+in two roles whose units differ, and the `[RULES]` forms `docs/applications/water/epanet.md` lists.
 
 CURVES BY ROLE. `[CURVES]` carries no type of its own, so each curve is converted by the role
 that uses it: a pump HEAD curve or a GPV head-loss curve (flow, length), a pump efficiency

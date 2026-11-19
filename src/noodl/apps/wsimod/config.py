@@ -668,7 +668,8 @@ def read_wsimod_config(
     the forcing files named in it are read relative to that directory), or the parsed mapping
     in the same structure. ``overrides`` replaces top-level keys of the description first,
     as ``Model.load``'s own argument does (``model.py:229-230``). The ``overrides`` section is
-    merged into the nodes' and arcs' parameters (spec, Loading); see ``docs/formats/wsimod.md``
+    merged into the nodes' and arcs' parameters (spec, Loading); see
+    ``docs/applications/water-resources/wsimod-config.md``
     for the keys read, ignored and refused. Every refusal is a ``ValueError`` naming the key.
     """
     if isinstance(source, Mapping):

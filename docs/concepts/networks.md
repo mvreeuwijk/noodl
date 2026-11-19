@@ -80,7 +80,7 @@ interior = net.interior_index(["ambient"])   # solved nodes
 boundary = net.boundary_index(["ambient"])   # prescribed nodes
 ```
 
-Boundary names may be aliases of nodes merged by [components](components.md#names);
+Boundary names may be aliases of nodes merged by [components](../guide/components.md#names);
 `net.canonical(names)` returns the node names they refer to, and both index methods raise
 `ValueError` when two of the names are the same node.
 
@@ -124,7 +124,7 @@ applications use it as one: the sewer application's headspace air layer pins its
 residual below $10^{-10}\,$W (measured $6.1\times10^{-12}$), and the street application checks
 that every kilogram emitted crosses the atmosphere boundary exactly. A model that violates
 Tellegen has a bug in its conservation, and the identity catches it without a reference
-solution. [The theory page](../theory.md) develops this properly.
+solution. [The theory page](theory.md) develops this properly.
 
 ## Devices and dtype
 

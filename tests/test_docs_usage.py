@@ -20,17 +20,17 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = [
-    "usage.md",
-    "concepts/components.md",
+    "guide/workflow.md",
+    "guide/components.md",
     "concepts/elements.md",
-    "applications/building_physics.md",
-    "applications/street_aq.md",
-    "applications/sewer.md",
-    "applications/water.md",
-    "applications/allocation.md",
-    "applications/wsimod.md",
-    "applications/electrical.md",
-    "formats/matpower.md",
+    "applications/building/index.md",
+    "applications/street/index.md",
+    "applications/sewer/index.md",
+    "applications/water/index.md",
+    "applications/water-resources/allocation.md",
+    "applications/water-resources/wsimod.md",
+    "applications/electrical/index.md",
+    "applications/electrical/matpower.md",
 ]
 FIXTURES = ["sewer/*.inp", "water/*.inp", "allocation/*.json", "contam/*", "wsimod/small/*",
             "modelica/ChimneyShaftWithVolume.json",

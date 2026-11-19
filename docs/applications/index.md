@@ -3,22 +3,22 @@
 noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
 layer of domain physics (its constitutive laws, heads and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
-file; see [File formats](../formats/index.md). Every application is initialised the same way,
+file; see [File formats](../reference/formats.md). Every application is initialised the same way,
 with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
-[Using noodl](../usage.md). The electrical application has no `initial_drivers`: its
+[Using noodl](../guide/workflow.md). The electrical application has no `initial_drivers`: its
 `build_model` returns every driver, and `initial_state(model, drivers)` solves the consistent
 initial point of the circuit.
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
-| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | Kirchhoff: Newton on zone pressure | `build_model` |
-| [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
-| [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
-| [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| [WSIMOD](wsimod.md) | WSIMOD's urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed; bitwise equal to WSIMOD 0.8.1 | `build_model`, `read_wsimod_config` |
-| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
-| [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
+| [Building physics](building/index.md) | Multi-zone airflow, heat, contaminants | Kirchhoff: Newton on zone pressure | `build_model` |
+| [Street air quality](street/index.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
+| [Sewers](sewer/index.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
+| [Water distribution](water/index.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
+| [Flow allocation](water-resources/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
+| [WSIMOD](water-resources/wsimod.md) | WSIMOD's urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed; bitwise equal to WSIMOD 0.8.1 | `build_model`, `read_wsimod_config` |
+| [Electrical circuits](electrical/index.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
+| [Coupling](../guide/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
 
@@ -42,7 +42,7 @@ all four:
   request, clipped against capacity and headroom.
 - The **WSIMOD** application is a closure too: WSIMOD's own day of push and pull requests,
   transcribed call for call, so the flows are WSIMOD's rules, bitwise equal to WSIMOD 0.8.1 on its
-  demos and on 36 purpose-built cases, batched and differentiable ([verification](../verification.md)).
+  demos and on 36 purpose-built cases, batched and differentiable ([verification](../reference/verification/index.md)).
 - The **electrical circuits** application solves for a potential, the node voltage, with the
   currents of ideal sources, inductors and transformers as extra unknowns: the nodal solve the
   building and water applications use, with the implicit laws' flows added as unknowns.
@@ -75,14 +75,14 @@ Each page states its comparisons with an explicit tolerance and the value actual
 pages are equally explicit about what a comparison *does not* show, and those caveats are
 sometimes the most important thing on the page:
 
-- The [flow allocation](allocation.md#where-the-layer-differs-from-wsimod) page
+- The [flow allocation](water-resources/allocation.md#where-the-layer-differs-from-wsimod) page
   explains that WSIMOD's shipped demos never exercise a binding clip, how scripted WSIMOD cases
   cover those branches instead, and where the layer's semantics differ from WSIMOD's: sharing
   one node's headroom, and bottlenecks behind a pass-through node.
-- The [street air quality](street_aq.md#limitations-and-caveats) page records that the published
+- The [street air quality](street/index.md#limitations-and-caveats) page records that the published
   MUNICH idealised case cannot be reproduced absolutely, because its geometry was never
   published, and states the size of the remaining difference.
-- The [sewer](sewer.md#coefficient-provenance) page marks each coefficient as verified,
+- The [sewer](sewer/index.md#coefficient-provenance) page marks each coefficient as verified,
   calibrated, or unverified, naming the source.
 
 Where a reference model and noodl physics disagree, the pages say which is more likely to be right and

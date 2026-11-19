@@ -96,12 +96,12 @@ door pair (built by `open_door_pair`/`operable_door_pair`) and `DoorCompartment`
 by `discretized_door`/`discretized_operable_door`, or wrapped as two port streams by
 `DoorPortStream`); `AirMedium`, built by `medium(name)`, the fixed-density medium the others
 read. See
-[Airflow elements](../applications/building_physics.md#airflow-elements) for the physics, the
+[Airflow elements](../applications/building/index.md#airflow-elements) for the physics, the
 law each one evaluates and how it differs from its CONTAM counterpart.
 
 Applications add their own: the water application contributes `HazenWilliams`,
 `CompositeDarcyWeisbach`, `PumpCurve` and `MinorLoss`; the sewer application contributes
-`Headspace`; the [electrical application](../applications/electrical.md) contributes the circuit
+`Headspace`; the [electrical application](../applications/electrical/index.md) contributes the circuit
 laws `Resistance`, `Capacitance`, `Inductance`, `PrescribedVoltage`, `PrescribedCurrent`,
 `JunctionDiode`, `SwitchedConductance`, `TransformerRatio`, `MutualInductance` and
 `DependentSource`, most of them in the implicit, multi-port or dynamic forms described
@@ -173,7 +173,7 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   law is regularised there, but not all the same way: `PowerLaw` blends to a laminar
   (linear) form below a `dp_transition` threshold, while the MBL power-law family blends to a
   polynomial below a (wider) `dp_turbulent` threshold — see
-  [Airflow elements](../applications/building_physics.md#airflow-elements). `PowerLaw` with
+  [Airflow elements](../applications/building/index.md#airflow-elements). `PowerLaw` with
   $n < 1$ has infinite slope at the origin without it.
 - **Keep `dflow` consistent with `flow`.** Nothing checks them against each other at runtime. An
   inconsistent pair converges to the right answer slowly, or to a wrong one confidently. Test it

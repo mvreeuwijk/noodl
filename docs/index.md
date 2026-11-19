@@ -49,13 +49,13 @@ physics over the shared core:
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
-| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | Kirchhoff: Newton on zone pressure | `build_model` |
-| [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
-| [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
-| [Flow allocation](applications/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| [Electrical circuits](applications/electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
-| [Coupling](applications/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
+| [Building physics](applications/building/index.md) | Multi-zone airflow, heat and contaminant transport | Kirchhoff: Newton on zone pressure | `build_model` |
+| [Street air quality](applications/street/index.md) | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
+| [Sewers](applications/sewer/index.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
+| [Water distribution](applications/water/index.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
+| [Flow allocation](applications/water-resources/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
+| [Electrical circuits](applications/electrical/index.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
+| [Coupling](guide/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ## Reading model files
 
@@ -65,25 +65,25 @@ exactly like one built by hand.
 
 | Format | Reader | What it describes | Produces a model for |
 |---|---|---|---|
-| [CONTAM](formats/contam.md) `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow, contaminants and occupants; weather | [Building physics](applications/building_physics.md) |
-| [Modelica Buildings Library](formats/modelica.md#buildings-library-airflow) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](applications/building_physics.md) |
-| [SWMM](formats/swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](applications/sewer.md) |
-| [EPANET](formats/epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](applications/water.md) |
-| [Modelica circuits](formats/modelica.md#electrical-circuits) (JSON + CSV export) | `read_modelica_circuit` | Lumped circuits from the Modelica Standard Library and Buildings Library | [Electrical circuits](applications/electrical.md) |
-| [MATPOWER](formats/matpower.md) `.m` | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | [Electrical power flow](applications/electrical.md#power-flow) |
+| [CONTAM](applications/building/contam.md) `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow, contaminants and occupants; weather | [Building physics](applications/building/index.md) |
+| [Modelica Buildings Library](applications/building/modelica.md#buildings-library-airflow) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](applications/building/index.md) |
+| [SWMM](applications/sewer/swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](applications/sewer/index.md) |
+| [EPANET](applications/water/epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](applications/water/index.md) |
+| [Modelica circuits](applications/building/modelica.md#electrical-circuits) (JSON + CSV export) | `read_modelica_circuit` | Lumped circuits from the Modelica Standard Library and Buildings Library | [Electrical circuits](applications/electrical/index.md) |
+| [MATPOWER](applications/electrical/matpower.md) `.m` | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | [Electrical power flow](applications/electrical/index.md#power-flow) |
 
-See [File formats](formats/index.md) for what each reader accepts and refuses.
+See [File formats](reference/formats.md) for what each reader accepts and refuses.
 
 ## Where to go next
 
-- **[Installation](installation.md)** — pip, the optional extras, and what each one buys you.
-- **[Quick start](quickstart.md)** — a working two-node model in fifteen lines, then a batched one.
+- **[Installation](get-started/installation.md)** — pip, the optional extras, and what each one buys you.
+- **[Quick start](get-started/first-model.md)** — a working two-node model in fifteen lines, then a batched one.
 - **[Concepts](concepts/index.md)** — how the framework fits together: networks, constitutive laws, layers, solvers, differentiability.
-- **[Using noodl](usage.md)** — the one way every model is set up, checked, run and read, whatever its physics.
+- **[Using noodl](guide/workflow.md)** — the one way every model is set up, checked, run and read, whatever its physics.
 - **[Applications](applications/index.md)** — the eight worked systems.
-- **[Catalogue](catalogue/core.md)** — every type each application offers: what it does and how to call it.
-- **[API reference](api.md)** — generated from the docstrings.
-- **[Theory](theory.md)** — the background: Tellegen's theorem, port-Hamiltonian systems, differentiable physics, and the literature each application builds on.
+- **[Catalogue](reference/catalogue/core.md)** — every type each application offers: what it does and how to call it.
+- **[API reference](reference/api/index.md)** — generated from the docstrings.
+- **[Theory](concepts/theory.md)** — the background: Tellegen's theorem, port-Hamiltonian systems, differentiable physics, and the literature each application builds on.
 
 ## The name
 

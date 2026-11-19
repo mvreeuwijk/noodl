@@ -1,7 +1,7 @@
 """A component: a piece of network with a declared boundary of ports. Components nest;
 `connect` merges two ports into one node (a Modelica connection set: potentials equal,
 flows summing to zero); `flatten` turns the tree into one ordinary `Network`. See
-docs/concepts/components.md."""
+docs/guide/components.md."""
 
 from __future__ import annotations
 

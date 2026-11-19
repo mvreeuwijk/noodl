@@ -424,7 +424,7 @@ class SewerHydraulics:
         would otherwise raise an unnamed batch-index error. Under constant inflow the fixed
         point IS the quasi-steady solution (checked in
         `tests/apps/sewer/test_hydraulics.py::test_storage_reaches_the_quasi_steady_fixed_point`;
-        agreement figure: docs/design/sewer.md#storage-quasi-steady-agreement).
+        agreement figure: docs/project/design/sewer.md#storage-quasi-steady-agreement).
 
         Per level, this uses ONLY the flat `level_idx`/`level_src`/`level_tgt` index tensors
         `__init__` precomputed: one gather (`index_select`) plus one scatter (`index_add`)

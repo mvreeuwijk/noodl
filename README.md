@@ -119,9 +119,9 @@ docs/             the published documentation
 scripts/          fixture-regeneration scripts (Modelica, WSIMOD) and the catalogue generator
 ```
 
-Every model is set up and run the same way: see [Using noodl](docs/usage.md). The
-[catalogue](docs/catalogue/core.md) lists every type each application offers, what it
-does and how to call it, and the [API reference](docs/api.md) is organised module by
+Every model is set up and run the same way: see [Using noodl](docs/guide/workflow.md). The
+[catalogue](docs/reference/catalogue/core.md) lists every type each application offers, what it
+does and how to call it, and the [API reference](docs/reference/api/index.md) is organised module by
 module. Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status

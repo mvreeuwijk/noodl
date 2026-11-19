@@ -1013,7 +1013,7 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
     ``1 / h'(0)`` rather than the zero a ``sign(dp)`` factor would give. (A generic
     ``solve_monotone`` inversion is deliberately not used: it needs an autograd
     derivative per iteration and a collapsed bracket to stop; see
-    ``docs/design/water_street.md#headloss-inversion``.)
+    ``docs/project/design/water_street.md#headloss-inversion``.)
 
     Alias: `EpanetDarcyWeisbach` (EPANET).
     """

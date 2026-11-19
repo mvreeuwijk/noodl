@@ -1,4 +1,4 @@
-"""The component catalogue (`docs/catalogue/`) cannot fall behind the code.
+"""The component catalogue (`docs/reference/catalogue/`) cannot fall behind the code.
 
 Adding or changing a public class, function or option means updating its docstring and
 re-running `python scripts/gen_catalogue.py`; these tests fail until both are done.
@@ -30,7 +30,8 @@ def test_the_committed_catalogue_matches_the_code():
         if not path.exists() or path.read_text(encoding="utf-8") != text
     ]
     assert stale == [], (
-        f"docs/catalogue is out of date for {stale}; run `python scripts/gen_catalogue.py`"
+        f"docs/reference/catalogue is out of date for {stale}; "
+        "run `python scripts/gen_catalogue.py`"
     )
 
 

@@ -32,7 +32,7 @@ a previous pass of the same step has advanced it to (`coupling="iterate"`).
 (`tanktimestep`) are the two tank halves of EPANET's step rule, which `water_run` composes
 with the hydraulic, pattern and report steps (`hydraul.c`, `timestep`). They are not
 optional: with a fixed step the pump switches up to a whole step late and the tank level
-diverges from EPANET (numbers in `docs/design/water_street.md#event-step`; checked in
+diverges from EPANET (numbers in `docs/project/design/water_street.md#event-step`; checked in
 `tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`).
 
 FULL AND EMPTY TANKS. Under `"forward_euler"` the closure applies EPANET's `tankstatus`

@@ -6,7 +6,7 @@ frozen, q = c0 + k (H1 - H2): that is the form `DynamicWaveConduit` solves. What
 AFTER the momentum update -- the normal-flow limit and the dry-node clamps -- is returned as
 flags and limits for the element to apply. Trial relaxation, the 0.001 cfs reversal rule and
 link bypassing are artefacts of SWMM's Picard iteration that do not move its fixed point and
-are not modelled (see docs/applications/sewer.md, "Dynamic wave").
+are not modelled (see docs/applications/sewer/index.md, "Dynamic wave").
 
 Scope of the transcription: every cross-section shape (`xsect_shapes.XsectSet`: a circular-only
 network keeps the tabulated circle's own path of `xsect_tables`, bit for bit), the local losses

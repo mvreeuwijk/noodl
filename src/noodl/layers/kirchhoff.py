@@ -67,7 +67,7 @@ from noodl.withdrawals import NodeWithdrawal
 # that declares `assemble_sparse`) is sparse-direct up to an ensemble of
 # `select._SPARSE_DIRECT_MAX_BATCH` = 32 instances and Jacobi-preconditioned CG above it,
 # because SuperLU is driven by a per-instance Python loop whose cost is linear in the
-# ensemble while PCG's is sub-linear (crossover sweep: docs/design/solvers.md). An
+# ensemble while PCG's is sub-linear (crossover sweep: docs/project/design/solvers.md). An
 # explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
 # reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
@@ -661,7 +661,8 @@ class KirchhoffLayer(
 
         Held in a `cached_property` rather than an `__init__` attribute: it grows 4x per node
         doubling and would break the composed model's memory-scaling budget (numbers:
-        docs/design/orchestration.md#dense-incidence-matrix). Nothing inside this class reads
+        docs/project/design/orchestration.md#dense-incidence-matrix). Nothing inside this class
+        reads
         it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
         scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
         `power_residual`). It stays public, with exactly its old value
@@ -1228,7 +1229,7 @@ class KirchhoffLayer(
             # (A_I q), by scatter-add over this layer's edges then a select of the interior
             # rows, rather than einsum against the (n_I, b) slice of the dense incidence:
             # this is once per Newton residual evaluation, where the einsum form dominates
-            # the cost (numbers: docs/design/orchestration.md#residual-incidence-product).
+            # the cost (numbers: docs/project/design/orchestration.md#residual-incidence-product).
             kcl = self._accumulate_interior(q) - self._source_interior(sources, x)
             return self._with_withdrawal(kcl, phi, drivers, step, call), phi, q
         if call is None:

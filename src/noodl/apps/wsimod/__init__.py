@@ -4,7 +4,7 @@
 ``Model`` whose one closure, ``WsimodDay``, runs WSIMOD's day (orchestration, river order,
 ``end_timestep``) with WSIMOD's arithmetic, batched and differentiable. ``initial_state`` and
 ``initial_drivers`` take values by name, as every noodl application does. See
-``docs/applications/wsimod.md``.
+``docs/applications/water-resources/wsimod.md``.
 """
 
 from noodl.apps.wsimod.build import build_model, initial_drivers, initial_state

@@ -11,7 +11,7 @@ For a converged solve, gradients flow back to:
 - `sources` — the nodal source terms,
 - every value in the `drivers` mapping,
 - every law parameter registered with `learnable=True`,
-- and, across a [coupled model](../applications/coupling.md), through the join into the *other*
+- and, across a [coupled model](../guide/coupling.md), through the join into the *other*
   model's parameters.
 
 ```python
@@ -190,7 +190,7 @@ that would fail if the claim stopped holding.
   linear-solver route than the primal passes did — the returned state reproduces the certified
   pass to *solver accuracy*, not identically by construction. Conservation does not depend on
   which route ran: it is a property of the pass function itself
-  (see [Coupling](../applications/coupling.md#differentiating-the-fixed-point) for the full
+  (see [Coupling](../guide/coupling.md#differentiating-the-fixed-point) for the full
   derivation). The GMRES solve runs one independent system per batch instance when EVERY
   interface tensor carries the batch shape as its leading dims — a documented precondition on
   the caller (instances must not couple through the pass), checked only by shape, not proven
@@ -199,7 +199,7 @@ that would fail if the claim stopped holding.
   interface Jacobian is block-diagonal there. `diagnostics["adjoint_batched"]` says which of
   the two ran. `CoupledModel` and `Model` both pass the batch shape through, so on the
   per-instance path the adjoint's cost does not scale with batch size
-  (see [Coupling](../applications/coupling.md#limitations)).
+  (see [Coupling](../guide/coupling.md#limitations)).
 - **Nonsmooth element laws have declared piecewise semantics, named per element.** `Damper`
   evaluates both signed power-law branches everywhere and selects with `torch.where`, so its
   `dflow` is finite at the kink (`dp = 0`) and matches finite differences away from it
@@ -254,7 +254,7 @@ the cases rather than leaving you to discover them.
 - **At a hard clip.** `AllocatedFlowLayer` in `mode="hard"` carries *exactly zero*
   gradient across a capacity or headroom crossing — the branch choice is discrete. That is the
   entire reason `mode="smooth"` and `mode="projection"` exist. See
-  [Flow allocation](../applications/allocation.md).
+  [Flow allocation](../applications/water-resources/allocation.md).
 - **At the sharing site, in smooth mode.** Smooth mode's proportional-share formula depends only
   on preference weights and total headroom, never on any individual competitor's request, so the
   cross-gradient $\partial f_i / \partial r_j$ is provably zero. `mode="projection"` routes that
@@ -288,6 +288,6 @@ finite-difference reference is cheap insurance against a `dflow` that disagrees 
 - **Use float64.** Finite-difference comparisons and tight Newton tolerances both need it, and
   `gradcheck` is effectively meaningless in float32.
 - **The sparse-direct backend also speeds up the backward pass**, measured 3.25x at ensemble 1
-  and 3.66x at ensemble 100. Install the [`sparse` extra](../installation.md#optional-extras).
+  and 3.66x at ensemble 100. Install the [`sparse` extra](../get-started/installation.md#optional-extras).
 - **Batch instead of looping.** A gradient over a 100-instance ensemble is one backward pass, not
   100.

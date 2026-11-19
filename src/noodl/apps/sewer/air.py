@@ -330,7 +330,7 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
     # through `Orifice`: `Orifice` casts with `torch.get_default_dtype()` (float32 in this
     # repository) regardless of its inputs' own dtype, which would downcast the leak's `C` and
     # floor check C1's residual on the float32 arithmetic of the leak branch alone (numbers:
-    # docs/design/sewer.md#leak-law-precision). `leak_cd` and
+    # docs/project/design/sewer.md#leak-law-precision). `leak_cd` and
     # `leak_area` are ordinary floats by default but may also be tensors carrying a leading
     # batch (instance) dimension (`benchmarks/sewer_diurnal.py` varies them per instance
     # without any core or element change, since `PowerLaw._param`'s pass-through rule and

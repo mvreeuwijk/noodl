@@ -157,7 +157,8 @@ K_ANCHOR = 1.0e-6
 #: conduits' conveyance, m2/s). The wall's fixed points do not depend on its slope. A wall
 #: steeper than the junction it acts on makes the conduit's flow an S-curve in the head (flat at
 #: q_norm, the wall, the momentum line) that the damped Newton head solve cycles on (drain-down
-#: evidence: docs/design/sewer.md#wall-slope-k_switch); at 1 x the slopes a Newton step sees differ
+#: evidence: docs/project/design/sewer.md#wall-slope-k_switch); at 1 x the slopes a Newton step
+#: sees differ
 #: by at most 2, which its 0.75 damping contracts, and a conduit between two junctions settles on
 #: its switch by about half per pass. Its round-off floor, ``S eps |H| / 2``, is then that of the
 #: junction's own storage slope. The drop-end area switch's wall (`JunctionStorage`) uses the same
@@ -183,7 +184,7 @@ HEAD_SOLVE_NEWTON = {"line_search": "convex", "step_floor": 16.0}
 #: The head solve's inner linear solver is the dense LU (``linear_solver="direct"``) up to
 #: this many junctions, and the layer's ``"auto"`` (SciPy's sparse LU) above it: on a small
 #: network the dense factorisation costs a handful of tensor operations against SuperLU's
-#: per-call conversion (measurements: docs/design/sewer.md#dense-versus-sparse-head-solve).
+#: per-call conversion (measurements: docs/project/design/sewer.md#dense-versus-sparse-head-solve).
 DENSE_SOLVE_MAX_JUNCTIONS = 128
 #: SWMM's default HEAD_TOLERANCE, 0.005 ft (`dynwave.c:63`, ``DEFAULT_HEADTOL``), in m.
 DEFAULT_HEAD_TOLERANCE = 0.005 * LCF
@@ -2793,7 +2794,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     (`DynamicWaveConduit`) the heads
     bound the flow residual only through the wall slope S over the junction's grounding,
     so a heads-only test can stop a pass short of the fixed point (an example residual:
-    docs/design/sewer.md#wall-slope-k_switch). The state is
+    docs/project/design/sewer.md#wall-slope-k_switch). The state is
     SWMM's initial state (`DynamicWaveHydraulics.initial_state`: cold and dry, or its
     InitDepth and InitFlow). Attached to the model: `junction_idx`, `junction_invert` (m),
     `outfall_link_idx` (each outfall's link's ``"water.q"`` column), `outfall_stage` (the

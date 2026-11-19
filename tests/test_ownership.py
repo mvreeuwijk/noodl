@@ -1,4 +1,4 @@
-"""The mutation, device and serialization contract stated in docs/concepts/ownership.md.
+"""The mutation, device and serialization contract stated in docs/guide/devices.md.
 
 Each test pins one sentence of that page. What the page calls unsupported is not tested here
 (a test of it would pin a limitation as if it were a promise).

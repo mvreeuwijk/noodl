@@ -1,4 +1,4 @@
-"""Extension-level integration test for docs/development/extending.md.
+"""Extension-level integration test for docs/project/extending/index.md.
 
 This module is the worked example the guide walks through: a new branch law defined
 entirely outside `src/` (import nothing from `noodl.apps`, touch nothing under `src/`) and a

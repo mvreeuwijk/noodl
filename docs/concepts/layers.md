@@ -67,7 +67,7 @@ capacity, flows and conductances), and
 `Model.check()` warns (`unit-mismatch`) when a closure declares a different unit for a key it
 reads (`input_specs`) or writes (`output_units`), and notes (`unit-undeclared`) a field with
 no unit. Units are compared as strings after trivial respelling (`m3` and `m^3`, `1` and `-`);
-nothing is converted. See [The closure contract](../development/extending.md#the-closure-contract).
+nothing is converted. See [The closure contract](../project/extending/index.md#the-closure-contract).
 
 Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
 extracts one kind's block from the concatenated flow vector; `residual(...)` and `jacobian(...)`
@@ -223,7 +223,7 @@ that cannot, an implicit law (an `ImplicitLaw`) or a multi-port law
 without flow unknowns); a layer built with `phasor=True` is always solved this way. The
 declarations are described under
 [Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws).
-The [electrical application](../applications/electrical.md) is built on it; the same machinery
+The [electrical application](../applications/electrical/index.md) is built on it; the same machinery
 serves any domain with ideal sources, flow-controlled laws or storage on its edges.
 
 **Laws that read the context stay on the fast path.** A law with a `ctx` parameter in `flow`
@@ -670,7 +670,7 @@ s_new, f = layer.step(s, drivers, dt, diagnostics=diag)
 
 In the simplest case the realised flow is just $f = \min(r,\; c_{\text{arc}},\; h)$. The three
 modes differ in gradient behaviour, which is the whole reason there is more than one — see
-[Flow allocation](../applications/allocation.md) for the full treatment.
+[Flow allocation](../applications/water-resources/allocation.md) for the full treatment.
 
 An allocation layer is inherently discrete-time. A `Model` owning one refuses a steady pass and
 refuses `residuals()` outright, because a clip-and-allocate rule has no steady meaning to report.
@@ -897,7 +897,7 @@ model.ports(state)                 # what a coupled or external model may prescr
 
 `Ports` reports boundary nodes, prescribable keys, boundary flows, and each transport layer's
 flow driver key. `Model.flow_layer_of[name] is None` tells you whether a transport layer's flows
-are yours to prescribe. This is the surface the [coupling application](../applications/coupling.md)
+are yours to prescribe. This is the surface the [coupling application](../guide/coupling.md)
 builds on.
 
 ### Differentiability
@@ -908,6 +908,6 @@ implicit adjoint of the interface equations — memory is one pass, not all of t
 gradient error is of the order of the primal residual rather than tied to the pass count. The
 convergence *decision* is still made on detached copies, so it never appears in the graph. See
 [Differentiability](differentiability.md#what-is-guaranteed) and
-[Coupling](../applications/coupling.md#differentiating-the-fixed-point) for the full contract.
+[Coupling](../guide/coupling.md#differentiating-the-fixed-point) for the full contract.
 `**solve_kwargs` on `step`/`steady` reach the **potential solves only** (`differentiable`,
 `on_failure`, `method`, Newton options); transport steps always raise on failure.
