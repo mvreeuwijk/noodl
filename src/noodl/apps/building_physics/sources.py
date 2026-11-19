@@ -187,8 +187,8 @@ class PressureDrivenSource(_NodeSource):
 
 class PowerLawDecaySource(_NodeSource):
     """Emission decaying as a power of time (the NRCC power-law model): S = a t_h^(-b) after
-    t_p and a t_ph^(-b) before it, t_h being the time since the start in HOURS (measured:
-    ContamX takes the power of the time in hours, although its file stores t_p in s).
+    t_p and a t_ph^(-b) before it, t_h being the time since the start in HOURS (ContamX takes
+    the power of the time in hours, although its file stores t_p in s).
     `coefficient` a kg/s, `exponent` b, `t_p` s (> 0: the power has no value at t = 0)."""
 
     def __init__(self, node: int, coefficient, exponent, t_p: float) -> None:

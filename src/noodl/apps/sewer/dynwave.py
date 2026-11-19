@@ -223,8 +223,8 @@ MSEC_PER_DAY = 86400.0 * 1000.0                                          # const
 
 
 def tidal_stage(tide: tuple[tuple[float, float], ...], t: float) -> float:
-    """A TIDAL outfall's stage elevation (m) `t` s into the run (`node.c::
-    outfall_setOutletDepth`, node.c:1445-1452): the curve `tide` of ``(hour, stage)`` pairs
+    """A TIDAL outfall's stage elevation (m) `t` s into the run: the curve `tide` of ``(hour,
+    stage)`` pairs
     is read at ``x = x_first + 24 frac(t / 1 day)`` (the elapsed time, not the clock time:
     the simulation's start is not added, so the tide begins at the curve's first hour and
     repeats every 24 h), by `table.c::table_lookup`: the first stage at or below the first
@@ -258,10 +258,9 @@ _WEIR_SHAPES = {"transverse": RECT_OPEN, "sideflow": RECT_OPEN, "v_notch": TRIAN
 
 @dataclass(frozen=True)
 class DynamicWaveOptions:
-    """SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults
-    (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration
-    controls, and the defaults of `build_dynamic_wave_model`'s (`iterate_tolerances`; docs:
-    "Iteration and convergence").
+    """SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults.
+    `head_tolerance` and `max_trials` are SWMM's own iteration
+    controls, and the defaults of `build_dynamic_wave_model`'s (`iterate_tolerances`).
 
     `routing_step` is the fixed routing step (s); `inertial_damping` is ``"none"``,
     ``"partial"`` or ``"full"``; `normal_flow_limited` is ``"slope"``, ``"froude"``,
@@ -378,7 +377,7 @@ class DynamicWaveOptions:
 
 
 class DynamicWaveConduit(ConstitutiveLaw):
-    """SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass.
+    """SWMM's dynamic-wave conduit with its coefficients frozen for one pass.
 
     ``q = c0 + k dp`` (m3/s, dp = H1 - H2 in m), then ``min(q, q_norm)`` where SWMM's
     normal-flow check passed (`dwflow.c:255-258`), then the user flow limit, the flap gate and

@@ -46,7 +46,7 @@ class FixedVolumeFlow(ConstitutiveLaw):
     """F = Q rho_up whatever dp: a constant volume flow `volume_flow` Q (m3/s, one per edge)
     delivered as mass flow at the density of the node it draws from (`src` when Q >= 0,
     `tgt` otherwise), read from `drivers[rho_key]` (full node order). ContamX's
-    constant-volume fan in a duct (measured)."""
+    constant-volume fan in a duct."""
 
     dp_independent = True
 

@@ -80,7 +80,7 @@ def is_open(kind: str) -> bool:
 
 @dataclass(frozen=True)
 class Transect:
-    """One `[TRANSECTS]` entry (`transect.c`), SI. ``stations`` (m, across the section, with
+    """One `[TRANSECTS]` entry, in SI. ``stations`` (m, across the section, with
     the ``X1`` station multiplier applied) and ``elevations`` (m, with the ``yFactor``
     offset applied); ``left_bank``, ``right_bank`` (m, station multiplier applied) end the
     overbanks; ``n_left``, ``n_right``, ``n_channel`` the Manning n values SWMM holds when it

@@ -159,7 +159,9 @@ def regularized_orifice(
     kind: str = "airpath",
     learnable: bool = False,
 ) -> RegularizedPowerLaw:
-    """``Orifice.mo:3-5,9``: ``C = CD * A * sqrt(2 / rho_default)``, ``m = 0.5`` by default
+    """A regularised power law for a sharp-edged orifice of area `A` (m2), after MBL.
+
+    ``Orifice.mo:3-5,9``: ``C = CD * A * sqrt(2 / rho_default)``, ``m = 0.5`` by default
     (overridable, per ``Orifice.mo:3``'s non-``final`` ``m=0.5`` modifier); ``C`` itself is
     ``final`` in MBL (does not depend on ``m``). ``CD`` defaults to 0.65
     (``Orifice.mo:9``, the sharp-edged-orifice discharge coefficient).
@@ -190,7 +192,9 @@ def effective_leakage_area(
     kind: str = "airpath",
     learnable: bool = False,
 ) -> RegularizedPowerLaw:
-    """``EffectiveAirLeakageArea.mo:3-5,7-14,16``:
+    """A regularised power law from an effective leakage area `L` (m2), after MBL.
+
+    ``EffectiveAirLeakageArea.mo:3-5,7-14,16``:
     ``C = L * CDRat * sqrt(2 / rho_default) * dpRat ** (0.5 - m)``, ``m = 0.65`` by default
     (``:4``), ``dpRat = 4`` Pa (``:7-9``), ``CDRat = 1`` (``:11-14``).
 
@@ -219,7 +223,9 @@ def power_law_from_point(
     kind: str = "airpath",
     learnable: bool = False,
 ) -> RegularizedPowerLaw:
-    """``Point_m_flow.mo:4-5``: ``k = mMea_flow_nominal / dpMea_nominal ** m``, fit from one
+    """A regularised power law fitted to one measured (dp, m_flow) pair, after MBL.
+
+    ``Point_m_flow.mo:4-5``: ``k = mMea_flow_nominal / dpMea_nominal ** m``, fit from one
     measured (dp, m_flow) pair; ``m`` stays a free parameter (default 0.5, inherited from
     ``Coefficient_m_flow``'s ``PowerLawResistanceParameters(m=0.5)``,
     ``Coefficient_m_flow.mo:27-28``).
@@ -248,7 +254,9 @@ def power_law_from_points(
     kind: str = "airpath",
     learnable: bool = False,
 ) -> RegularizedPowerLaw:
-    """``Points_m_flow.mo:4-6,15-16``: the flow exponent itself is derived from two measured
+    """A regularised power law fitted to two measured (dp, m_flow) pairs, after MBL.
+
+    ``Points_m_flow.mo:4-6,15-16``: the flow exponent itself is derived from two measured
     (dp, m_flow) pairs, ``m = (ln(mMea[0]) - ln(mMea[1])) / (ln(dpMea[0]) - ln(dpMea[1]))``,
     then ``k = mMea[0] / dpMea[0] ** m``. ``dpMea``/``mMea_flow`` are each a 2-element sequence.
 

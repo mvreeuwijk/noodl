@@ -58,7 +58,7 @@ Drivers = dict[str, Tensor]
 @dataclass(frozen=True)
 class Exfiltration:
     """The seepage of a storage unit into the soil below it (SWMM's ``[STORAGE]`` exfiltration
-    fields, `exfil.c`): the saturated hydraulic `conductivity` Ksat (m/s) and, for SWMM's
+    fields): the saturated hydraulic `conductivity` Ksat (m/s) and, for SWMM's
     modified Green-Ampt model, the capillary `suction` head (m) and the maximum initial
     moisture deficit `initial_deficit` (-, IMDmax). With ``initial_deficit == 0`` (the single
     Ksat form always) the rate is Ksat times the monthly conductivity adjustment, whatever the
@@ -889,7 +889,7 @@ class SewerNetwork:
 
 
 def tree_steady() -> SewerNetwork:
-    """The committed 5-conduit, 6-node fixture (`tests/data/sewer/tree_steady.inp`).
+    """A small example network of 5 conduits and 6 nodes.
 
     J1, J2 (invert 12.0) and J5 (11.0) carry the constant inflows 0.05, 0.08 and 0.03 m3/s;
     C1 and C2 join at J3 (10.0), C3 and C4 join at J4 (9.0), C5 discharges to Outfall (8.0).

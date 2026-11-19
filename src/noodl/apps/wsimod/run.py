@@ -1,12 +1,12 @@
 """``wsimod_run``: WSIMOD's loop over the configuration's dates, with WSIMOD's records, the
-diagnostics and a real mass balance (spec, Entry points, Outputs, Diagnostics).
+diagnostics and a real mass balance.
 
 ``wsimod_run(model, state, drivers, days=...)`` steps the model's :class:`WsimodDay` over the
 first ``days`` dates (default all) from ``state`` (default the configured one) under
 ``drivers`` (default the configured ones), the same closure ``model.step`` runs, so the two
-agree exactly. It records each day as WSIMOD's ``Model.run(record_all=True)`` does
-(``model.py:1063-1170``) and returns :class:`WsimodResults`. ``torch.no_grad()`` is on unless
-a state or driver tensor requires grad (W9).
+agree exactly. It records each day as WSIMOD's ``Model.run(record_all=True)`` does and returns
+:class:`WsimodResults`. ``torch.no_grad()`` is on unless
+a state or driver tensor requires grad.
 
 Diagnostics. ``diagnostics``, a dict, receives:
 
@@ -14,13 +14,13 @@ Diagnostics. ``diagnostics``, a dict, receives:
   ended at ``MAXITER`` (WSIMOD prints "Maxiter reached ... at <date>");
 - ``"events"``: ``{name: (..., T, n_nodes) bool}`` for every name in :data:`EVENT_NAMES` (D13;
   a condition that never fired is all False); an event recorded at an arc,
-  ``"decay_arc_order_unknown"`` (D21), is ``(..., T, n_arcs)`` in ``WsimodDay.arc_names``'
+  ``"decay_arc_order_unknown"``, is ``(..., T, n_arcs)`` in ``WsimodDay.arc_names``'
   order;
 - ``"decisions"``, only when ``diagnostics["decisions"]`` is ``True`` on entry: a list over the
   days of that day's :class:`~noodl.apps.wsimod.engine.Decision` records, in call order;
 - ``"mass_balance"``: the :class:`WsimodMassBalance`, also ``WsimodResults.mass_balance``.
 
-The mass balance (D11). Per day, ``inflow`` sums the terms the nodes' ``mass_balance_in`` lists
+The mass balance. Per day, ``inflow`` sums the terms the nodes' ``mass_balance_in`` lists
 carry (catchment flows, precipitation, ``FWTW`` deficits, ``UnlimitedDistribution`` supply,
 demand loads) and ``outflow`` the ``mass_balance_out`` terms (Waste, evaporation, demand
 consumption, unrouted catchment water, unpushed sludge, WTW solids) plus the water WSIMOD
@@ -28,17 +28,17 @@ loses without a trace: ``"dropped"`` (the sub-``FLOAT_ACCURACY`` drops: ``QueueA
 ``AltQueueArc`` pushes, waiting ``QueueArc`` requests removed on update, the ``Land.run``
 percolation push-back, the ``WWTW`` storm-tank rejection and ``make_discharge`` push-back, the
 ``Sewer`` ponded water) and ``"WWTW.unprocessed_input"`` (water pushed into a ``WWTW`` after its
-``calculate_discharge``, which vanishes at ``end_timestep_``, W69). A push below
-``FLOAT_ACCURACY`` into a ``QueueTank`` stays in its ``storage``, so it is storage, not a drop
-(W49). Arc flows cancel and are not listed; an arc's own terms are declared on its
+``calculate_discharge``, which vanishes at ``end_timestep_``). A push below
+``FLOAT_ACCURACY`` into a ``QueueTank`` stays in its ``storage``, so it is storage, not a drop.
+Arc flows cancel and are not listed; an arc's own terms are declared on its
 ``mass_balance``, as a node's. ``storage_change`` is the carried stores' water after
-``end_timestep`` less at the start of the day (X8): the window runs from the state the day
+``end_timestep`` less at the start of the day: the window runs from the state the day
 loads to the state it dumps, so consecutive windows meet and what ``end_timestep`` records
 counts in its day. Per-day values (``Demand``/``WTW`` totals,
-``Land`` per-day flows and running balances) are not storage (W75). All are ``(..., T, 1 +
+``Land`` per-day flows and running balances) are not storage. All are ``(..., T, 1 +
 K_additive)``: the volume, then the additive pollutants' masses. ``residual = inflow - outflow
 - storage_change`` and closes to rounding, apart from one known gap. One rule holds on every
-day: a ``Land``'s outflow is IHACRES's evaporation, not what ``evaporate`` removed (W75), so
+day: a ``Land``'s outflow is IHACRES's evaporation, not what ``evaporate`` removed, so
 ``residual`` equals the gap ``E_actual - E_ihacres``, summed over the lands
 (WSIMOD's node check prints it, "mass balance error for volume of ..."). The gap is 0 on a day
 the soil supplies what IHACRES asks; a shortfall below ``FLOAT_ACCURACY`` fires no
@@ -100,7 +100,7 @@ F64 = torch.float64
 class WsimodMassBalance:
     """The system's water balance per day, each ``(..., T, 1 + K_additive)`` (volume, then the
     additive pollutants' masses). ``terms`` holds every term by its ``"<Class>.<term>"`` key
-    (D11) plus ``"dropped"``; ``residual = inflow - outflow - storage_change``."""
+    plus ``"dropped"``; ``residual = inflow - outflow - storage_change``."""
 
     inflow: Tensor
     outflow: Tensor
@@ -115,7 +115,7 @@ class WsimodMassBalance:
 
 @dataclass
 class WsimodResults:
-    """What WSIMOD's ``Model.run`` records (``model.py:1063-1170``), with a leading batch shape.
+    """What WSIMOD's ``Model.run`` records, with a leading batch shape.
 
     ``arc_flow`` ``(..., T, n_arcs)`` and ``arc_quality`` ``(..., T, n_arcs, K)``: each arc's
     ``vqip_out``. ``tank_names`` ``[(node, attribute)]`` with ``tank_storage``
@@ -123,8 +123,8 @@ class WsimodResults:
     ``ResidenceTank`` attributes ``record_all`` reports. ``surface_names`` and ``surface``
     (field to ``(..., T, n_surfaces)``, NaN where WSIMOD records nothing) cover the surfaces of
     the nodes under the slot key ``"Land"``; ``surface_quality`` ``(..., T, n_surfaces, K)``.
-    ``dates`` are the labels as written (D20). Volumes are ``m3``, flows ``m3/d``, additive
-    pollutants ``kg`` and non-additive ones by name; nothing is converted (W20).
+    ``dates`` are the labels as written. Volumes are ``m3``, flows ``m3/d``, additive
+    pollutants ``kg`` and non-additive ones by name; nothing is converted.
     """
 
     dates: list[str]
@@ -236,7 +236,7 @@ def wsimod_run(
 
     ``state`` defaults to :func:`~noodl.apps.wsimod.initial_state` and ``drivers`` to
     :func:`~noodl.apps.wsimod.initial_drivers`; either may carry batch dimensions. The run is
-    under ``torch.no_grad()`` unless a state or driver tensor requires grad (W9). ``diagnostics``
+    under ``torch.no_grad()`` unless a state or driver tensor requires grad. ``diagnostics``
     receives ``"maxiter"``, ``"events"``, ``"mass_balance"`` and, when it holds
     ``"decisions": True`` on entry, ``"decisions"``.
     """

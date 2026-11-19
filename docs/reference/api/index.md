@@ -1,274 +1,46 @@
 # API reference
 
-Generated from the package's own docstrings. For the ideas behind these objects, start with
-[Concepts](../../concepts/index.md); for worked usage, [Applications](../../applications/index.md).
+Generated from the package's docstrings, one page per package. Start with the objects below: they
+are enough to build, check and run a model. For a one-line description of every public name, use the
+[Catalogue](../catalogue/index.md); for the ideas behind these objects, [Concepts](../../concepts/index.md).
 
-!!! note
+## Start here
 
-    This page renders only on the built documentation site, where `mkdocstrings` reads the
-    installed package. On GitHub it shows as a list of module names.
+| Object | What it is | Page |
+|---|---|---|
+| [`Network`][noodl.topology.Network] | The directed multigraph of nodes and typed edges every model is built on. | [Topology and networks](topology.md) |
+| [`KirchhoffLayer`][noodl.layers.kirchhoff.KirchhoffLayer] | A layer whose flows are driven by a potential (pressure, head, voltage). | [Layers](layers.md) |
+| [`TransportLayer`][noodl.layers.transport.TransportLayer] | A layer that carries a quantity (heat, species, charge) along the flows. | [Layers](layers.md) |
+| [`Model`][noodl.model.Model] | Layers on one network, stepped together. | [Model and coupling](model.md) |
+| [`drivers_from`][noodl.refs.drivers_from], [`state_from`][noodl.refs.state_from] | Build drivers and state by label rather than by index. | [Model and coupling](model.md) |
+| [`check_setup`][noodl.validation.check_setup] | Check a model, its state and its drivers before running. | [Model and coupling](model.md) |
+| [`union`][noodl.couple.union] | Couple several models into one. | [Model and coupling](model.md) |
 
-## Topology
+## Build a model for an application
 
-::: noodl.topology
-    options:
-      members: [Network]
+Each application provides a `build_model` that returns the model, its initial state and its driver
+template, and readers for the files of the tool it mirrors.
 
-::: noodl.cycles
-    options:
-      members: [branch_flows, particular_flow, project_measured, assert_forward_oriented]
+| Application | Builder | Readers |
+|---|---|---|
+| [Building physics](building.md) | [`build_model`][noodl.apps.building_physics.thermal.build_model] | [`read_prj`][noodl.apps.building_physics.prj.read_prj], [`read_wth`][noodl.apps.building_physics.wth.read_wth], [`read_epw`][noodl.apps.building_physics.epw.read_epw], [`read_modelica`][noodl.apps.building_physics.modelica.read_modelica] |
+| [Street air quality](street.md) | [`build_model`][noodl.apps.street_aq.network.build_model] | [`read_case`][noodl.apps.street_aq.case.read_case] |
+| [Sewers](sewer.md) | [`build_model`][noodl.apps.sewer.network.build_model] | [`read_swmm_inp`][noodl.apps.sewer.inp.read_swmm_inp] |
+| [Water distribution](water.md) | [`build_model`][noodl.apps.water.network.build_model] | [`read_epanet_inp`][noodl.apps.water.inp.read_epanet_inp] |
+| [Water resources](water-resources.md) | [`build_model`][noodl.apps.wsimod.build.build_model] | [`read_wsimod_config`][noodl.apps.wsimod.config.read_wsimod_config] |
+| [Electrical circuits](electrical.md) | [`build_model`][noodl.apps.electrical.circuit.build_model] | [`read_modelica_circuit`][noodl.apps.electrical.modelica.read_modelica_circuit], [`read_matpower`][noodl.apps.electrical.power.matpower.read_matpower] |
 
-## Constitutive laws and heads
+The formats each reader accepts are in [File formats](../formats.md).
 
-::: noodl.elements.base
-    options:
-      members: [ConstitutiveLaw, ImplicitLaw, LawContext, step_rate, step_rate_factor]
+## Pages
 
-Constitutive laws are grouped below by the physics they express, as in
-[Airflow elements](../../applications/building/index.md#airflow-elements).
-
-### Power-law openings
-
-::: noodl.elements.powerlaw
-    options:
-      heading_level: 4
-::: noodl.elements.powerlaw_regularized
-    options:
-      heading_level: 4
-
-### Density upwinding
-
-::: noodl.elements.upstream
-    options:
-      heading_level: 4
-
-### Quadratic and tabulated laws
-
-::: noodl.elements.quadratic
-    options:
-      heading_level: 4
-::: noodl.elements.table
-    options:
-      heading_level: 4
-
-### Large openings and doors
-
-::: noodl.elements.door
-    options:
-      heading_level: 4
-::: noodl.elements.door_discretized
-    options:
-      heading_level: 4
-
-### Ducts, dampers, fans, fixed flows and conductances
-
-::: noodl.elements.duct
-    options:
-      heading_level: 4
-::: noodl.elements.damper
-    options:
-      heading_level: 4
-::: noodl.elements.fan
-    options:
-      heading_level: 4
-::: noodl.elements.fixed
-    options:
-      heading_level: 4
-::: noodl.elements.conductance
-    options:
-      heading_level: 4
-
-### Air properties
-
-::: noodl.elements.media
-    options:
-      heading_level: 4
-
-### Heads
-
-::: noodl.heads
-    options:
-      members: [HeadTerm, EdgeHeads, DriverHead, Stack, DuctStack, Wind, WindProfile]
-      heading_level: 4
-
-::: noodl.withdrawals
-    options:
-      members: [NodeWithdrawal]
-      heading_level: 4
-
-::: noodl.storage
-    options:
-      members: [NodeStorage, LinearStorage]
-      heading_level: 4
-
-## Layers
-
-::: noodl.layers.kirchhoff
-    options:
-      members: [KirchhoffLayer]
-      merge_init_into_class: true
-
-::: noodl.layers.transport
-    options:
-      members: [TransportLayer, active_interior]
-
-::: noodl.layers.reaction
-    options:
-      members: [Reaction]
-
-::: noodl.layers.allocation
-    options:
-      members: [AllocatedFlowLayer]
-
-## Model and coupling
-
-::: noodl.model
-    options:
-      members: [Model, Ports]
-
-::: noodl.contracts
-    options:
-      members: [StepContext, AlgebraicClosure, IntegratingClosure, ClosureAttribute, CLOSURE_ATTRIBUTES, ClosureSpec, closure_spec, call_closure, reaction_species_columns, check_species_columns]
-
-::: noodl.layout
-    options:
-      members: [batch_shape, broadcast_batch, per_instance, is_stacked, as_stacked, as_layout, reduced_single, write_at, species_columns]
-
-::: noodl.refs
-    options:
-      members: [LayerRefs, LayerRef, Field, drivers_from, state_from, initial_drivers]
-
-::: noodl.validation
-    options:
-      members: [check_setup, SetupReport, Issue, InputRow]
-
-::: noodl.couple
-    options:
-      members: [union, CoupledModel, ValueLink, DriverAlias, apply_conversion, transport_boundary_inflow]
-
-## Operators
-
-::: noodl.operators.base
-    options:
-      members: [LinearOperator, SparseAssembling, SolveResult, SolverStatus, as_operator]
-
-::: noodl.operators.dense
-::: noodl.operators.graph
-::: noodl.operators.advection
-::: noodl.operators.sparse
-
-## Solvers
-
-::: noodl.solvers.select
-    options:
-      members: [solve]
-
-::: noodl.solvers.newton
-    options:
-      members: [newton, NewtonResult, inner_solve_rtol]
-
-::: noodl.solvers.implicit
-    options:
-      members: [implicit_solve, adjoint, TransposeOperator]
-
-::: noodl.solvers.iterative
-    options:
-      members: [pcg, gmres]
-
-::: noodl.solvers.scalar
-::: noodl.solvers.grounding
-    options:
-      members: [spd_certificate, spd_diagnosis]
-
-## Applications
-
-### Building physics
-
-::: noodl.apps.building_physics.thermal
-::: noodl.apps.building_physics.elements
-::: noodl.apps.building_physics.prj
-    options:
-      members: [read_prj, project_to_model, steady, ZonePressureDensity, Project]
-::: noodl.apps.building_physics.wth
-    options:
-      members: [read_wth, Weather]
-::: noodl.apps.building_physics.sources
-::: noodl.apps.building_physics.modelica
-    options:
-      members: [read_modelica, ModelicaNames, ModelicaImportError, simulate, step_drivers]
-
-### Street air quality
-
-::: noodl.apps.street_aq.network
-::: noodl.apps.street_aq.canyon
-::: noodl.apps.street_aq.routing
-    options:
-      members: [StreetFlows, StreetGeometry, routing_matrix, node_closure, direction_offsets]
-::: noodl.apps.street_aq.case
-    options:
-      members: [StreetCase, drivers_at, read_case, write_case]
-::: noodl.apps.street_aq.chemistry
-::: noodl.apps.street_aq.report
-
-### Sewers
-
-::: noodl.apps.sewer.network
-::: noodl.apps.sewer.geometry
-::: noodl.apps.sewer.xsect_tables
-::: noodl.apps.sewer.hydraulics
-    options:
-      members: [SewerHydraulics, resolve_nodal_driver]
-::: noodl.apps.sewer.air
-::: noodl.apps.sewer.quality
-::: noodl.apps.sewer.inp
-    options:
-      members: [read_swmm_inp]
-::: noodl.apps.sewer.report
-
-### Water distribution
-
-::: noodl.apps.water.network
-::: noodl.apps.water.elements
-::: noodl.apps.water.tanks
-::: noodl.apps.water.demand
-::: noodl.apps.water.inp
-    options:
-      members: [read_epanet_inp]
-::: noodl.apps.water.report
-
-### WSIMOD
-
-::: noodl.apps.wsimod.build
-::: noodl.apps.wsimod.day
-::: noodl.apps.wsimod.run
-::: noodl.apps.wsimod.structure
-::: noodl.apps.wsimod.config
-    options:
-      members: [read_wsimod_config, WsimodNetwork, NodeSpec, ArcSpec, SurfaceSpec]
-
-### Electrical circuits
-
-::: noodl.apps.electrical.circuit
-::: noodl.apps.electrical.analysis
-::: noodl.apps.electrical.laws
-::: noodl.apps.electrical.loads
-::: noodl.apps.electrical.converters
-::: noodl.apps.electrical.thermal
-::: noodl.apps.electrical.waveforms
-::: noodl.apps.electrical.modelica
-    options:
-      members: [read_modelica_circuit, simulate_circuit, CircuitNames, Column, extrapolate, ModelicaImportError]
-::: noodl.apps.electrical.power
-
-### Shared
-
-::: noodl.apps.inpfile
-    options:
-      members: [read_sections, require_fields, as_float, InpLine]
-::: noodl.modelica
-::: noodl.modelica.timeline
-    options:
-      members: [experiment_times, driver_grid, grid_events, signal_events, step_drivers, grid_index, extrapolate]
-::: noodl.modelica.inputs
-    options:
-      members: [SignalResolver]
+| Page | Contents |
+|---|---|
+| [Topology and networks](topology.md) | `Network`, cycle and flow-basis helpers. |
+| [Constitutive laws and heads](laws.md) | The general-purpose laws, heads, withdrawals and storage, and the base classes to extend. |
+| [Layers](layers.md) | `KirchhoffLayer`, `TransportLayer`, `Reaction`, `AllocatedFlowLayer`. |
+| [Model and coupling](model.md) | `Model`, closure contracts, set-up helpers, validation, coupling. |
+| [Components](components.md) | Reusable sub-networks. |
+| [Solvers and operators](solvers.md) | Linear operators, Newton, implicit differentiation, iterative solvers. |
+| [Building physics](building.md), [Street air quality](street.md), [Sewers](sewer.md), [Water distribution](water.md), [Water resources](water-resources.md), [Electrical circuits](electrical.md) | One page per application. |
+| [Shared file helpers](shared.md) | The `.inp` and Modelica readers' common parts. |

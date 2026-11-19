@@ -5,59 +5,59 @@
 WSIMOD 0.8.1's daily step, transcribed: a WSIMOD `config.yml` as a noodl `Model` whose closure runs WSIMOD's day bitwise, batched and differentiable. How the pieces fit together: [WSIMOD](../../applications/water-resources/wsimod.md).
 Every application is set up the same way; see [Using noodl](../../guide/workflow.md).
 
-Import from `noodl.apps.wsimod`. The full reference, with every parameter, is in the [API reference](../api/index.md).
+Import from `noodl.apps.wsimod`. Each name links to its entry in the [API reference](../api/index.md), which gives every parameter.
 
 ## Set-up
 
 Build the model and its starting state and inputs.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `build_model` | ``(model, state, drivers)`` for a WSIMOD configuration (``read_wsimod_config``). | `build_model(network, *, pollutants=True)` |
-| `initial_drivers` | The configured drivers (``model.driver_template``, D6), then ``values`` by key and row label. | `initial_drivers(model, *, values=None)` |
-| `initial_state` | The configuration's state (``WsimodDay.initial_state``), then ``values`` by key and row label (D10): ``{"wsimod.storage": {("river", "tank"): 9.0}}``. | `initial_state(model, *, values=None)` |
+| Name | What it does |
+|---|---|
+| [`build_model`](../api/water-resources.md#noodl.apps.wsimod.build.build_model) | ``(model, state, drivers)`` for a WSIMOD configuration (``read_wsimod_config``). |
+| [`initial_drivers`](../api/water-resources.md#noodl.apps.wsimod.build.initial_drivers) | The configured drivers (``model.driver_template``), then ``values`` by key and row label. |
+| [`initial_state`](../api/water-resources.md#noodl.apps.wsimod.build.initial_state) | The configuration's state (``WsimodDay.initial_state``), then ``values`` by key and row label: ``{"wsimod.storage": {("river", "tank"): 9.0}}``. |
 
 ## Network components
 
 Descriptions of the physical objects a network is built from.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `WsimodNetwork` | A WSIMOD model description: pollutants, orchestration, dates, nodes and arcs, in the configuration's order (a node's in- and out-arc order is the arcs' order). | `WsimodNetwork(pollutants, float_accuracy, orchestration, dates, date_labels, nodes, arcs, unread=<factory>)` |
+| Name | What it does |
+|---|---|
+| [`WsimodNetwork`](../api/water-resources.md#noodl.apps.wsimod.config.WsimodNetwork) | A WSIMOD model description: pollutants, orchestration, dates, nodes and arcs, in the configuration's order (a node's in- and out-arc order is the arcs' order). |
 
 ## Closures
 
 Functions of the state that compute drivers each step (densities, flows, levels).
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `WsimodDay` | WSIMOD 0.8.1's daily step as an integrating closure (spec, The daily driver). | `WsimodDay(network, *, pollutants)` |
+| Name | What it does |
+|---|---|
+| [`WsimodDay`](../api/water-resources.md#noodl.apps.wsimod.day.WsimodDay) | WSIMOD 0.8.1's daily step as an integrating closure. |
 
 ## Files
 
 Readers and writers of other tools' file formats.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `read_wsimod_config` | Read a WSIMOD model description. | `read_wsimod_config(source, *, config_name='config.yml', overrides=None)` |
+| Name | What it does |
+|---|---|
+| [`read_wsimod_config`](../api/water-resources.md#noodl.apps.wsimod.config.read_wsimod_config) | Read a WSIMOD model description. |
 
 ## Other classes
 
 Supporting types.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `DayRecord` | What one day records (``model.py:1063-1170``), at the state the day reached, before ``end_timestep``; every tensor has the day's batch shape in front. ``WsimodDay`` completes the record after ``end_timestep`` (D14): ``storage_end``, and ``terms``, ``dropped``, ``dropped_arcs`` and ``events`` again, so what ``end_timestep`` records counts in its day. | `DayRecord(arc_flow, arc_quality, tank_storage, tank_quality, surface, surface_quality, terms, parts, dropped, dropped_arcs, storage_total, storage_start, storage_end, events, maxiter, decisions)` |
-| `WsimodMassBalance` | The system's water balance per day, each ``(..., T, 1 + K_additive)`` (volume, then the additive pollutants' masses). ``terms`` holds every term by its ``"<Class>.<term>"`` key (D11) plus ``"dropped"``; ``residual = inflow - outflow - storage_change``. | `WsimodMassBalance(inflow, outflow, storage_change, residual, terms, dropped_arcs=None, parts=<factory>)` |
-| `WsimodResults` | What WSIMOD's ``Model.run`` records (``model.py:1063-1170``), with a leading batch shape. | `WsimodResults(dates, arc_names, arc_flow, arc_quality, tank_names, tank_storage, tank_quality, surface_names, surface, surface_quality, mass_balance)` |
+| Name | What it does |
+|---|---|
+| [`DayRecord`](../api/water-resources.md#noodl.apps.wsimod.day.DayRecord) | What one day records, at the state the day reached, before ``end_timestep``; every tensor has the day's batch shape in front. |
+| [`WsimodMassBalance`](../api/water-resources.md#noodl.apps.wsimod.run.WsimodMassBalance) | The system's water balance per day, each ``(..., T, 1 + K_additive)`` (volume, then the additive pollutants' masses). |
+| [`WsimodResults`](../api/water-resources.md#noodl.apps.wsimod.run.WsimodResults) | What WSIMOD's ``Model.run`` records, with a leading batch shape. |
 
 ## Functions
 
 Calculations and helpers.
 
-| Name | What it does | How to call it |
-|---|---|---|
-| `wsimod_run` | Run ``model`` over its dates, or the first ``days`` of them (``1 <= days <= len(dates)``), and record each day (module text). | `wsimod_run(model, state=None, drivers=None, *, days=None, diagnostics=None)` |
+| Name | What it does |
+|---|---|
+| [`wsimod_run`](../api/water-resources.md#noodl.apps.wsimod.run.wsimod_run) | Run ``model`` over its dates, or the first ``days`` of them (``1 <= days <= len(dates)``), and record each day (module text). |
 
 ## Constants and tables
 
