@@ -88,8 +88,8 @@ What cannot differ between instances is structure: the sequence of calls (fixed 
 at build time and checked on every later day), the travel times, the pollutant lists and
 whether a `Distribution` has leakage.
 
-Where WSIMOD would raise on one instance (a division by zero in a growing surface, say), Python
-has no per-instance error, so noodl raises a `ValueError` naming the surface, the function, the
+Where one instance takes a process out of its domain (a division by zero in a growing surface,
+say), Python has no per-instance error, so noodl raises a `ValueError` naming the surface, the function, the
 day and the cause, and the whole batch stops.
 
 ## Graph size and fitting in windows

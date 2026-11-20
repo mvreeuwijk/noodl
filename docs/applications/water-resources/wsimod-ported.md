@@ -55,7 +55,7 @@ Where `T` comes from:
 | Node | Temperature |
 |---|---|
 | `Storage`, `Reservoir`, `RiverReservoir`, `River` | the node's own forcing: the constructor's `data_input_dict` or `filename` (relative to the configuration's directory), or a `filename` override (relative to the working directory). A missing date is refused by name when the model is built, whatever `decays` lists |
-| `Groundwater`, `QueueGroundwater` | a `filename` **override** only: WSIMOD loses the constructor's forcing for these classes, so a configured forcing is listed in `model.unread` and a `decays` dict without the override's `temperature` on every date is refused by name. Use an absolute path |
+| `Groundwater`, `QueueGroundwater` | a `filename` **override** only: the constructor's forcing is not used for these classes, so a configured forcing is listed in `model.unread` and a `decays` dict without the override's `temperature` on every date is refused by name. Use an absolute path |
 | a node with `decays: None` | none |
 
 The cap `min(factor, 1)` is a decision (`node:<name>/tank/make_decay/cap:<pollutant>`), true
@@ -213,14 +213,11 @@ losses. The state keys `"wsimod.river_temperature_lag"` and `"wsimod.river_phosp
 hold the two registers, slot 0 the oldest, zero-padded at the front; all zeros is WSIMOD's empty
 lists, and a run can start from another run's registers.
 
-Reproduced quirks: each window sum divides by its full length from the first day (a cold start);
-the "365-day" phosphorus mean adds 366 entries and divides by 365; `totalphosfcn` compares the
-phosphorus mass (kg) with the concentrations `limpppar` and `hsatTP` (kg/m³) and is negative for
-`limpppar - hsatTP < TP < limpppar`; mineralisation with no dissolved nitrogen removes nitrogen
-from `org-nitrogen` and adds it nowhere (the loss is in `bio_out` and the event
-`"river_nitrogen_lost"` says so); an orchestration that calls `calculate_discharge` twice a day
-runs the processes twice, where WSIMOD's own balance misses the first call's terms and prints an
-error on every day, and noodl's balance closes.
+As in WSIMOD, each window sum divides by its full length from the first day (a cold start), and
+the phosphorus mean holds 366 entries and divides by 365. Mineralisation with no dissolved
+nitrogen takes nitrogen from `org-nitrogen`; it leaves through `bio_out` and the event
+`"river_nitrogen_lost"` records it. An orchestration that calls `calculate_discharge` twice a
+day runs the processes twice, and noodl's balance counts both calls.
 
 Refused by name: a missing pollutant of the six, a missing temperature on a date,
 `T_wdays = 0`, `length * width = 0`, `halfsatINwater <= 0`, `max_temp_lag` that is not a
@@ -247,8 +244,10 @@ interpolates the crop and ground cover between sowing and harvest, and sets the 
 never reads the configured `et0_coefficient` (it is listed in `model.unread`). `Ks` is 1 while
 the root-zone depletion is below `RAW = TAW * ET_depletion_factor`, and otherwise
 `max(0, (TAW - depletion) / ((1 - ET_depletion_factor) * TAW))`. The calendar is built once,
-when the model is built, in WSIMOD's own arithmetic. Its quirks, reproduced, are listed on the
-[differences page](differences.md#land-and-crops).
+when the model is built, in WSIMOD's own arithmetic, so it behaves as WSIMOD's does: 1 March
+is interpolated at day 59 and 31 December at day 364 in every year, the crop cover starts to
+change the day after sowing, and a crop sown after its harvest day (`sowing_day > harvest_day`,
+or the default `harvest_day = 365`) has no cover.
 
 Refused by name: `wilting_point >= field_capacity`, `crop_factor_stages` and
 `crop_factor_stage_dates` of different lengths, a stage date list on which WSIMOD's
@@ -310,11 +309,10 @@ driver.
 `org-nitrogen`, `org-phosphorus`, `solids` and `temperature`; `rooting_depth`, `bulk_density`,
 `kfr` or `nfr` at or below 0; `cohesion`, `thetaupp` or `thetalow` of 0; `hsatINs` at or below
 0; `limpar` below 0; `field_capacity` at or below 0; and a `VariableAreaSurface`'s
-`current_surface_area` below 0. Each would be a division by zero or a logarithm of a
-non-positive number in WSIMOD. These checks run at build, and again for every batched instance
+`current_surface_area` below 0. Each is outside the domain of the process equations
+(a division by zero or a logarithm of a non-positive number). These checks run at build, and again for every batched instance
 when the day is bound, but only with pollutants on. A value inside these domains can still take
-WSIMOD's own Python math out of its domain on an active instance (a very small `nfr`); WSIMOD
-raises there too, and noodl raises a `ValueError` naming the surface, the function, the day and
+the arithmetic out of its domain on an active instance (a very small `nfr`); noodl then raises a `ValueError` naming the surface, the function, the day and
 the cause.
 
 ### The irrigation surface

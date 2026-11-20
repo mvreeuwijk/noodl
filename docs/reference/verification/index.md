@@ -64,7 +64,7 @@ difference.
   preference-weighted share is a smooth function of them, with genuine cross-gradients between
   competing arcs in projection mode. The totals and the storage agree with WSIMOD. The other
   known departures from WSIMOD (same-step outflow, bottlenecks behind a pass-through `Node`,
-  node-level limits) are listed in [Differences from WSIMOD](../../applications/water-resources/differences.md).
+  node-level limits) are listed under [where the layer differs from WSIMOD](../../applications/water-resources/allocation.md#where-the-layer-differs-from-wsimod).
 
 The MUNICH quadrature weights and exchange constant are the opposite case: MUNICH's own
 choices, reproduced on purpose even where they look like artefacts, because "fixing" them would

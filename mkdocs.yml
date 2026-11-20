@@ -83,8 +83,8 @@ nav:
           - Contaminants and occupants: applications/building/contaminants-and-occupants.md
           - Physics: applications/building/physics.md
           - Airflow elements: applications/building/elements.md
-          - Importing CONTAM: applications/building/contam.md
-          - Importing Modelica Buildings: applications/building/modelica.md
+          - Importing CONTAM files: applications/building/contam.md
+          - Importing Modelica Buildings models: applications/building/modelica.md
           - Limitations: applications/building/limitations.md
       - Street air quality:
           - applications/street/index.md
@@ -92,8 +92,8 @@ nav:
           - Choosing the closures: applications/street/closures.md
           - Above-roof concentration: applications/street/above-roof.md
           - Unsteady above-roof puffs: applications/street/puffs.md
-          - Reading and writing cases: applications/street/cases.md
           - Physics: applications/street/physics.md
+          - Importing MUNICH and SIRANE files: applications/street/cases.md
           - Limitations: applications/street/limitations.md
       - Sewers:
           - applications/sewer/index.md
@@ -124,8 +124,8 @@ nav:
           - Gradients, batches, long runs: applications/water-resources/wsimod-gradients.md
           - What is ported: applications/water-resources/wsimod-ported.md
           - Differences from WSIMOD: applications/water-resources/differences.md
+          - Importing WSIMOD files: applications/water-resources/wsimod-config.md
           - Limitations: applications/water-resources/limitations.md
-          - Importing WSIMOD config.yml: applications/water-resources/wsimod-config.md
       - Electrical circuits:
           - applications/electrical/index.md
           - Circuits: applications/electrical/circuits.md
@@ -177,7 +177,7 @@ nav:
           - Street air quality: reference/catalogue/street_aq.md
           - Sewers: reference/catalogue/sewer.md
           - Water distribution: reference/catalogue/water.md
-          - WSIMOD: reference/catalogue/wsimod.md
+          - Water resources: reference/catalogue/wsimod.md
           - Electrical circuits: reference/catalogue/electrical.md
       - State and driver keys: reference/keys.md
       - Kirchhoff layer options: reference/kirchhoff-options.md

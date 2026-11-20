@@ -99,15 +99,14 @@ debugged, not admitted.
   an `FWTW` deficit, an evaporation clamp, a porous `QueueGroundwater`, rivers and the River
   biochemistry, decays, treatment, a `float_accuracy` override and others). There are 69 cases:
   61 run against WSIMOD, 60 of them in both modes and `growing_lean_soil` in pollutant mode
-  only; eight are noodl-only (six crash cases, `wtw_zero_input` and `nonresidential_demand`).
+  only; eight are noodl-only (six edge cases, `wtw_zero_input` and `nonresidential_demand`).
   Every arc's flow and pollutants, every recorded tank and every surface field are compared on
   every day. The worst difference is exactly 0 for every node of both demos and for all 61 cases
   in each of their modes. WSIMOD's printed warnings are compared with noodl's events day by day
   (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
-  equal noodl's residual plus the dropped water, with one named exception: in
-  `river_double_discharge` WSIMOD's River balance misses the first of two daily
-  `calculate_discharge` calls and prints on every day, while noodl's balance closes within
-  rounding (2e-16 of scale). The system mass balance closes within `1e-12 * scale` every day,
+  equal noodl's residual plus the dropped water, with one named exception,
+  `river_double_discharge`, which calls `calculate_discharge` twice a day: noodl's balance counts
+  both calls and closes within rounding (2e-16 of scale). The system mass balance closes within `1e-12 * scale` every day,
   and every day the residual equals the evaporation clamp's gap (0 without a clamp). A
   quantity-only run's volumes equal the pollutant run's exactly.
 - **The growing surface with its nutrient pool.** `growing_spring` (sown on day 90, harvested on
@@ -132,17 +131,16 @@ debugged, not admitted.
   surface and answers 0. `variable_area` (100 days): two `VariableAreaSurface`s, `idle` at the
   default area of 0 and `half` at half its area. All are bitwise equal to WSIMOD in both modes,
   and the `Land` replays, handler calls included, are bitwise.
-- **Crashes** (`test_case_runs_where_wsimod_crashes*`). Eleven cases where WSIMOD raises. Three
+- **Edge cases.** Eleven configurations that WSIMOD does not run to the end. Three
   run in noodl, finite and balanced (`land_sewer_ponding` driven by a capacity,
   `wtw_zero_input`, `nonresidential_demand`). For a decaying `Groundwater` and
-  `QueueGroundwater` without a `filename` override, noodl refuses by name where WSIMOD raises
-  `TypeError`; with the override both run and agree bitwise. Five are growing surfaces: WSIMOD
-  raises `ZeroDivisionError` at a pinned line on a pinned day; noodl equals it bitwise on the
-  days before, records the guard's event on the crash day, and runs on with finite values and a
+  `QueueGroundwater` without a `filename` override, noodl refuses by name; with the override both run and agree bitwise. Five are growing surfaces that reach a zero
+  denominator on a known day: noodl equals WSIMOD bitwise on the days before, records the guard's
+  event on that day, and runs on with finite values and a
   closed balance. The triggers are ordinary: `growing_default_depletion` (day 11) and, from a
   tank without inorganic N and zero first-month inputs, `growing_no_din`, `growing_zero_n`,
   `growing_nitrite_only` (day 0) and `growing_empty_soil` (day 1). A sixth,
-  `irrigation_without_nutrients` (`KeyError` on day 5), runs a surface with the pollutants
+  `irrigation_without_nutrients` (stopping on day 5), runs a surface with the pollutants
   `phosphate` and `temperature` and no event: noodl updates no pool.
 
 ### Whole-model and case table
@@ -155,7 +153,7 @@ debugged, not admitted.
 | 47 cases (decay, treatment, soil-temperature, surface and earlier structural cases) | 3 to 40 | quantity-only, all pollutants | 0 | yes |
 | `river_nutrients` | 400 | quantity-only, all pollutants | 0 | yes |
 | `river_nutrients` | 1100, with decisions | all pollutants | 0 | slow |
-| `river_double_discharge` | 40 | quantity-only, all pollutants | 0 (WSIMOD's own balance prints on every day; noodl's closes within 2e-16 of scale) | yes |
+| `river_double_discharge` | 40 | quantity-only, all pollutants | 0 (noodl's balance closes within 2e-16 of scale) | yes |
 | `growing_spring` | 365 | quantity-only, the eight nutrient pollutants | 0 (WSIMOD's round-off prints admitted) | yes |
 | `growing_spring` | 1096 | quantity-only, the eight nutrient pollutants | 0 (as above) | slow |
 | `growing_spring` branches | 1096, with decisions, and `growing_lean_soil` | the eight nutrient pollutants | every site both ways | slow |
@@ -164,7 +162,7 @@ debugged, not admitted.
 | `growing_lean_soil` | 60 | the eight nutrient pollutants | 0 (as above) | yes |
 | `surface_deposition` | 180 (450 slow) | quantity-only, all pollutants | 0 | yes |
 | `growing_no_nitrate` | 365 (540 slow) | quantity-only, all pollutants | 0 | yes |
-| five growing crash cases | 10 to 20 | the pollutants of each | 0 on the days before WSIMOD's crash | yes |
+| five growing edge cases | 10 to 20 | the pollutants of each | 0 on the days WSIMOD runs | yes |
 | `deposition_non_additive` | 90 | quantity-only, all pollutants | 0 | yes |
 | `irrigation`, `irrigation_early` | 120 | quantity-only, the eight nutrient pollutants | 0 (no print admission needed) | yes |
 | `garden` | 100 | quantity-only, the eight nutrient pollutants | 0 | yes |
@@ -202,8 +200,8 @@ print round-off lines "mass balance error for <pollutant> of x in <land>" (`org-
 are small: its change in storage is a difference of two large stores and its normaliser is the
 flow scale. noodl's own balance closes. Whether a line falls on a given day depends on the last
 bit of WSIMOD's own `math.exp`, `**` and `log`, so on the platform's C library. The admission is
-therefore made at every such land of every case, the crash cases' days before their crash
-included. The comparison helper admits such a line of an additive pollutant where
+therefore made at every such land of every case, the edge cases' days before their zero
+denominator included. The comparison helper admits such a line of an additive pollutant where
 `|x| <= c * eps * S`, with `eps = 2.22e-16` and `S` the largest store of that pollutant on the
 land's surfaces and its three residence tanks at the end of that day or the day before; a line
 beyond it, a volume line and any line of another land still fail. Measured on Windows, the

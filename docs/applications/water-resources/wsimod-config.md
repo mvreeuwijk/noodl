@@ -1,4 +1,4 @@
-# Importing a WSIMOD `config.yml`
+# Importing WSIMOD files
 
 Reading a WSIMOD model description produces a `WsimodNetwork`: the pollutants, the orchestration,
 the dates, and the nodes and arcs with their parameters and forcing, as plain dataclasses.
@@ -82,8 +82,7 @@ refused by name.
 - `filename` (CSV or CSV.GZ, relative to the configuration directory) or `data_input_dict`. A
   file has the columns `variable`, `time`, `value` (other columns are ignored). Inline,
   `data_input_dict` is `{(variable, date): value}`. A node whose class takes no forcing (a
-  `Waste`, a treatment works other than `FWTW`) is refused if it names one, as WSIMOD raises
-  `TypeError`.
+  `Waste`, a treatment works other than `FWTW`) is refused if it names one.
 - `surfaces` (a `Land` only): a mapping keyed by name or a list. Each surface has `type_`
   (`ImperviousSurface`, `PerviousSurface`, `GrowingSurface`, `IrrigationSurface`,
   `GardenSurface` or `VariableAreaSurface`), `surface` (its name), its
@@ -113,15 +112,14 @@ refused by name.
   model's additive pollutants: constant 0.01, exponent 1.001, multiplier 0.7 and
   volume 0.03. A non-empty `process_parameters` must name every additive pollutant with its
   `constant` and `exponent`, and a non-empty `liquor_multiplier` every additive pollutant and
-  `volume`; WSIMOD raises `KeyError` otherwise, and so the reader refuses it by name. Entries for
+  `volume`; the reader refuses it by name otherwise. Entries for
   a pollutant that is not additive or not listed, a `volume` `exponent` and an `exponent` of 0 or
-  below are refused when the model is built (WSIMOD never reads the first two, and `0 **
-  negative` raises).
+  below are refused when the model is built (the first two are never read).
 - `decays` is `None` (a plain tank) or a dict (a `DecayTank`, `{}` included) on `Storage`,
   `Reservoir`, `RiverReservoir` and `River`: a key per decaying pollutant, each with exactly
   `constant` and `exponent` (numbers, `exponent > 0`); a dict needs the node's `temperature`
-  forcing on every date. A `Groundwater` loses its configured forcing, so
-  its dict needs a `filename` override that gives `temperature` on every date, and so does a
+  forcing on every date. A `Groundwater` does not use its configured forcing for decay,
+  so its dict needs a `filename` override that gives `temperature` on every date, and so does a
   `QueueGroundwater`'s, which builds a `DecayQueueTank`. A surface takes
   `decays` too (default `{}`, a key per decaying pollutant as above); it decays with its land's
   air `temperature`.

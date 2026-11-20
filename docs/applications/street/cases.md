@@ -1,10 +1,12 @@
-# Reading and writing cases
+# Importing MUNICH and SIRANE files
 
 A street-network case bundles a network with the meteorology, emissions and background
 concentrations that drive it hour by hour. `read_case(path) -> StreetCase` reads one from
 disk: a directory holding a `munich.cfg` is read as a MUNICH case; a `.dat` file is read as
 a SIRANE master file (`Donnees_*.dat`), with the deck it names; anything else raises
 `ValueError` naming both expectations.
+
+## How to load
 
 ```python
 from noodl.apps.street_aq import read_case
@@ -46,13 +48,6 @@ files, `native["streets"]` each record's SIRANE-consumed DBF fields, and
 `native["meteo_raw"]` the precipitation and cloud-cover columns `read_case` itself does not
 use.
 
-`read_case` refuses, by name, a SIRANE deck that exercises anything the South Kensington
-deck does not: a network file that is not a PolyLine Shapefile, meteorology that is not one
-measured station, user-supplied street velocities (`B_STREET_U_SIGMA_W = 1`), NO emitted as
-NO2-equivalent, a per-hour meteo override file, a non-empty source-groups file, a non-empty
-surface-emission file, and a point source with non-zero emission (noodl physics' street
-model has no point source) -- see `read_case`'s docstring for the complete list.
-
 `wind_dir_from_deg` is degrees clockwise from north, the direction the wind blows FROM, in
 both formats. MUNICH's own `WindDirection` is radians clockwise from north, the direction
 the wind blows TOWARD (MUNICH's `preprocessing/meteo.py`, `compute_wdir`); `read_case` and
@@ -75,7 +70,7 @@ the unit conversions (g/s, micrograms/m3) do. Every mass in `StreetCase` is SI (
 | `meteo_junction` | The same keys, `(n_hours, n_junctions)`, in `network.junctions` order -- may be empty or partial when the source has no genuine per-junction meteorology (always empty for SIRANE: one meteorological station for the whole network). |
 | `emissions` | `(n_hours, n_streets, n_species)`, kg/s per street. |
 | `background` | `(n_hours, n_streets, n_species)`, kg/m3 per street. |
-| `native` | The source's own options, as read (MUNICH: one dict per `munich.cfg` section, plus the lon/lat projection the reader used; SIRANE: the master file's options by SIRANE keyword, the two site files, each street's network fields, the one-sided streets and the raw meteo columns; the refusals are listed above). `model_options` translates these into `build_model` keywords, and `write_case` writes them back when the format matches. |
+| `native` | The source's own options, as read (MUNICH: one dict per `munich.cfg` section, plus the lon/lat projection the reader used; SIRANE: the master file's options by SIRANE keyword, the two site files, each street's network fields, the one-sided streets and the raw meteo columns; the refusals are listed [below](#what-is-refused)). `model_options` translates these into `build_model` keywords, and `write_case` writes them back when the format matches. |
 | `start` | The absolute date and time of `times[0]`, or `None` for a synthetic case built without one (writing such a case then raises). |
 
 ## `read_results` / `StreetResults`
@@ -364,3 +359,13 @@ print(state["street.x"])          # kg/m3 per street, at hour 0
 ```
 
 *(`sirane_south_kensington` is SIRANE's own South Kensington deck with part of its archived results.)*
+
+## What is refused
+
+`read_case` refuses, by name, a SIRANE deck that exercises anything the South Kensington
+deck does not: a network file that is not a PolyLine Shapefile, meteorology that is not one
+measured station, user-supplied street velocities (`B_STREET_U_SIGMA_W = 1`), NO emitted as
+NO2-equivalent, a per-hour meteo override file, a non-empty source-groups file, a non-empty
+surface-emission file, and a point source with non-zero emission (noodl physics' street
+model has no point source) -- see `read_case`'s docstring for the complete list. MUNICH's `Wang` transfer
+parameterisation is refused by name.

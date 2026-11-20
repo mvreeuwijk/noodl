@@ -3,8 +3,8 @@
 What the flow allocation layer and the WSIMOD port do not support, and where their results can
 differ from WSIMOD. Anything that cannot run is refused by name when the model is built. The
 evidence for what is supported is on the
-[verification page](../../reference/verification/water-resources.md), and the places where
-WSIMOD's own source is defective or silent are on [Differences from WSIMOD](differences.md).
+[verification page](../../reference/verification/water-resources.md), and the situations in
+which a noodl run can differ from a WSIMOD run are on [Differences from WSIMOD](differences.md).
 
 ## Flow allocation
 

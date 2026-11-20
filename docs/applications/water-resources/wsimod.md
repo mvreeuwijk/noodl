@@ -182,7 +182,8 @@ Events that reproduce a WSIMOD print: `"storage_unable_to_push"`, `"demand_defic
 `"more_treated_than_input"`, `"excess_treated_water"`, `"more_backflow_than_vqip"`,
 `"erosion_pool_short"`, `"adsorption_shortcut"` and `"freundlich_flow_adjusted"`.
 
-Events that are noodl's own, recorded where WSIMOD divides by zero, loses mass or cannot report:
+Events that are noodl's own, recorded in edge cases where noodl keeps a finite value or adds a
+diagnostic:
 `"zero_priority"`, `"wtw_liquor_zero_denominator"`, `"inaccurate_evaporation"`,
 `"wtw_negative_solids"`, `"decay_arc_order_unknown"`, `"river_nitrogen_lost"`,
 `"crop_water_stress_zero_denominator"`, `"pull_storage_no_din"`,
@@ -191,12 +192,11 @@ Events that are noodl's own, recorded where WSIMOD divides by zero, loses mass o
 
 ### The mass balance
 
-WSIMOD's own system check runs but cannot report, because it compares the system's inflow with
-itself. noodl computes what it meant to. Per day, `inflow` is the sum of the nodes'
+noodl computes a system mass balance every day. Per day, `inflow` is the sum of the nodes'
 mass-balance-in terms (catchment flows, precipitation, `FWTW` deficits, `UnlimitedDistribution`
 supply, demand loads), `outflow` that of their mass-balance-out terms (Waste, evaporation,
 demand consumption and backup, unrouted catchment water, unpushed sludge, treatment solids)
-plus the water WSIMOD loses without a trace, and `storage_change` the change of every carried
+plus the water dropped without being routed, and `storage_change` the change of every carried
 store; `residual = inflow - outflow - storage_change`. Each is `(..., T, 1 + K_additive)`: the
 volume, then the additive pollutants' masses. `terms` lists every term by `"<Class>.<term>"`
 (arcs' flows cancel and are not listed).
