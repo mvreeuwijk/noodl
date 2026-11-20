@@ -5,12 +5,28 @@
   <img src="assets/noodl-physics-full-dark.svg#only-dark" alt="noodl physics — complex networks, differentiable by design" width="640">
 </p>
 
-**Read your EPANET, SWMM or CONTAM model into PyTorch: run many variants in one call and get
-exact gradients of any output with respect to the drivers and the initial state. For models you assemble yourself, also the parameters you mark learnable.**
+**noodl physics is an open-source PyTorch framework for modelling physical networks: systems
+in which something conserved flows along edges and is stored at nodes, such as air between
+rooms, water in mains and sewers, pollutants along streets and current in circuits. Every model
+is batched and differentiable, so one call runs thousands of variants and returns exact
+gradients for calibration, sensitivity analysis and optimisation.**
 
-noodl physics is an open-source framework for differentiable network modelling of physical
-systems. Ready-made applications cover buildings, streets, sewers, water mains, water resources
-and electrical circuits; the framework underneath lets you compose your own.
+It comes with six ready-made applications. Each is compared with an established tool in its
+field and reads that tool's own files; the framework underneath lets you compose your own.
+
+| Application | Reference tool | Reads |
+|---|---|---|
+| [Building airflow and heat](applications/building/index.md) | CONTAM, Modelica Buildings Library | CONTAM `.prj`, `.wth`, `.ctm`; Modelica export |
+| [Street air quality](applications/street/index.md) | MUNICH, SIRANE | MUNICH cases, SIRANE decks |
+| [Sewers](applications/sewer/index.md) | SWMM 5.2 | SWMM `.inp` |
+| [Water distribution](applications/water/index.md) | EPANET 2.2 | EPANET `.inp` |
+| [Water resources](applications/water-resources/index.md) | WSIMOD | WSIMOD `config.yml` |
+| [Electrical circuits](applications/electrical/index.md) | Modelica Standard Library, pandapower | Modelica export, MATPOWER `.m` |
+
+See the [chooser](applications/index.md) for the maturity of each, and
+[File formats](reference/formats.md) for what each reader accepts and refuses.
+
+An EPANET file, read, batched over three demands and differentiated:
 
 ```python
 import torch
@@ -62,39 +78,6 @@ d head / d demand: [-75.4, -86.0, -95.5]
     [:octicons-arrow-right-24: Verification](reference/verification/index.md)
 
 </div>
-
-## Applications
-
-<div class="grid cards" markdown>
-
--   **[Building airflow and heat](applications/building/index.md)**
-
-    Multi-zone airflow, heat and contaminants. Reads CONTAM and Modelica Buildings models.
-
--   **[Street air quality](applications/street/index.md)**
-
-    Canyon exchange and routing of pollutants through an urban street network.
-
--   **[Sewers](applications/sewer/index.md)**
-
-    Gravity hydraulics, headspace air and sulfide. Reads SWMM `.inp` files.
-
--   **[Water distribution](applications/water/index.md)**
-
-    Pressurised mains, pumps, tanks, demand and quality. Reads EPANET `.inp` files.
-
--   **[Water resources](applications/water-resources/index.md)**
-
-    Capacity-limited flow allocation and the WSIMOD urban water cycle. Reads WSIMOD configurations.
-
--   **[Electrical circuits](applications/electrical/index.md)**
-
-    DC, transient and AC circuits and power flow. Reads Modelica and MATPOWER files.
-
-</div>
-
-See the [chooser](applications/index.md) for the reference tool, file formats and maturity of
-each, and [File formats](reference/formats.md) for what each reader accepts and refuses.
 
 ## What it gives you
 
