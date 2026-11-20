@@ -1,4 +1,4 @@
-# SWMM `.inp`
+# Importing SWMM files
 
 Reading a SWMM input file produces a model for [sewers](index.md), with SWMM 5.2 as the reference. It shares its
 lexical tokenizer (`noodl.apps.inpfile`) with the EPANET reader; each format's own section names,

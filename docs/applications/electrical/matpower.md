@@ -1,4 +1,4 @@
-# MATPOWER `.m`
+# Importing MATPOWER files
 
 Reading a MATPOWER case file produces a `PowerNetwork` for the
 [power flow](power-flow.md) of the electrical application.
@@ -8,6 +8,8 @@ Reading a MATPOWER case file produces a `PowerNetwork` for the
 `define_constants`). A case file is a MATLAB function that fills a struct `mpc`; the reader
 parses its text and never runs MATLAB or Octave. The network keeps the file's units (MW, MVAr,
 degrees, p.u. impedances on `baseMVA`); the power-flow builders convert to per unit.
+
+## How to load
 
 A four-bus case (the network of the
 [power-flow example](power-flow.md#solve-an-ac-and-a-dc-power-flow)), saved and read back:

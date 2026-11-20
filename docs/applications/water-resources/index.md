@@ -70,8 +70,8 @@ To run a WSIMOD model, start from [Running a WSIMOD model](wsimod.md).
 - [WSIMOD: gradients, batches and long runs](wsimod-gradients.md).
 - [WSIMOD: what is ported](wsimod-ported.md): classes and processes.
 - [Differences from WSIMOD](differences.md).
+- [Importing WSIMOD files](wsimod-config.md): the `config.yml` format.
 - [Limitations](limitations.md): what is not supported and where results can differ.
-- [Importing a WSIMOD `config.yml`](wsimod-config.md).
 - Reference: [WSIMOD catalogue](../../reference/catalogue/wsimod.md),
   [verification](../../reference/verification/water-resources.md),
   [API](../../reference/api/index.md).

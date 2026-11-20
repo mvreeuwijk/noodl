@@ -1,4 +1,4 @@
-# Importing CONTAM projects
+# Importing CONTAM files
 
 Reading a CONTAM project (`.prj`), weather file (`.wth`) and ambient-concentration file (`.ctm`) produces a model for [building physics](index.md). Each `.prj` airflow-path component becomes one of the [airflow elements](elements.md) the building application otherwise assembles by hand; a source or sink record becomes one of the source and sink models in `noodl.apps.building_physics.sources`. The reader covers a documented subset of NIST's TN 1887r1 Appendix A. Anything outside it is refused by name rather than dropped, as listed under [What is refused](#what-is-refused).
 

@@ -1,4 +1,4 @@
-# Modelica circuits
+# Importing Modelica circuits
 
 How to load electrical example models of the Modelica Standard Library (MSL 4.1.0,
 `Modelica.Electrical.Analog`, with the lumped heat-transfer components of
@@ -10,7 +10,7 @@ the same library see [Modelica airflow](../building/modelica.md).
 The reader never parses Modelica source: OpenModelica evaluates every parameter, and the
 reader reads a JSON export of the evaluated model.
 
-## Load a model
+## How to load
 
 ```py
 from noodl.apps.electrical.modelica import read_modelica_circuit, simulate_circuit

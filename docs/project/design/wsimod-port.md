@@ -6,8 +6,7 @@ For maintainers of `noodl.apps.wsimod`. The user documentation is
 [Differences from WSIMOD](../../applications/water-resources/differences.md). This page keeps
 what those omit: the numbered decisions, the upstream source locations that justify them, and the
 admitted round-off cases. Source locations are for WSIMOD 0.8.1 (`wsimod/...`). Codes are the
-identifiers used in source comments, tests and docstrings: `L<n>` upstream defects (reported as
-ImperialCollegeLondon/wsi#258 to #260; L1 to L26 are the growing-surface set in #260), `X<n>`
+identifiers used in source comments, tests and docstrings: `L<n>` upstream items (L1 to L26 are the growing-surface set), `X<n>`
 transcription decisions, `D<n>` design and test-harness decisions, `Y<n>` review items and `W<n>`
 earlier workstream decisions.
 
@@ -17,8 +16,8 @@ earlier workstream decisions.
   WSIMOD's. Python's `**`, `exp`, `sqrt` and `sum` are evaluated per instance (`pow_python`,
   `exp_python`, `pow_half`, `window_sum`), which costs time proportional to the batch (W8).
 - Branches are decided on detached values per instance; values stay in the graph (W9).
-- A guard where WSIMOD divides by zero gives a finite value and a named event; where WSIMOD's
-  code is merely odd it is reproduced and documented; where it cannot run the model is refused.
+- At a zero denominator a guard gives a finite value and a named event; other upstream
+  behaviour is reproduced; a configuration that cannot run is refused.
 - Every refusal names the key, node or date. Every comparison asserts the class's own bound,
   which is 0 for `+ - * /`, `min`, `max` arithmetic.
 
