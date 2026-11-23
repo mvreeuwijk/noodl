@@ -451,13 +451,16 @@ def test_a_divider_floods_like_a_junction_at_every_step(tmp_path):
 # --------------------------------------------------------------------------------- ponding
 POND_NAME = "ponding_dynwave.inp"
 POND_TIE_NAME = "ponding_surcharge_dynwave.inp"
-#: SWMM's flooded steps (1-based) of the ponding fixtures: SWMM's ``Node.flooding`` of a
-#: ponding junction is the rate its ponded volume grows (`dynwave.c:787-792`), positive while
-#: it ends above its full depth and its net inflow is above the FUDGE flow.
+#: SWMM's flooded steps (1-based) of the ponding fixtures, for `POND_TIE_NAME` before its tie:
+#: SWMM's ``Node.flooding`` of a ponding junction is the rate its ponded volume grows
+#: (`dynwave.c:787-792`), positive while it ends above its full depth and its net inflow is
+#: above the FUDGE flow.
 POND_FLOODED_STEPS = {POND_NAME: {"J2": list(range(21, 360))},
-                      POND_TIE_NAME: {"J2": list(range(21, 28)), "J3": list(range(271, 360))}}
+                      POND_TIE_NAME: {"J2": list(range(21, 28))}}
 #: The first step (1-based) of the tie in `POND_TIE_NAME`, see its test.
 POND_TIE_STEP = 270
+#: J3's full depth (MaxDepth) in `POND_TIE_NAME` (m), at which noodl holds it on the tie step.
+POND_TIE_FULL_DEPTH = 0.6
 
 
 @pytest.mark.slow
@@ -517,23 +520,25 @@ def test_a_ponded_junction_drains_back_through_its_full_depth_as_swmm(tmp_path):
 
 
 @pytest.mark.slow
-def test_ponding_after_a_surcharged_junction_reaches_its_full_depth_holds_swmms_tie(tmp_path):
+def test_ponding_after_a_surcharged_junction_matches_swmm_up_to_its_tie(tmp_path):
     """J3 (crown 0.45 m, MaxDepth 0.6 m, Aponded 0.5 m2) is surcharged: at step 270 the
-    surcharged update takes it above its full depth, the ponded update ends below it, and
-    SWMM's trials alternate about 0.6 m (a FUDGE above and below), stopping at 0.5999695 m
-    with SWMM reporting that step as not converged (0.28 % of the 359). noodl's tie rule holds
-    the junction at 0.6 m exactly. Every step before the tie agrees at the full targets; from it
-    the difference is the FUDGE depth (3.05e-5 m, `FUDGE` = 1e-4 ft) and what that offset does
-    to the conduits' flows, held to 1e-4 m and 1e-5 m3/s, while J3's overflow (the ponded
-    volume's growth) agrees to 1e-5 m3/s."""
+    surcharged update takes it above its full depth and the ponded update ends below it, so
+    SWMM's trials alternate about 0.6 m and that step does not converge (0.28 % of the 359,
+    whatever MAX_TRIALS is). Which side SWMM stops on depends on the platform, and every later
+    step inherits it, so SWMM is compared only on the steps before the tie, all of them
+    converged, at the full targets. On the tie step noodl's tie rule holds J3 at its full depth."""
     rows, conn, engine, not_converging = _swmm(tmp_path, POND_TIE_NAME)
     assert engine == "5.2.4" and not_converging == pytest.approx(100.0 / 359, abs=0.01)
-    assert _flooded_steps(rows) == POND_FLOODED_STEPS[POND_TIE_NAME]
-    diffs = _differences(POND_TIE_NAME, rows, conn, len(rows), atol=EXTRAN_ATOL)
-    _assert_parity(_worst(diffs[:POND_TIE_STEP - 1]))
-    depth, flow, overflow = _worst(diffs[POND_TIE_STEP - 1:])
-    assert 1e-5 < depth <= 1e-4 and flow <= 1e-5 and overflow <= 1e-5, (depth, flow, overflow)
-
+    before = POND_TIE_STEP - 1
+    assert _flooded_steps(rows[:before]) == POND_FLOODED_STEPS[POND_TIE_NAME]
+    run = _run_noodl(POND_TIE_NAME, POND_TIE_STEP, atol=EXTRAN_ATOL)
+    _assert_parity(_worst(_differences(POND_TIE_NAME, rows, conn, before, run=run)))
+    _, model, hist, _ = run
+    hyd = model.dynamic_wave
+    j3 = list(hyd.junction_names).index("J3")
+    node = model.junction_idx[j3]
+    depth = hist["water.phi"][POND_TIE_STEP - 1, node] - hyd.node_invert[node]
+    assert abs(depth.item() - POND_TIE_FULL_DEPTH) <= 1e-12, depth.item()
 
 OUTFALL_FLOOD_NAME = "flooding_outfall_dynwave.inp"
 #: The step (1-based) at which J4 floods in SWMM, and the last step at which SWMM's
