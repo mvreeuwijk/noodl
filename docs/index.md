@@ -88,6 +88,6 @@ d head / d demand: [-75.4, -86.0, -95.5]
 | **Composable physics layers** | Kirchhoff solves, transport, reactions and allocation on one network, stepped together. |
 | **Batching** | Every solve is batched: a thousand variants, or one network under a thousand weather realisations, is one call. |
 | **Exact gradients** | An implicit-function adjoint gives gradients for the cost of one linear solve, not an unrolled tape. |
-| **Compared with reference tools** | Code-to-code comparisons with CONTAM, SWMM, EPANET, WSIMOD, the Modelica libraries and pandapower, with tolerances and measured errors written down. The street application is compared with MUNICH's formulas and SIRANE's results and is only partly verified; its page says where. |
+| **Compared with reference tools** | Code-to-code comparisons with CONTAM, SWMM, EPANET, WSIMOD, the Modelica libraries and pandapower, with tolerances and measured errors written down. The street application matches MUNICH's own runs, and SIRANE's results up to the street concentration, which is not yet compared; its page says where. |
 
 ![The noodl physics model stack: a network, then constitutive laws, heads and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)

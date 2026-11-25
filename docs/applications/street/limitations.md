@@ -4,7 +4,7 @@ What the street air quality application supports and what it does not. The overv
 
 ## Agreement with the reference tools
 
-- **The MUNICH 12-street idealised case is not reproduced.** Its street geometry was never published, so absolute concentrations cannot be compared, and the pattern of concentrations relative to one street misses its 5 % target: the worst of the nineteen ratios is off by 51 %, and seven are within 15 %. The scale-invariant checks (linearity in wind speed, the 270° canyon-wind ratio) do match.
+- **The published MUNICH 12-street figure is not reproduced.** Kim et al. (2022, Fig. 1) never published the figure's street geometry, emission or meteorology, so absolute concentrations cannot be compared, and the pattern of concentrations relative to one street misses its 5 % target: the worst of the nineteen ratios is off by 51 %, and seven are within 15 %. The scale-invariant checks (linearity in wind speed, the 270° canyon-wind ratio) do match. MUNICH v2.2's own runs on the same network, with known inputs, are reproduced to the precision of its output, so the miss points to the figure's unpublished inputs rather than to the street transport.
 - **Street concentrations are not compared with SIRANE.** The archived South Kensington run's emission field is not the deck's, so no concentration comparison against it is meaningful; the residual under the deck's stated emission (median relative difference 0.888) is recorded, not checked.
 - **SIRANE's exchange coefficient.** The code uses $\sigma_w / (\sqrt{2}\,\pi)$, as in MUNICH's source and SIRANE's, not $\sigma_w/\sqrt{2\pi}$.
 - **MUNICH's chemistry** (the JPL rate, no floor) is checked through its rate constant, not against MUNICH output.

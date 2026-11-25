@@ -747,8 +747,18 @@ class StreetFlows:
         bl_s = self._boundary_layer(u_ref, u_star, h_abl)
         phi = theta_w - g.azimuth
         if self.canyon_wind == "bessel_profile":
+            # The Bessel profile builds its own roof wind from u* -- the same one
+            # `roof_wind="bessel_canyon_mean"` averages -- unless the roof wind is another
+            # closure's, which it then starts from (MUNICH's Sirane street wind on its
+            # Macdonald roof wind).
+            roof = {"u_star": bl_s.u_star}
+            if self.roof_wind == "canopy_log_law":
+                roof = {"u_h": roof_wind(
+                    bl_s.u_star, g.height, g.width, roof_wind="canopy_log_law",
+                    kappa=self.kappa, h_mean=self.h_mean, w_mean=self.w_mean,
+                )}
             u_street = canyon_velocity(
-                g.width, g.height, phi, u_star=bl_s.u_star, canyon_wind="bessel_profile",
+                g.width, g.height, phi, canyon_wind="bessel_profile", **roof,
                 z0_b=g.z0_b, kappa=self.kappa, canyon_wind_min=self.canyon_wind_min,
                 shape_constant=self.shape_constant,
             )

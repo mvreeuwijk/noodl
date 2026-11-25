@@ -388,3 +388,28 @@ def test_soulhac_canyon_velocity_refuses_a_roughness_at_or_above_the_half_width(
     just_below = canyon_velocity(torch.tensor([0.32], dtype=DT), height, phi,
                                  u_star=u_star, z0_b=0.15)
     assert torch.isfinite(just_below).all()
+
+
+@pytest.mark.parametrize("shape_constant", ["exact_root", "grid_search"])
+def test_the_bessel_profile_on_its_own_roof_wind_is_the_profile_from_u_star(shape_constant):
+    """Given `u_h` = the Bessel closure's own roof wind (same roughness, kappa and `c`), the
+    profile divides it back by the canyon-mean factor: the u*-built profile, to rounding."""
+    W = torch.tensor([10.0, 20.0, 40.0], dtype=DT)
+    H = torch.tensor([20.0, 15.0, 12.0], dtype=DT)
+    phi = torch.tensor([0.3, 1.0, 0.0], dtype=DT)
+    u_star = torch.tensor(0.35, dtype=DT)
+    u_h = roof_wind(u_star, H, W, roof_wind="bessel_canyon_mean", z0_s=0.01,
+                    kappa=KAPPA_041, shape_constant=shape_constant)
+    common = dict(canyon_wind="bessel_profile", z0_b=0.01, kappa=KAPPA_041,
+                  shape_constant=shape_constant)
+    from_u_star = canyon_velocity(W, H, phi, u_star=u_star, **common)
+    from_u_h = canyon_velocity(W, H, phi, u_h=u_h, **common)
+    assert torch.allclose(from_u_h, from_u_star, rtol=1e-13, atol=0.0)
+
+
+def test_the_bessel_profile_takes_exactly_one_roof_wind():
+    W, H, phi = (torch.tensor([20.0], dtype=DT),) * 2 + (torch.tensor([0.0], dtype=DT),)
+    one = torch.tensor(0.3, dtype=DT)
+    for given in ({}, {"u_star": one, "u_h": one}):
+        with pytest.raises(ValueError, match="exactly one of u_star"):
+            canyon_velocity(W, H, phi, canyon_wind="bessel_profile", **given)

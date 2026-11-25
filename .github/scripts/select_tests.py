@@ -56,8 +56,8 @@ APPS = {
     ),
     "street": (
         ["src/noodl/apps/street_aq/", "tests/apps/street_aq/", "tests/data/street/",
-         "tests/verification/test_munich.py", "tests/verification/test_sirane"],
-        ["tests/apps/street_aq", "tests/verification/test_munich.py",
+         "tests/verification/test_munich", "tests/verification/test_sirane"],
+        ["tests/apps/street_aq", "tests/verification/test_munich*.py",
          "tests/verification/test_sirane*.py"],
     ),
     "electrical": (

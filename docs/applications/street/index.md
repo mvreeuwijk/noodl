@@ -8,11 +8,11 @@ The application reproduces the physics of two street-network models: **MUNICH** 
 
 ## Maturity: partial
 
-The street application is **partial**: verified against SIRANE on a stated subset, with one open discrepancy against MUNICH.
+The street application is **partial**: street concentrations are verified against MUNICH, and against SIRANE everything up to the street concentration is.
 
+- Against MUNICH v2.2, noodl physics reproduces MUNICH's own runs of the 12-street network (eight hours of mixed wind and stability, three closure sets covering every MUNICH option `read_case` translates) to the float32 precision of MUNICH's output (worst 7e-7 relative). Thirteen formula pairs are exact to the precision its source publishes. The published concentration pattern of Kim et al. (2022, Fig. 1), whose inputs were never published, is not reproduced (worst of 19 ratios off by 51 %).
 - Against SIRANE v2.1, the roof exchange velocity, the in-canyon wind, the above-roof plume kernel (46 streets and 19 single-street probes) and the NO-NO₂-O₃ chemistry agree with its archived output to its printed precision or to stated regression guards.
-- Against MUNICH, thirteen formula pairs are exact to the precision its source publishes, but the relative concentration pattern of its idealised 12-street case is not reproduced (worst of 19 ratios off by 51 %).
-- Street concentrations are not compared against SIRANE, and the puffs are checked against the steady kernel rather than against SIRANERISK.
+- Street concentrations are not compared against SIRANE, MUNICH's chemistry is checked through its rate constant only, and the puffs are checked against the steady kernel rather than against SIRANERISK.
 
 The numbers are on the [verification page](../../reference/verification/street.md).
 
@@ -25,7 +25,7 @@ The numbers are on the [verification page](../../reference/verification/street.m
 | Junction routing with direction averaging | Chemistry other than photostationary NO-NO₂-O₃; chemistry inside puffs |
 | Steady above-roof plume coupled to the streets | SIRANE's meteorological preprocessor, and solar geometry for MUNICH's photolysis |
 | Unsteady puffs with explicit above-roof releases | SIRANE decks beyond the supported subset (refused by name); point sources |
-| Reading and writing MUNICH cases and SIRANE decks | Reproducing MUNICH's idealised relative pattern |
+| Reading and writing MUNICH cases and SIRANE decks | Reproducing the published 12-street figure, whose inputs were never published |
 
 The reasons and sizes are on [Limitations](limitations.md).
 
