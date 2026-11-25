@@ -253,6 +253,12 @@ def _read_semicolon_table(path: Path) -> list[list[str]]:
     return rows
 
 
+def _write_text(path: Path, text: str) -> None:
+    """`text` with LF line endings on every platform (MUNICH is a Linux program), so a case
+    written on Windows is byte for byte the one written anywhere else."""
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def _write_binary(path: Path, values: np.ndarray) -> None:
     np.asarray(values, dtype=np.float64).astype("<f4").tofile(path)
 
@@ -709,7 +715,7 @@ def write_munich_case(
         touching = street_touches[name]
         row = [junction_id[name], repr(lon), repr(lat), str(len(touching)), *touching]
         intersection_lines.append(";".join(row) + ";")
-    (out_dir / "intersection.dat").write_text("\n".join(intersection_lines) + "\n")
+    _write_text(out_dir / "intersection.dat", "\n".join(intersection_lines) + "\n")
 
     street_lines = ["#" + ";".join(_STREET_COLUMNS)]
     for street in network.streets:
@@ -718,7 +724,7 @@ def write_munich_case(
             repr(street.length), repr(street.width), repr(street.height), "0",
         ]
         street_lines.append(";".join(row))
-    (out_dir / "street.dat").write_text("\n".join(street_lines) + "\n")
+    _write_text(out_dir / "street.dat", "\n".join(street_lines) + "\n")
 
     # [reactivity]/[alpha]/[beta]/[henry]/[diffusivity] are read unconditionally by
     # `StreetNetworkTransport::ReadConfiguration` regardless of `With_deposition` -- their
@@ -738,7 +744,7 @@ def write_munich_case(
     species_lines += species_section("beta", "0.8") + [""]
     species_lines += species_section("henry", "1.2e-2") + [""]
     species_lines += species_section("diffusivity", "0.14")
-    (out_dir / "species.dat").write_text("\n".join(species_lines) + "\n")
+    _write_text(out_dir / "species.dat", "\n".join(species_lines) + "\n")
 
     street_block = "\n".join(f"{k}: {v}" for k, v in street_options.items())
     date_min = format_date(start)
@@ -778,7 +784,7 @@ With_transport: yes
 
 {street_block}
 """
-    (out_dir / "munich.cfg").write_text(munich_cfg)
+    _write_text(out_dir / "munich.cfg", munich_cfg)
 
     # `Averaged: no`: each saved record is that hour's own street concentration, which is
     # what `read_munich_results` returns. With `Averaged: yes` MUNICH saves the mean of the
@@ -802,7 +808,7 @@ Output_file: <Result_dir>/&f.bin
 
 Text_file: no
 """
-    (out_dir / "munich-saver.cfg").write_text(saver_cfg)
+    _write_text(out_dir / "munich-saver.cfg", saver_cfg)
 
     def section_head(title: str, nt: int, fields: Sequence[str]) -> list[str]:
         return [f"[{title}]", "", f"Date_min: {date_min}", f"Delta_t: {delta_t!r}",
@@ -884,6 +890,6 @@ Text_file: no
             _write_binary(out_dir / f"meteo_{name}.bin", padded(arr))
             meteo_lines.append(f"{name} meteo_{name}.bin")
     data_lines += meteo_lines
-    (out_dir / "munich-data.cfg").write_text("\n".join(data_lines) + "\n")
+    _write_text(out_dir / "munich-data.cfg", "\n".join(data_lines) + "\n")
 
     return out_dir
