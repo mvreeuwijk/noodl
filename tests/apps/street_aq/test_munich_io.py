@@ -393,10 +393,12 @@ def test_meteo_junction_survives_a_permuted_intersection_file(tmp_path):
 def test_model_options_reads_the_case_own_closure_settings():
     case = read_case(DATA / "munich_paris_excerpt")
     assert case.model_options() == dict(
-        preset="munich", canyon_wind="exponential_profile",
+        preset="munich", kappa=0.41, canyon_wind="exponential_profile",
         roof_exchange="aspect_ratio_scaled", roof_wind="bessel_canyon_mean",
-        direction_averaging="rectangle_rule", z_ref=30.0, canyon_wind_min=0.1,
+        direction_averaging="rectangle_rule", z_ref=30.0, canyon_wind_min=0.1, z0_s=0.01,
     )
+    # MUNICH's one in-canyon roughness, z0_surface (default 0.01 m), is every street's z0_b.
+    assert {s.z0_b for s in case.network.streets} == {0.01}
 
 
 def test_model_options_follow_non_default_keys(tmp_path):
@@ -405,15 +407,16 @@ def test_model_options_follow_non_default_keys(tmp_path):
         "Mean_wind_speed_parameterization": "Sirane", "Transfer_parameterization": "Sirane",
         "Building_height_wind_speed_parameterization": "Macdonald",
         "With_horizontal_fluctuation": "no", "Zref": "20.0",
-        "Minimum_Street_Wind_Speed": "0.25",
+        "Minimum_Street_Wind_Speed": "0.25", "z0_surface": "0.02",
     })
     case = read_case(tmp_path)
     options = case.model_options()
     assert options == dict(
-        preset="munich", canyon_wind="bessel_profile", roof_exchange="turbulent_velocity",
-        roof_wind="canopy_log_law", direction_averaging="none", z_ref=20.0,
-        canyon_wind_min=0.25,
+        preset="munich", kappa=0.41, canyon_wind="bessel_profile",
+        roof_exchange="turbulent_velocity", roof_wind="canopy_log_law",
+        direction_averaging="none", z_ref=20.0, canyon_wind_min=0.25, z0_s=0.02,
     )
+    assert {s.z0_b for s in case.network.streets} == {0.02}
     build_model(case.network, species=("NO2",), **options)       # every keyword is valid
 
 

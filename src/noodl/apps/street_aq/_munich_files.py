@@ -41,6 +41,10 @@ UG_PER_KG = 1e9
 divides emissions/background by this AT READ TIME; `write_munich_case` multiplies by it at
 write time."""
 
+MUNICH_Z0_SURFACE_DEFAULT = 0.01
+"""MUNICH's in-canyon (wall and ground) roughness, m, when `munich.cfg`'s `[street]` sets
+no `z0_surface` (`StreetNetworkTransport.cxx:157-160`)."""
+
 _METEO_FIELDS = {
     "WindSpeed": "wind_speed",
     "PBLH": "h_abl",
@@ -249,6 +253,12 @@ def _read_semicolon_table(path: Path) -> list[list[str]]:
     return rows
 
 
+def _write_text(path: Path, text: str) -> None:
+    """`text` with LF line endings on every platform (MUNICH is a Linux program), so a case
+    written on Windows is byte for byte the one written anywhere else."""
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def _write_binary(path: Path, values: np.ndarray) -> None:
     np.asarray(values, dtype=np.float64).astype("<f4").tofile(path)
 
@@ -278,6 +288,10 @@ def read_munich_case(root: Path) -> dict:
     species = _read_species_list(root / domain["Species"])
 
     street_section = cfg["street"]
+    # MUNICH has one in-canyon roughness for walls and ground, `z0_surface`
+    # (`StreetNetworkTransport.cxx:157-160`), which its Bessel canyon wind is written on:
+    # every street's `z0_b` is set to it.
+    z0_surface = float(street_section.get("z0_surface", MUNICH_Z0_SURFACE_DEFAULT))
     street_path = root / street_section["Street"]
     intersection_path = root / street_section["Intersection"]
     street_rows = _read_semicolon_table(street_path)
@@ -320,7 +334,8 @@ def read_munich_case(root: Path) -> dict:
             if name not in x:
                 x[name], y[name] = project(jid)
                 raw_junction_id[name] = jid
-        streets.append(Street(street_id, u, v, float(length), float(width), float(height)))
+        streets.append(Street(street_id, u, v, float(length), float(width), float(height),
+                              z0_b=z0_surface))
         street_ids.append(street_id)
     # Street directions as MUNICH computes them, from the lon/lat themselves at each
     # street's own mid-latitude (`network.midlatitude_bearing`), not from the metres above.
@@ -441,6 +456,10 @@ def read_munich_results(results_dir: Path, *, case) -> dict:
 
 
 # ------------------------------------------------------------------------------- writing
+
+_LOOK_AHEAD_ROWS = 2
+"""Rows past the run's last hour that `write_munich_case` appends to every time-varying
+binary (the last row repeated): MUNICH reads its inputs ahead of the hour it computes."""
 
 _DEFAULT_STREET_OPTIONS: dict[str, str] = {
     "Mean_wind_speed_parameterization": "Exponential",
@@ -584,9 +603,11 @@ def write_munich_case(
     `times` must be evenly spaced (it sets `Delta_t`; one time step writes 3600 s); `start`
     becomes every section's `Date_min`.
 
-    Every meteo binary is written with 2 look-ahead records (the last row repeated):
-    MUNICH's saver reads up to two steps past the run's last hour to finish its hourly
-    averaging, when every meteo field varies in time. Emission and background need none.
+    Every time-varying binary -- meteo, emission and background alike -- is written with
+    `_LOOK_AHEAD_ROWS` (2) look-ahead records, the last row repeated: MUNICH reads its
+    inputs ahead of the hour it computes (an emission binary of only `Nt` rows stops the run
+    at its last hour), and its saver up to two steps past the last hour to finish its hourly
+    averaging. A constant field is written as a number and needs none.
 
     The `[meteo]` `Fields` list always carries the six MUNICH v2.2 requires regardless of
     the case's own meteo (see `_REQUIRED_METEO_DEFAULTS`): `Rain`, `SolarRadiation`,
@@ -694,7 +715,7 @@ def write_munich_case(
         touching = street_touches[name]
         row = [junction_id[name], repr(lon), repr(lat), str(len(touching)), *touching]
         intersection_lines.append(";".join(row) + ";")
-    (out_dir / "intersection.dat").write_text("\n".join(intersection_lines) + "\n")
+    _write_text(out_dir / "intersection.dat", "\n".join(intersection_lines) + "\n")
 
     street_lines = ["#" + ";".join(_STREET_COLUMNS)]
     for street in network.streets:
@@ -703,7 +724,7 @@ def write_munich_case(
             repr(street.length), repr(street.width), repr(street.height), "0",
         ]
         street_lines.append(";".join(row))
-    (out_dir / "street.dat").write_text("\n".join(street_lines) + "\n")
+    _write_text(out_dir / "street.dat", "\n".join(street_lines) + "\n")
 
     # [reactivity]/[alpha]/[beta]/[henry]/[diffusivity] are read unconditionally by
     # `StreetNetworkTransport::ReadConfiguration` regardless of `With_deposition` -- their
@@ -723,7 +744,7 @@ def write_munich_case(
     species_lines += species_section("beta", "0.8") + [""]
     species_lines += species_section("henry", "1.2e-2") + [""]
     species_lines += species_section("diffusivity", "0.14")
-    (out_dir / "species.dat").write_text("\n".join(species_lines) + "\n")
+    _write_text(out_dir / "species.dat", "\n".join(species_lines) + "\n")
 
     street_block = "\n".join(f"{k}: {v}" for k, v in street_options.items())
     date_min = format_date(start)
@@ -763,8 +784,11 @@ With_transport: yes
 
 {street_block}
 """
-    (out_dir / "munich.cfg").write_text(munich_cfg)
+    _write_text(out_dir / "munich.cfg", munich_cfg)
 
+    # `Averaged: no`: each saved record is that hour's own street concentration, which is
+    # what `read_munich_results` returns. With `Averaged: yes` MUNICH saves the mean of the
+    # step's two ends (hour k-1 and hour k, the first against a zero start).
     saver_cfg = """\
 Result_dir: results/
 
@@ -775,7 +799,7 @@ Species: all
 Date_beg: -1
 Date_end: -1
 Interval_length: 1
-Averaged: yes
+Averaged: no
 Initial_concentration: no
 
 Type: street
@@ -784,21 +808,26 @@ Output_file: <Result_dir>/&f.bin
 
 Text_file: no
 """
-    (out_dir / "munich-saver.cfg").write_text(saver_cfg)
+    _write_text(out_dir / "munich-saver.cfg", saver_cfg)
 
     def section_head(title: str, nt: int, fields: Sequence[str]) -> list[str]:
         return [f"[{title}]", "", f"Date_min: {date_min}", f"Delta_t: {delta_t!r}",
                 f"Nt: {nt}", f"Fields: {' '.join(fields)}", "Filename: 0.0"]
 
+    n_rows = n_hours + _LOOK_AHEAD_ROWS
+
+    def padded(arr: np.ndarray) -> np.ndarray:
+        return np.concatenate([arr, np.repeat(arr[-1:], _LOOK_AHEAD_ROWS, axis=0)])
+
     def mass_section(title: str, values: np.ndarray, stem: str) -> list[str]:
-        lines = section_head(title, n_hours, species)
+        lines = section_head(title, n_rows, species)
         for s, sp in enumerate(species):
             arr = np.asarray(values[:, :, s], dtype=np.float64) * UG_PER_KG
             if _is_constant(arr):
                 lines.append(f"{sp} {float(arr.flat[0])!r}")
             else:
                 filename = f"{stem}_{sp}.bin"
-                _write_binary(out_dir / filename, arr)
+                _write_binary(out_dir / filename, padded(arr))
                 lines.append(f"{sp} {filename}")
         return lines
 
@@ -853,16 +882,14 @@ Text_file: no
         elif name not in present:
             entries.append((name, np.array([default])))
 
-    n_meteo_rows = n_hours + 2
-    meteo_lines = [""] + section_head("meteo", n_meteo_rows, [name for name, _ in entries])
+    meteo_lines = [""] + section_head("meteo", n_rows, [name for name, _ in entries])
     for name, arr in entries:
         if _is_constant(arr):
             meteo_lines.append(f"{name} {float(arr.flat[0])!r}")
         else:
-            pad = np.repeat(arr[-1:], n_meteo_rows - n_hours, axis=0)
-            _write_binary(out_dir / f"meteo_{name}.bin", np.concatenate([arr, pad]))
+            _write_binary(out_dir / f"meteo_{name}.bin", padded(arr))
             meteo_lines.append(f"{name} meteo_{name}.bin")
     data_lines += meteo_lines
-    (out_dir / "munich-data.cfg").write_text("\n".join(data_lines) + "\n")
+    _write_text(out_dir / "munich-data.cfg", "\n".join(data_lines) + "\n")
 
     return out_dir

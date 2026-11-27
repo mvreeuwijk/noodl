@@ -10,7 +10,7 @@ built with `build_model`, initialised by name and run the same way; see the
 | Application | Matches | Reads | Maturity | Start |
 |---|---|---|---|---|
 | Building airflow and heat | CONTAM (ContamX), Modelica Buildings Library | CONTAM `.prj`, `.wth`, `.ctm`; Modelica JSON + CSV | Verified on a stated subset | [Building](building/index.md) |
-| Street air quality | MUNICH, SIRANE | MUNICH and SIRANE case files (`read_case`); NetCDF output | Partial | [Street air quality](street/index.md) |
+| Street air quality | MUNICH, SIRANE | MUNICH and SIRANE case files (`read_case`); NetCDF output | Verified on a stated subset | [Street air quality](street/index.md) |
 | Sewers | SWMM 5.2 | SWMM `.inp` | Verified on a stated subset | [Sewers](sewer/index.md) |
 | Water distribution | EPANET 2.2 | EPANET `.inp` | Verified on a stated subset | [Water distribution](water/index.md) |
 | Water resources | WSIMOD 0.8.1 | WSIMOD `config.yml` and CSV forcing | Verified on a stated subset | [Water resources](water-resources/index.md), [limitations](water-resources/limitations.md) |

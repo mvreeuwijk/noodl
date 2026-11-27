@@ -151,7 +151,8 @@ the [SIRANE worked example](#sirane-worked-example).
 
 For `source="munich"`, that is `preset="munich"` (whose Monin-Obukhov turbulence,
 turbulence-intensity direction spread and hard-coded `u_d_min=0.001` every MUNICH case
-implies) plus `munich.cfg`'s `[street]` section, translated:
+implies), `kappa=0.41` (MUNICH's one von Kármán constant, whichever closures are chosen),
+plus `munich.cfg`'s `[street]` section, translated:
 
 | `[street]` key | Value | `build_model` keyword |
 |---|---|---|
@@ -161,10 +162,13 @@ implies) plus `munich.cfg`'s `[street]` section, translated:
 | `With_horizontal_fluctuation` | `yes` / `no` | `direction_averaging="rectangle_rule"` / `"none"` |
 | `Zref` | m | `z_ref` |
 | `Minimum_Street_Wind_Speed` | m/s | `canyon_wind_min` |
+| `z0_surface` | m | `z0_s` |
 
-A missing `Minimum_Street_Wind_Speed` defaults to MUNICH's own `0.1` m/s
-(`canyon_wind_min=0.1`); `Zref`'s absence still raises, and a value with no counterpart (e.g.
-the `Wang` transfer) raises `NotImplementedError`.
+A missing `Minimum_Street_Wind_Speed` or `z0_surface` defaults to MUNICH's own `0.1` m/s or
+`0.01` m; `Zref`'s absence still raises, and a value with no counterpart (e.g. the `Wang`
+transfer) raises `NotImplementedError`. MUNICH has one in-canyon roughness for walls and
+ground, so `read_case` also gives every street `z0_b = z0_surface`: the Bessel canyon wind is
+written on it.
 
 For `source="sirane"`, the master file does not switch SIRANE's closures, so `model_options`
 returns `preset="sirane"`: the Bessel canyon wind, `u_d = sigma_w / (sqrt(2) pi)`, the

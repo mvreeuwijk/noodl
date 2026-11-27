@@ -7,7 +7,7 @@ Evidence for the [street air quality application](../../applications/street/inde
 Two reference tools are compared, and they stand differently. Every comparison below is a test that passes at the tolerance stated (the longest coupled runs under the `slow` marker).
 
 - **SIRANE v2.1 (rev 128).** Roof exchange velocity, in-canyon wind, the above-roof plume kernel and the NO-NO₂-O₃ chemistry (`preset="sirane"`) are reproduced against its archived output, to its printed precision or to the stated regression guards. The street-concentration comparison is not meaningful, because the archived run's emission field is not the deck's (see below).
-- **MUNICH.** Thirteen formula pairs from its source are exact to the precision it publishes, and the scale-invariant checks of its idealised 12-street case hold. The relative concentration pattern of that case is not reproduced (worst of 19 ratios off by 51 %, against a 5 % target); this is the one open discrepancy against MUNICH. MUNICH's chemistry (the JPL rate, no floor) is verified through its rate constant only.
+- **MUNICH v2.2.** Its own runs of the 12-street network, written by `write_case` and recorded with their output, are reproduced street by street and hour by hour to the float32 precision of that output, under three closure sets that between them cover every MUNICH option `model_options` translates. Thirteen formula pairs from its source are exact to the precision it publishes. The published figure of the idealised 12-street case (Kim et al. 2022, Fig. 1), whose inputs were never published, is compared only in scale-invariant terms; its relative pattern is not reproduced (worst of 19 ratios off by 51 %, against a 5 % target). MUNICH's chemistry (the JPL rate, no floor) is verified through its rate constant only.
 
 The unsteady puffs are verified against the steady kernel they must reduce to, not against SIRANERISK.
 
@@ -29,9 +29,36 @@ one. The same applies to the shape parameter: MUNICH quantises the root to a 0.0
 where `bessel_shape_parameter` solves it continuously (0.6198293…). The quantisation is small
 in $u_M$ (4e-4) but not in $u_H$, whose canyon-mean factor is sensitive to $c$ (up to about
 2 %), so `preset="munich"` takes MUNICH's grid search (`shape_constant="grid_search"`), and
-`preset="sirane"` keeps the exact root. With the grid search and a steady solve per hour (MUNICH's
-`With_stationary_hypothesis: yes`), noodl physics matches MUNICH's output on the idealised
-12-street case to 4.3e-8 relative at most, the float32 precision of that output.
+`preset="sirane"` keeps the exact root.
+
+## MUNICH runs
+
+MUNICH v2.2 (`With_stationary_hypothesis: yes`, chemistry and deposition off) run on
+`twelve_street_grid(L=100, W=20, H=20)`, inputs written by `write_case(format="munich")`
+and kept with MUNICH's output in `tests/data/street/munich_twelve_street/`
+(`tests/verification/test_munich_run.py`). Eight hours: winds from 0°, 45°, 90°, 135°, 200°,
+225°, 270° and 315° at 2-6 m/s, neutral, stable and unstable (L from -50 m to 400 m), three
+emitting streets (one changing hour by hour) and a uniform background. noodl physics reads
+the case back (`read_case`, `model_options()`) and solves each hour to steady state. Measured
+error: max |noodl - MUNICH| / MUNICH over 12 streets and 8 hours.
+
+| Closure set (`[street]`) | Tolerance | Measured |
+|---|---|---|
+| Exponential canyon wind, Schulte exchange, Bessel roof wind, horizontal fluctuation (`write_case`'s defaults) | 2e-6 | 7.0e-7 |
+| Bessel canyon wind, SIRANE exchange, Macdonald roof wind, no fluctuation | 2e-6 | 5.4e-8 |
+| Bessel canyon and roof wind, SIRANE exchange | 2e-6 | 5.3e-8 |
+
+MUNICH saves float32 (about 6e-8 relative) and ends its steady sweep once no street changes
+by more than 0.01 µg/m³ (`StreetNetworkTransport.cxx:2515`); the 7.0e-7 is one hour (wind
+from due north) where that stopping rule leaves the most. The inputs are also checked to be
+byte for byte what `write_case` writes, so the writer is under test as well.
+
+Three things the runs pinned. MUNICH's Bessel canyon wind is written on its single surface
+roughness `z0_surface` (0.01 m by default), not on a building roughness, so `read_case` gives
+every street that `z0_b`. On the Macdonald roof wind, MUNICH's Bessel street wind starts from
+`u_H / f_mean(c)` rather than from u*. And MUNICH uses κ = 0.41 under every closure, so
+`model_options()` sets it rather than inferring it from the closures chosen. Each moved a
+closure set from 20-37 % off to the precision above.
 
 ## MUNICH idealised 12-street case
 Kim et al. (2022) Fig. 1 gives concentrations on an idealised 12-street network, but not the

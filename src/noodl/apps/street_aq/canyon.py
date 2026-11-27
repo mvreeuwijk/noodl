@@ -524,13 +524,19 @@ def roof_wind(
     u_m = u_star * torch.sqrt(
         math.pi / (math.sqrt(2.0) * kappa**2 * c) * _bessel_roof_factor(c)
     )
+    return u_m * _bessel_canyon_mean_factor(c, n_levels)
+
+
+def _bessel_canyon_mean_factor(c: Tensor, n_levels: int = _N_ROOF_LEVELS) -> Tensor:
+    """`u_H / u_M`: the `n_levels`-level mean over `y = k/N` of
+    `[J1(c) Y0(c y) - J0(c y) Y1(c)] / [J1(c) Y0(c) - J0(c) Y1(c)]`
+    (ATM `ComputeUmtoUHFactor`, `MeteorologyStreet.cxx:183-201`)."""
     y = (torch.arange(1, n_levels + 1, dtype=torch.float64) / n_levels)
     cy = c.unsqueeze(-1) * y
     c_e = c.unsqueeze(-1)
     numerator = bessel_j1(c_e) * bessel_y0(cy) - bessel_j0(cy) * bessel_y1(c_e)
     denominator = bessel_j1(c) * bessel_y0(c) - bessel_j0(c) * bessel_y1(c)
-    f_mean = (numerator / denominator.unsqueeze(-1)).mean(-1)
-    return u_m * f_mean
+    return (numerator / denominator.unsqueeze(-1)).mean(-1)
 
 
 def canyon_velocity(
@@ -568,6 +574,12 @@ def canyon_velocity(
             [ 2 sqrt2/c (1 - beta)(1 - c^2/3 + c^4/45)
               + beta (2 alpha - 3)/alpha + (W/di - 2)(alpha - 1)/alpha ]
 
+    Given `u_h` instead of `u_star` (a roof wind from another closure, e.g.
+    `roof_wind="canopy_log_law"`), the profile's `u_h` above is replaced by
+    `u_H / f_mean(c)`, with `f_mean` the canyon-mean factor of `roof_wind`'s Bessel closure:
+    MUNICH's `Sirane` street wind on its `Macdonald` roof wind
+    (`StreetNetworkTransport.cxx:3417-3421`).
+
     The Bessel profile REFUSES `z0_b >= di`, which `bessel_shape_parameter`'s own
     `z0_b/di < 1.6`
     bound lets through: `alpha` is zero at ratio 1 and negative above it, and the answer
@@ -596,12 +608,11 @@ def canyon_velocity(
     H = torch.as_tensor(H, dtype=torch.float64)
     phi = torch.as_tensor(phi, dtype=torch.float64)
     if form == "bessel_profile":
-        if u_star is None:
+        if (u_star is None) == (u_h is None):
             raise ValueError(
-                "canyon_velocity: canyon_wind='bessel_profile' needs u_star (the Bessel profile is "
-                "written on the friction velocity, not on the roof wind)"
+                "canyon_velocity: canyon_wind='bessel_profile' needs exactly one of u_star (the "
+                "profile's own roof wind) and u_h (a roof wind from another closure)"
             )
-        u_star = torch.as_tensor(u_star, dtype=torch.float64)
         z0_b = torch.as_tensor(z0_b, dtype=torch.float64)
         di = torch.minimum(W / 2.0, H)
         # `bessel_shape_parameter` refuses z0_b/di >= 1.6, which is NOT enough here: `alpha` is
@@ -621,9 +632,12 @@ def canyon_velocity(
         c = shape_parameter(z0_b / di, shape_constant)
         alpha = torch.log(di / z0_b)
         beta = torch.exp(c / math.sqrt(2.0) * (1.0 - H / di))
-        u_roof = u_star * torch.sqrt(
-            math.pi / (math.sqrt(2.0) * kappa**2 * c) * _bessel_roof_factor(c)
-        )
+        if u_h is not None:
+            u_roof = torch.as_tensor(u_h, dtype=torch.float64) / _bessel_canyon_mean_factor(c)
+        else:
+            u_roof = torch.as_tensor(u_star, dtype=torch.float64) * torch.sqrt(
+                math.pi / (math.sqrt(2.0) * kappa**2 * c) * _bessel_roof_factor(c)
+            )
         shape = (
             2.0 * math.sqrt(2.0) / c * (1.0 - beta) * (1.0 - c**2 / 3.0 + c**4 / 45.0)
             + beta * (2.0 * alpha - 3.0) / alpha

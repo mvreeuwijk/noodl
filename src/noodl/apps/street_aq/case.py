@@ -20,6 +20,7 @@ import torch
 
 from noodl import layout
 from noodl.apps.street_aq import _munich_files, _sirane_files
+from noodl.apps.street_aq.closures import KAPPA_041
 from noodl.apps.street_aq.network import StreetNetwork, street_index
 from noodl.apps.street_aq.routing import StreetFlows
 from noodl.couple import COMPASS_DEG_TO_MATH_RAD, apply_conversion
@@ -74,14 +75,16 @@ _SIRANE_KEYWORD_MAP = {"SIGMA_W_MIN": "sigma_w_min", "SIGMA_V_MIN": "sigma_v_min
 """SIRANE master-file keyword -> the `build_model` keyword it sets: the turbulence floors
 and the canopy height at which the exchange's `sigma_w` is evaluated."""
 
-_MUNICH_FLOAT_MAP = {"Zref": "z_ref", "Minimum_Street_Wind_Speed": "canyon_wind_min"}
+_MUNICH_FLOAT_MAP = {"Zref": "z_ref", "Minimum_Street_Wind_Speed": "canyon_wind_min",
+                     "z0_surface": "z0_s"}
 """MUNICH `[street]` key -> the float `build_model` keyword it sets."""
 
-_MUNICH_FLOAT_DEFAULTS = {"Minimum_Street_Wind_Speed": 0.1}
+_MUNICH_FLOAT_DEFAULTS = {"Minimum_Street_Wind_Speed": 0.1,
+                          "z0_surface": _munich_files.MUNICH_Z0_SURFACE_DEFAULT}
 """`_MUNICH_FLOAT_MAP` keys MUNICH itself defaults when `[street]` lacks them, instead of
 `model_options` raising: `Minimum_Street_Wind_Speed` -> `ustreet_min = 0.1`
-(`StreetNetworkTransport.cxx:164-168`). `Zref` has no such default and still raises when
-absent."""
+(`StreetNetworkTransport.cxx:164-168`) and `z0_surface` -> `z0s = 0.01` (`:157-160`).
+`Zref` has no such default and still raises when absent."""
 
 
 def _hours_by(value, n_hours: int, tail: tuple[int, ...], label: str) -> np.ndarray:
@@ -226,11 +229,14 @@ class StreetCase:
         (`Sirane` -> `roof_wind="bessel_canyon_mean"`, `Macdonald` -> `"canopy_log_law"`),
         `With_horizontal_fluctuation` (`yes` -> `direction_averaging="rectangle_rule"`,
         `no` -> `"none"`), `Zref` -> `z_ref`, `Minimum_Street_Wind_Speed` ->
-        `canyon_wind_min`. A value with no noodl counterpart (e.g. the `Wang` transfer)
+        `canyon_wind_min`, `z0_surface` -> `z0_s` (the same roughness `read_case` gives
+        every street as its `z0_b`, so both canyon-wind closures see MUNICH's one
+        roughness). `kappa` is always 0.41, the one constant MUNICH uses whichever closures
+        are chosen. A value with no noodl counterpart (e.g. the `Wang` transfer)
         raises `NotImplementedError` naming the key and value; a missing key raises
-        `ValueError`, except `Minimum_Street_Wind_Speed`, which MUNICH itself defaults to
-        `0.1` when absent (see `_MUNICH_FLOAT_DEFAULTS`) -- an unparsable value still
-        raises.
+        `ValueError`, except `Minimum_Street_Wind_Speed` and `z0_surface`, which MUNICH
+        itself defaults to `0.1` and `0.01` when absent (see `_MUNICH_FLOAT_DEFAULTS`) --
+        an unparsable value still raises.
 
         SIRANE (`source="sirane"`): `preset="sirane"` -- SIRANE's closure set, which its
         master file does not switch: the Bessel canyon wind (Soulhac et al. 2008),
@@ -277,7 +283,7 @@ class StreetCase:
                 )
             return street[key]
 
-        options = {"preset": "munich"}
+        options = {"preset": "munich", "kappa": KAPPA_041}
         for key, (keyword, mapping) in _MUNICH_OPTION_MAP.items():
             raw = value(key)
             if raw.strip().lower() not in mapping:
